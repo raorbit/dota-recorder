@@ -1,0 +1,26 @@
+{
+  "name": "dota-recorder",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Dota 2 Recorder - personal desktop app that auto-records matches, tags moments, and browses VODs.",
+  "license": "MIT",
+  "scripts": {
+    "dev": "concurrently -k -n vite,electron -c cyan,magenta \"npm:dev:renderer\" \"npm:dev:electron\"",
+    "dev:renderer": "npm --prefix app run dev",
+    "dev:electron": "cross-env NODE_ENV=development DOTAREC_DEV=1 electron app/electron/main.ts",
+    "build:app": "npm --prefix app run build",
+    "build:electron": "npm --prefix app run build:electron",
+    "typecheck": "npm --prefix app run typecheck",
+    "build:all": "npm run build:app && npm run build:electron",
+    "dist": "npm run build:all && electron-builder --win nsis --x64"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "cross-env": "^7.0.3",
+    "electron": "^42.4.0",
+    "electron-builder": "^26.15.3",
+    "typescript": "^5.8.3",
+    "vite": "^8.0.0",
+    "@vitejs/plugin-react": "^6.0.2"
+  }
+}

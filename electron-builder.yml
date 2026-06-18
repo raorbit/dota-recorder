@@ -1,0 +1,49 @@
+# electron-builder configuration for the packaged Windows installer.
+#
+# Plan / Step 0-1 foundation (design_handoff_dota2_recorder/README.md - Stack):
+#   - Electron + React UI shell supervises a bundled Spring Boot JVM core.
+#   - In a packaged build the supervisor runs:
+#       <resourcesPath>/jre/bin/javaw.exe -jar <resourcesPath>/core/core.jar
+#     so both the runnable jar and a trimmed JRE image are shipped via extraResources.
+#
+# NOTE: core.jar and jre-image are produced by the SEPARATE core/ Gradle build
+# (bootJar + a jlink/jpackage runtime image task). They are referenced here by their
+# expected output paths; this UI build does not produce them.
+#
+# Code signing is intentionally deferred for the personal/local build: an unsigned
+# installer trips Microsoft Defender SmartScreen ("Unknown publisher") on first run,
+# which is an accepted one-time click-through for personal use. Add `win.certificateFile`
+# / `win.signtoolOptions` later if distribution warrants it.
+appId: dev.dotarec.recorder
+productName: Dota 2 Recorder
+copyright: Copyright © 2026
+
+directories:
+  output: release
+  buildResources: build-resources
+
+# Renderer bundle (Vite) + compiled Electron main/preload output.
+files:
+  - app/dist/**/*
+  - app/electron-dist/**/*
+  - app/package.json
+
+# Shipped alongside the app, addressable at runtime via process.resourcesPath.
+# These come from the core/ Gradle build (see note above).
+extraResources:
+  - from: core/build/libs/core.jar
+    to: core/core.jar
+  - from: core/build/jre-image
+    to: jre
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  artifactName: ${productName}-Setup-${version}.${ext}
