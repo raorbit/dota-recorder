@@ -1,0 +1,91 @@
+/* Filter row. Values traced from the section-07 mockup. Uses shared tokens. */
+
+.fr-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex: 0 0 auto;
+  padding: 12px 18px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border-panel);
+}
+
+/* --- segmented All / Wins / Losses --- */
+.fr-segment {
+  display: flex;
+  border: 1px solid var(--border-row);
+  border-radius: 7px;
+  overflow: hidden;
+}
+
+.fr-seg-btn {
+  padding: 6px 12px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-body);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.fr-seg-btn[data-active='true'] {
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+/* --- search field --- */
+.fr-search {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border-row);
+  border-radius: 7px;
+}
+
+.fr-search:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-tint-strong);
+}
+
+.fr-search-icon {
+  font-size: 13px;
+  line-height: 1;
+  opacity: 0.7;
+}
+
+.fr-search-input {
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 13px;
+  outline: none;
+}
+
+.fr-search-input::placeholder {
+  color: var(--text-faint);
+}
+
+/* search type reset so the native clear/decoration matches the dark theme */
+.fr-search-input::-webkit-search-decoration,
+.fr-search-input::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+/* --- date dropdown (placeholder) --- */
+.fr-date {
+  padding: 6px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border-row);
+  border-radius: 7px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  cursor: default;
+}

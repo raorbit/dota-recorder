@@ -1,0 +1,74 @@
+/* Custom 38px title bar + body. Values traced from the section-07 mockup window
+   chrome (the .dc.html reference). Uses the shared tokens from styles/tokens.css. */
+
+.wf-root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg);
+}
+
+.wf-titlebar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 38px;
+  flex: 0 0 38px;
+  padding: 0 14px;
+  background: var(--panel);
+  border-bottom: 1px solid #20232b;
+  /* Lets the user drag the OS window from the bar in Electron; interactive
+     children opt back out with -webkit-app-region: no-drag. */
+  -webkit-app-region: drag;
+  user-select: none;
+}
+
+/* CSS-diamond logo: a red-gradient rounded square holding a rotated white inner
+   square. Matches the mockup's 18px mark with a 6px inner diamond. */
+.wf-logo {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  background: linear-gradient(150deg, var(--accent), var(--accent-dark));
+}
+
+.wf-logo-inner {
+  width: 6px;
+  height: 6px;
+  background: #fff;
+  transform: rotate(45deg);
+  border-radius: 1px;
+}
+
+.wf-title {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 13px;
+  letter-spacing: 0.05em;
+  color: var(--text);
+}
+
+.wf-spacer {
+  flex: 1;
+}
+
+.wf-controls {
+  display: flex;
+  gap: 16px;
+  color: var(--text-faint);
+  font-size: 15px;
+  -webkit-app-region: no-drag;
+}
+
+.wf-ctl {
+  line-height: 1;
+  cursor: default;
+}
+
+.wf-body {
+  flex: 1;
+  min-height: 0;
+}

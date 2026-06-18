@@ -1,0 +1,218 @@
+/* 230px sidebar. Values traced from the section-07 mockup sidebar markup.
+   Uses shared tokens from styles/tokens.css. */
+
+.sidebar {
+  width: 230px;
+  flex: 0 0 230px;
+  height: 100%;
+  overflow-y: auto;
+  padding: 14px 12px;
+  background: var(--panel);
+  border-right: 1px solid var(--border-panel);
+  display: flex;
+  flex-direction: column;
+}
+
+/* --- status card: green left border + recording pulse --- */
+.sb-status {
+  border-left: 3px solid var(--win);
+  background: var(--surface);
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin-bottom: 22px;
+}
+
+.sb-status[data-state='unknown'] {
+  border-left-color: var(--text-faint);
+}
+
+.sb-status[data-state='idle'] {
+  border-left-color: var(--text-faint);
+}
+
+.sb-status[data-state='recording'] {
+  border-left-color: var(--accent);
+}
+
+.sb-status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sb-status-title {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: #6a7080;
+  letter-spacing: 0.1em;
+}
+
+.sb-recpulse {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: recpulse 1.8s infinite;
+}
+
+.sb-status-text {
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--win);
+}
+
+.sb-status-text[data-state='unknown'],
+.sb-status-text[data-state='idle'] {
+  color: var(--text-muted);
+}
+
+.sb-status-text[data-state='recording'] {
+  color: var(--accent);
+}
+
+/* --- group labels --- */
+.sb-group-label {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  color: var(--text-faint);
+  margin: 0 0 8px 6px;
+}
+
+.sb-group-label-settings {
+  margin-top: 18px;
+}
+
+/* --- primary buckets (Ranked / Unranked) --- */
+.sb-primary {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 14px;
+}
+
+.sb-bucket {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 12px;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-body);
+  cursor: pointer;
+  text-align: left;
+}
+
+.sb-bucket:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.sb-bucket[data-active='true'] {
+  background: var(--accent-tint-strong);
+  border-color: rgba(226, 60, 46, 0.3);
+}
+
+.sb-bucket[data-active='true']:hover {
+  background: var(--accent-tint-strong);
+}
+
+.sb-diamond {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  transform: rotate(45deg);
+  background: var(--text-faint);
+}
+
+.sb-diamond[data-active='true'] {
+  background: var(--accent);
+}
+
+.sb-bucket-label {
+  font-weight: 600;
+  font-size: 14.5px;
+  color: var(--text);
+}
+
+.sb-bucket[data-active='false'] .sb-bucket-label {
+  color: #c4c9d4;
+}
+
+.sb-bucket-spacer {
+  flex: 1;
+}
+
+.sb-badge {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 9px;
+}
+
+.sb-badge[data-kind='accent'] {
+  color: var(--text);
+  background: var(--accent);
+}
+
+.sb-badge[data-kind='plain'] {
+  color: var(--text-muted);
+  background: var(--border-row);
+}
+
+.sb-badge[data-kind='gold'] {
+  color: var(--bg);
+  background: var(--gold);
+}
+
+/* The compact secondary rows share the bucket button styling; the mockup renders
+   their badges the same way, so no extra rules are needed. */
+.sb-secondary {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* --- settings nav --- */
+.sb-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sb-nav {
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-body);
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sb-nav:hover {
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-secondary);
+}
+
+.sb-nav[data-active='true'] {
+  background: var(--accent-tint-strong);
+  color: var(--text);
+}
+
+/* --- version footer --- */
+.sb-version {
+  margin-top: auto;
+  padding-top: 18px;
+  padding-left: 6px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: #444a55;
+}
