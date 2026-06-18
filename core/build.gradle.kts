@@ -57,6 +57,37 @@ tasks.named<Test>("test") {
     useJUnitPlatform()
 }
 
+// Trimmed JRE image bundled with the installer so users need no Java installed.
+// The Electron supervisor launches <resourcesPath>/jre/bin/javaw.exe -jar core.jar.
+//
+// Uses the java.se aggregator module (+ a few jdk.* modules some libs reach for)
+// rather than a hand-picked minimal set: a too-aggressive jlink trim fails at
+// RUNTIME (ClassNotFound) not build time, so v0.1 prioritizes "runs anything"
+// (~60MB, jmod-free) over maximal trimming. Narrow it later via jdeps if needed.
+tasks.register<Exec>("jlinkImage") {
+    group = "distribution"
+    description = "Build a trimmed JRE image at core/build/jre-image for bundling."
+    dependsOn("bootJar")
+    val imageDir = layout.buildDirectory.dir("jre-image")
+    val launcher = javaToolchains.launcherFor {
+        languageVersion.set(JavaLanguageVersion.of(21))
+    }
+    outputs.dir(imageDir)
+    doFirst {
+        // jlink refuses to write into an existing directory.
+        delete(imageDir)
+        val jlink = launcher.get().metadata.installationPath
+            .file("bin/jlink.exe").asFile.absolutePath
+        commandLine(
+            jlink,
+            "--add-modules",
+            "java.se,jdk.unsupported,jdk.crypto.ec,jdk.crypto.cryptoki,jdk.zipfs,jdk.management",
+            "--strip-debug", "--no-header-files", "--no-man-pages", "--compress", "2",
+            "--output", imageDir.get().asFile.absolutePath,
+        )
+    }
+}
+
 // TODO(plan Step 3 - JOOQ codegen): once the schema is stable, generate typed
 //   records from the migrated SQLite database. JOOQ generates FROM a schema, it
 //   is not a migration tool, so the hand-rolled user_version migration runner
