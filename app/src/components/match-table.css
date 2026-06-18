@@ -1,0 +1,160 @@
+/* 7-column match table. Grid + values traced from the section-07 mockup.
+   Uses shared tokens from styles/tokens.css. */
+
+.mt-root {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+/* Shared 7-col grid for header + rows. */
+.mt-header,
+.mt-row {
+  display: grid;
+  grid-template-columns: 1.6fr 0.8fr 0.9fr 0.8fr 0.9fr 0.8fr 1fr;
+}
+
+.mt-header {
+  padding: 10px 18px;
+  background: var(--surface-alt);
+  border-bottom: 1px solid var(--border-panel);
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: 0.05em;
+  color: #6a7080;
+  flex: 0 0 auto;
+}
+
+.mt-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.mt-row {
+  align-items: center;
+  width: 100%;
+  padding: 13px 18px;
+  border: none;
+  border-bottom: 1px solid var(--surface);
+  border-left: 2px solid transparent;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-body);
+  text-align: left;
+  cursor: pointer;
+}
+
+/* Zebra: even rows pick up a faint alt fill, like the mockup's 3rd row. */
+.mt-row:nth-child(even) {
+  background: #0d0e12;
+}
+
+.mt-row:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.mt-row[data-selected='true'] {
+  background: var(--accent-tint);
+  border-left-color: var(--accent);
+}
+
+.mt-row[data-selected='true']:hover {
+  background: var(--accent-tint);
+}
+
+.mt-cell {
+  min-width: 0;
+}
+
+/* --- hero cell: gradient chip + name --- */
+.mt-hero {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.mt-hero-chip {
+  width: 30px;
+  height: 20px;
+  flex: 0 0 30px;
+  border-radius: 4px;
+  background: linear-gradient(135deg, #2a3142, #1a1e29);
+}
+
+.mt-hero-name {
+  font-weight: 600;
+  font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* --- result --- */
+.mt-result {
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.mt-result[data-result='win'] {
+  color: var(--win);
+}
+
+.mt-result[data-result='loss'] {
+  color: var(--loss);
+}
+
+.mt-result[data-result='none'] {
+  color: var(--text-faint);
+}
+
+/* --- numeric cells --- */
+.mt-mono {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: #c4c9d4;
+}
+
+.mt-muted {
+  color: var(--text-faint);
+}
+
+/* --- mode / date --- */
+.mt-mode,
+.mt-date {
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+/* --- loading / empty / error states --- */
+.mt-state {
+  padding: 28px 18px;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.mt-state-error {
+  color: var(--loss);
+}
+
+.mt-empty {
+  padding: 48px 24px;
+  text-align: center;
+}
+
+.mt-empty-title {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 18px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+
+.mt-empty-sub {
+  max-width: 440px;
+  margin: 0 auto;
+  color: var(--text-muted);
+  font-size: 13.5px;
+}
