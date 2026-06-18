@@ -28,10 +28,16 @@ dependencies {
     // and is intentionally NOT wired for the v0.1 foundation.
     implementation("org.xerial:sqlite-jdbc:3.46.1.0")
 
-    // TODO(plan Step 4 - OBS control): add obs-websocket-java once the
-    //   recording pipeline lands, e.g.
-    //   implementation("io.obs-websocket.community:client:<version>")
-    //   Reference only - do NOT add until the OBS step is implemented.
+    // OBS control over obs-websocket protocol v5 (OBS 28+). This is the
+    // community fork that targets v5; the old net.twasi client is v4-only and
+    // would NOT authenticate against a stock modern OBS. Pulls in Jetty's
+    // websocket-client + Gson transitively, isolated from Spring's Jackson.
+    // Coordinate confirmed to resolve from Maven Central.
+    implementation("io.obs-websocket.community:client:2.0.0")
+
+    // Test stack: JUnit 5 + AssertJ (the `test` task already declares
+    // useJUnitPlatform()). Brings the JUnit Jupiter engine the runner needs.
+    testImplementation("org.springframework.boot:spring-boot-starter-test")
 }
 
 tasks.named<org.springframework.boot.gradle.tasks.bundling.BootJar>("bootJar") {
