@@ -31,12 +31,20 @@ files:
   - package.json
 
 # Shipped alongside the app, addressable at runtime via process.resourcesPath.
-# These come from the core/ Gradle build (see note above).
+# These come from the core/ Gradle build (see note above). NOTE: extraResources
+# `from` is resolved relative to the PROJECT ROOT (dota-recorder/), NOT the appDir
+# — verified empirically: a ../core prefix resolved one level too high. So the
+# core/ outputs at the repo root are referenced WITHOUT any prefix.
 extraResources:
   - from: core/build/libs/core.jar
     to: core/core.jar
   - from: core/build/jre-image
     to: jre
+
+# koffi (optional native FFI for the Job Object) must stay outside the asar so its
+# .node binary is loadable; harmless when koffi isn't installed (nothing matches).
+asarUnpack:
+  - "**/node_modules/koffi/**"
 
 win:
   target:
