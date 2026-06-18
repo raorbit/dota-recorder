@@ -46,6 +46,8 @@ public class SettingsController {
         updated.encoder = patch.encoder() != null ? patch.encoder() : current.encoder;
         updated.retentionCapGb =
                 patch.retentionCapGb() != null ? patch.retentionCapGb() : current.retentionCapGb;
+        updated.obsHost = patch.obsHost() != null ? patch.obsHost() : current.obsHost;
+        updated.obsPort = patch.obsPort() != null ? patch.obsPort() : current.obsPort;
         // Omitting obsPassword preserves the stored secret; sending it (even "") sets it.
         updated.obsPassword =
                 patch.obsPassword() != null ? patch.obsPassword() : current.obsPassword;
@@ -63,23 +65,36 @@ public class SettingsController {
             String resolution,
             String encoder,
             int retentionCapGb,
-            boolean obsPasswordSet,
-            String videoDir) {
+            String videoDir,
+            String obsHost,
+            int obsPort,
+            boolean obsPasswordSet) {
 
         static SettingsView of(Settings s) {
             boolean passwordSet = s.obsPassword != null && !s.obsPassword.isBlank();
-            return new SettingsView(s.resolution, s.encoder, s.retentionCapGb, passwordSet, s.videoDir);
+            return new SettingsView(
+                    s.resolution,
+                    s.encoder,
+                    s.retentionCapGb,
+                    s.videoDir,
+                    s.obsHost,
+                    s.obsPort,
+                    passwordSet);
         }
     }
 
     /**
      * Partial update body. Every field is nullable; null means "leave unchanged". Wrapper types
-     * (not {@code int}) so an omitted {@code retentionCapGb} is distinguishable from an explicit 0.
+     * (not {@code int}) so an omitted {@code retentionCapGb}/{@code obsPort} is distinguishable
+     * from an explicit 0. {@code obsPassword} is write-only: the UI sends it to set the secret and
+     * omits it to keep the existing one (it is never echoed back by {@link SettingsView}).
      */
     public record SettingsPatch(
             String resolution,
             String encoder,
             Integer retentionCapGb,
-            String obsPassword,
-            String videoDir) {}
+            String videoDir,
+            String obsHost,
+            Integer obsPort,
+            String obsPassword) {}
 }
