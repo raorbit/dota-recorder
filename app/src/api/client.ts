@@ -127,6 +127,22 @@ async function putJson<TBody, TResult>(path: string, body: TBody): Promise<TResu
   return (await res.json()) as TResult;
 }
 
+async function patchJson<TBody, TResult>(path: string, body: TBody): Promise<TResult> {
+  const res = await fetch(`${bridgeBase()}${path}`, {
+    method: 'PATCH',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(5_000),
+  });
+  if (!res.ok) {
+    throw new Error(`PATCH ${path} failed: ${res.status} ${res.statusText}`);
+  }
+  return (await res.json()) as TResult;
+}
+
 export function fetchHealth(): Promise<Health> {
   return getJson<Health>('/health');
 }
@@ -150,6 +166,101 @@ export function updateSettings(patch: SettingsPatch): Promise<Settings> {
 
 export function fetchMatches(): Promise<MatchSummary[]> {
   return getJson<MatchSummary[]>('/matches');
+}
+
+// --- match detail / markers / pauses / buckets (data-layer endpoints) -------
+
+// Full row as the core's dev.dotarec.data.MatchSummary record serializes it (every
+// matches column). Distinct from the list-card `MatchSummary` above, which is the
+// trimmed shape an earlier step sketched for the browse grid. Nullable columns are
+// `| null` to mirror SQLite NULLs. `videoPath` is null once retention prunes the row.
+export interface MatchDetail {
+  readonly id: number;
+  readonly dotaMatchId: number | null;
+  readonly recordKind: string;
+  readonly enrichmentState: string;
+  readonly hero: string | null;
+  readonly kills: number | null;
+  readonly deaths: number | null;
+  readonly assists: number | null;
+  readonly gpm: number | null;
+  readonly xpm: number | null;
+  readonly netWorth: number | null;
+  readonly lastHits: number | null;
+  readonly result: string | null;
+  readonly lobbyType: number | null;
+  readonly gameMode: number | null;
+  readonly rankTier: number | null;
+  readonly mmrDelta: number | null;
+  readonly durationS: number | null;
+  readonly playedAt: number | null;
+  readonly videoPath: string | null;
+  readonly thumbPath: string | null;
+  readonly fileSizeBytes: number | null;
+  readonly starred: boolean;
+  readonly createdAt: number;
+}
+
+// A timeline annotation pinned to a position in the recorded video. `videoOffsetS`
+// is seconds from the start of the .mp4 (what the player seeks to); `gameClock` is
+// the in-game clock (nullable); `source` is 'gsi' (live) or 'replay' (enriched).
+export interface Marker {
+  readonly id: number;
+  readonly matchId: number;
+  readonly type: string;
+  readonly videoOffsetS: number;
+  readonly gameClock: number | null;
+  readonly label: string | null;
+  readonly source: string;
+}
+
+// A span where the game was paused. Both ends are wall-clock epoch millis;
+// `endWall` is null while a pause is still open.
+export interface PauseSpan {
+  readonly id: number;
+  readonly matchId: number;
+  readonly startWall: number;
+  readonly endWall: number | null;
+}
+
+// GET /matches/{id}/video — absolute path + a file:// URL. 404s (throws) when the
+// row is unknown or its video was pruned by retention.
+export interface VideoLocation {
+  readonly matchId: number;
+  readonly path: string;
+  readonly url: string;
+}
+
+// GET /buckets/counts — one count per library bucket. Always all seven keys.
+export interface BucketCounts {
+  readonly ranked: number;
+  readonly unranked: number;
+  readonly turbo: number;
+  readonly abilityDraft: number;
+  readonly manual: number;
+  readonly clips: number;
+  readonly unsorted: number;
+}
+
+export function fetchMatch(id: number): Promise<MatchDetail> {
+  return getJson<MatchDetail>(`/matches/${id}`);
+}
+
+export function fetchMarkers(id: number): Promise<Marker[]> {
+  return getJson<Marker[]>(`/matches/${id}/markers`);
+}
+
+export function fetchPauses(id: number): Promise<PauseSpan[]> {
+  return getJson<PauseSpan[]>(`/matches/${id}/pauses`);
+}
+
+export function fetchBucketCounts(): Promise<BucketCounts> {
+  return getJson<BucketCounts>('/buckets/counts');
+}
+
+// Toggles the star on a match (PATCH /matches/{id}) and returns the updated row.
+export function setStarred(id: number, starred: boolean): Promise<MatchDetail> {
+  return patchJson<{ starred: boolean }, MatchDetail>(`/matches/${id}`, { starred });
 }
 
 export type StatusListener = (status: Status) => void;
