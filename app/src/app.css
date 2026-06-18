@@ -1,0 +1,20 @@
+/* App-shell layout: the two-column body inside the WindowFrame. The 230px sidebar
+   column is owned by Sidebar's own width; here we just lay out the grid and let
+   Main fill the rest. Uses shared tokens from styles/tokens.css. */
+
+.app-grid {
+  display: grid;
+  grid-template-columns: 230px 1fr;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg);
+}
+
+.app-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}

@@ -26,6 +26,8 @@
   --text-muted: #9aa0ad;
   --text-faint: #5a606c;
 
+  --code-literal: #e8a99f;
+
   /* --- Radii --- */
   --radius-card: 12px;
   --radius-panel: 8px;
@@ -191,5 +193,18 @@ body {
   }
   50% {
     opacity: 0.35;
+  }
+}
+
+/* Recording pulse for the sidebar status dot (matches the mockup's recpulse). */
+@keyframes recpulse {
+  0%,
+  100% {
+    opacity: 1;
+    box-shadow: 0 0 0 0 rgba(226, 60, 46, 0.6);
+  }
+  50% {
+    opacity: 0.55;
+    box-shadow: 0 0 0 6px rgba(226, 60, 46, 0);
   }
 }
