@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "concurrently -k -n vite,electron -c cyan,magenta \"npm:dev:renderer\" \"npm:dev:electron\"",
     "dev:renderer": "npm --prefix app run dev",
-    "dev:electron": "cross-env NODE_ENV=development DOTAREC_DEV=1 electron app/electron/main.ts",
+    "dev:electron": "npm --prefix app run build:electron && cross-env NODE_ENV=development DOTAREC_DEV=1 electron app",
     "build:app": "npm --prefix app run build",
     "build:electron": "npm --prefix app run build:electron",
     "typecheck": "npm --prefix app run typecheck",
