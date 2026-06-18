@@ -1,0 +1,195 @@
+:root {
+  /* --- Color tokens (design_handoff_dota2_recorder/README.md - Design Tokens) --- */
+  --bg: #0e0f12;
+  --panel: #101115;
+  --surface: #15171c;
+  --surface-alt: #0c0d10;
+  --surface-header: #1c1f26;
+
+  --border: #21242c;
+  --border-strong: #2a2e38;
+  --border-row: #23262f;
+  --border-panel: #1b1e25;
+
+  --accent: #e23c2e;
+  --accent-dark: #a31f17;
+  --accent-tint: rgba(226, 60, 46, 0.06);
+  --accent-tint-strong: rgba(226, 60, 46, 0.14);
+
+  --gold: #d9a441;
+  --win: #5bbf6a;
+  --loss: #e07a6f;
+  --marker-blue: #7aa2e3;
+
+  --text: #e6e8ee;
+  --text-secondary: #b3b8c4;
+  --text-muted: #9aa0ad;
+  --text-faint: #5a606c;
+
+  /* --- Radii --- */
+  --radius-card: 12px;
+  --radius-panel: 8px;
+  --radius-chip: 7px;
+
+  /* --- Type stacks. Rajdhani / Barlow / JetBrains Mono are vendored locally in
+     a later step; sane system fallbacks keep the skeleton readable until then. --- */
+  --font-display: 'Rajdhani', 'Segoe UI', system-ui, sans-serif;
+  --font-body: 'Barlow', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Cascadia Mono', Consolas, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.app-titlebar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 38px;
+  padding: 0 14px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border-panel);
+}
+
+.brand-diamond {
+  width: 12px;
+  height: 12px;
+  transform: rotate(45deg);
+  background: linear-gradient(135deg, var(--accent), var(--accent-dark));
+  border-radius: 2px;
+}
+
+.brand-name {
+  font-family: var(--font-display);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.brand-version {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-faint);
+}
+
+.app-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 28px;
+}
+
+.status-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  align-self: flex-start;
+  min-width: 240px;
+  padding: 16px 18px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--text-faint);
+  border-radius: var(--radius-panel);
+}
+
+.status-card[data-state='connected'] {
+  border-left-color: var(--win);
+}
+
+.status-card[data-state='error'] {
+  border-left-color: var(--loss);
+}
+
+.status-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+
+.status-dot[data-state='connecting'] {
+  background: var(--gold);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+.status-dot[data-state='connected'] {
+  background: var(--win);
+}
+
+.status-dot[data-state='error'] {
+  background: var(--loss);
+}
+
+.status-label {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.status-value {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 16px;
+  color: var(--text);
+}
+
+.status-meta {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 16px;
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.status-meta dt {
+  color: var(--text-faint);
+}
+
+.status-meta dd {
+  margin: 0;
+  color: var(--text-secondary);
+}
+
+.placeholder-note {
+  max-width: 520px;
+  color: var(--text-muted);
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
