@@ -21,12 +21,49 @@ export interface Health {
   readonly schemaVersion: number;
 }
 
-// Live status pushed over WebSocket (shape firmed up in a later step).
+// Wire shape of a `status` frame's payload. Mirrors dev.dotarec.bridge.StatusSnapshot
+// on the core; keep the two in sync.
+export interface StatusSnapshot {
+  readonly gsi: {
+    readonly connected: boolean;
+    readonly lastFrameAgoMs: number | null;
+  };
+  readonly obs: {
+    readonly connected: boolean;
+    readonly sceneActive: boolean;
+    readonly recording: boolean;
+  };
+  readonly fsm: {
+    readonly state: string;
+    readonly activeMatchId: number | null;
+  };
+}
+
+// Flattened live status delivered to onStatus() listeners. Derived from a
+// StatusSnapshot; the raw snapshot is kept under `snapshot` for fuller views.
 export interface Status {
   readonly fsmState: string;
   readonly matchId: number | null;
   readonly recording: boolean;
   readonly gsiConnected: boolean;
+  readonly snapshot: StatusSnapshot;
+}
+
+// Every /ws frame is a typed envelope: { type, payload }. The renderer routes by
+// `type` and ignores unknown types so new server event kinds don't break old clients.
+interface WsEnvelope {
+  readonly type: string;
+  readonly payload: unknown;
+}
+
+function toStatus(snapshot: StatusSnapshot): Status {
+  return {
+    fsmState: snapshot.fsm.state,
+    matchId: snapshot.fsm.activeMatchId,
+    recording: snapshot.obs.recording,
+    gsiConnected: snapshot.gsi.connected,
+    snapshot,
+  };
 }
 
 // Mirrors the matches table; populated in a later step.
@@ -107,11 +144,17 @@ export class StatusSocket {
     };
 
     ws.onmessage = (event: MessageEvent<string>) => {
+      let envelope: WsEnvelope;
       try {
-        const status = JSON.parse(event.data) as Status;
-        for (const listener of this.statusListeners) listener(status);
+        envelope = JSON.parse(event.data) as WsEnvelope;
       } catch {
-        /* ignore malformed frames during the skeleton phase. */
+        return; // ignore malformed (non-JSON) frames
+      }
+      // Route by type; unknown types are intentionally ignored so the client
+      // tolerates server event kinds added in later steps.
+      if (envelope?.type === 'status') {
+        const status = toStatus(envelope.payload as StatusSnapshot);
+        for (const listener of this.statusListeners) listener(status);
       }
     };
 
