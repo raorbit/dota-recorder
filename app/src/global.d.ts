@@ -1,5 +1,7 @@
 // Ambient types for the contextBridge surface exposed by app/electron/preload.ts.
-import type { DotaRecBridge } from '../electron/preload';
+// Imports the renderer-safe contract (not the preload module itself) so no
+// electron/node code is pulled into the renderer program.
+import type { DotaRecBridge } from './api/bridge';
 
 declare global {
   interface Window {
