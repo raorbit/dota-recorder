@@ -1,27 +1,343 @@
 package dev.dotarec.obs;
 
+import dev.dotarec.config.SettingsStore;
+import io.obswebsocket.community.client.OBSCommunicator;
+import io.obswebsocket.community.client.OBSRemoteController;
+import io.obswebsocket.community.client.message.event.outputs.RecordStateChangedEvent;
+import io.obswebsocket.community.client.message.response.general.GetVersionResponse;
+import io.obswebsocket.community.client.message.response.inputs.GetInputMuteResponse;
+import io.obswebsocket.community.client.message.response.inputs.GetSpecialInputsResponse;
+import io.obswebsocket.community.client.message.response.record.StopRecordResponse;
+import io.obswebsocket.community.client.message.response.scenes.GetCurrentProgramSceneResponse;
+import java.time.Instant;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 /**
- * Drives OBS Studio recording over the obs-websocket protocol.
+ * Drives OBS Studio recording over obs-websocket v5, behind the {@link ObsRecorder} seam.
  *
- * <p>Plan (Recorder Controller): start/stop OBS, own buffer + output paths. The real impl will
- * connect to obs-websocket at 127.0.0.1:4455 (password-authenticated), call StartRecord /
- * StopRecord, and must wait for the OUTPUT_STARTED event before anchoring t=0 — that confirmed
- * instant becomes {@code RecordingSession.recordConfirmedWallMs}.
+ * <p>This is the capture engine for the recorder: a later FSM PR orchestrates when to start/stop,
+ * but it only ever talks to the {@link ObsRecorder} interface so it can be unit-tested against a
+ * fake. The primitives this class provides:
  *
- * <p>TODO(plan: Stack -> OBS control): add obs-websocket-java (NOT yet a dependency; referenced
- * here only as a comment) and implement connect/startRecord/stopRecord + event confirmation.
+ * <ul>
+ *   <li>{@link #ensureConnected()} -- (re)establish the websocket, perform a v5 handshake, and
+ *       report whether OBS is reachable. Never throws on a down OBS; returns {@code false}.</li>
+ *   <li>{@link #isReady()} -- connected AND a program scene is active AND a desktop-audio input
+ *       exists, so arming a recording against a green GSI card cannot silently capture nothing.</li>
+ *   <li>{@link #startRecording()} / {@link #stopRecording()} -- StartRecord/StopRecord, with the
+ *       saved file path read from the StopRecord response (the STARTED event's path is null in
+ *       v5).</li>
+ *   <li>{@link #recordConfirmedAt()} -- the wall-clock instant OBS confirmed OUTPUT_STARTED, the
+ *       anchor for {@code markers.video_offset_s}.</li>
+ * </ul>
+ *
+ * <p>Resilience: OBS not running at core boot must not crash the core. We never auto-connect at
+ * construction; the FSM/settings layer calls {@link #ensureConnected()} on demand (settings-save,
+ * arm time, schedule), and connection failures degrade to {@code connected=false} plus a typed
+ * {@link ObsException}. Event callbacks run on the library socket thread and only flip the
+ * {@code volatile} {@link ObsHealth} flags via {@link ObsEvents}; they never block.
  */
 @Service
-public class ObsController {
+public class ObsController implements ObsRecorder {
 
+    private static final Logger log = LoggerFactory.getLogger(ObsController.class);
+
+    /** Per-request response timeout for synchronous obs-websocket calls. */
+    private static final long REQUEST_TIMEOUT_MS = 5_000L;
+
+    /** How long to wait for the websocket to become identified/ready after connect(). */
+    private static final int CONNECT_TIMEOUT_SECONDS = 3;
+
+    private final SettingsStore settings;
     private final ObsHealth health;
+    private final ObsEvents events;
 
-    public ObsController(ObsHealth health) {
+    /** The live controller; null when never connected or after a clean disconnect. */
+    private volatile OBSRemoteController controller;
+
+    /** Latch that the {@code onReady} lifecycle callback counts down once identified. */
+    private volatile CountDownLatch readyLatch;
+
+    public ObsController(SettingsStore settings, ObsHealth health, ObsEvents events) {
+        this.settings = settings;
         this.health = health;
+        this.events = events;
     }
 
-    // TODO(plan): connect(127.0.0.1:4455, password); startRecord(); stopRecord();
-    //             confirm OUTPUT_STARTED before anchoring; update ObsHealth.
+    @Override
+    public synchronized void connect() {
+        // A fresh connect attempt: tear down any prior controller and rebuild from current settings
+        // (host/port/password may have changed via PUT /settings since the last attempt).
+        disconnectQuietly();
+
+        SettingsStore.Settings s = settings.get();
+        CountDownLatch latch = new CountDownLatch(1);
+        this.readyLatch = latch;
+
+        OBSRemoteController c =
+                OBSRemoteController.builder()
+                        .host(s.obsHost)
+                        .port(s.obsPort)
+                        // The library default is password-LESS; stock OBS v5 forces auth, so always
+                        // pass the configured password (may be "" if the user truly disabled auth).
+                        .password(s.obsPassword == null ? "" : s.obsPassword)
+                        .connectionTimeout(CONNECT_TIMEOUT_SECONDS)
+                        // Do not auto-connect from the builder; we drive connect() explicitly so a
+                        // down OBS at boot cannot throw during bean wiring.
+                        .autoConnect(false)
+                        .registerEventListener(
+                                RecordStateChangedEvent.class, this::handleRecordStateChanged)
+                        .lifecycle()
+                        .onReady(latch::countDown)
+                        .onDisconnect(this::onConnectionLost)
+                        .onClose(code -> onConnectionLost())
+                        .onControllerError(rt -> onError(rt == null ? null : rt.getThrowable()))
+                        .onCommunicatorError(rt -> onError(rt == null ? null : rt.getThrowable()))
+                        .and()
+                        .build();
+        this.controller = c;
+        events.reset();
+        c.connect();
+    }
+
+    @Override
+    public synchronized boolean ensureConnected() {
+        if (health.isConnected() && controller != null) {
+            return true;
+        }
+        try {
+            connect();
+            CountDownLatch latch = this.readyLatch;
+            boolean ready =
+                    latch != null
+                            && latch.await(CONNECT_TIMEOUT_SECONDS + 2, TimeUnit.SECONDS);
+            if (!ready) {
+                // OBS not running / wrong host:port / wrong password -> degrade, do not crash.
+                log.warn(
+                        "OBS not reachable at {}:{} within timeout; staying disconnected",
+                        settings.get().obsHost,
+                        settings.get().obsPort);
+                disconnectQuietly();
+                health.setConnected(false);
+                return false;
+            }
+            // Identified+ready: now verify we are talking v5, not a v4/old-OBS that merely accepted
+            // the socket. A protocol mismatch otherwise surfaces as a confusing generic failure.
+            verifyProtocol();
+            health.setConnected(true);
+            refreshSceneActive();
+            log.info("OBS connected at {}:{}", settings.get().obsHost, settings.get().obsPort);
+            return true;
+        } catch (ObsException e) {
+            // verifyProtocol() threw: a real connection but the wrong protocol. Surface the clear
+            // message, tear down, stay disconnected.
+            log.warn("OBS handshake rejected: {}", e.getMessage());
+            disconnectQuietly();
+            health.setConnected(false);
+            return false;
+        } catch (Exception e) {
+            log.warn("OBS connect failed: {}", e.toString());
+            disconnectQuietly();
+            health.setConnected(false);
+            return false;
+        }
+    }
+
+    /**
+     * Confirms the connected server speaks obs-websocket v5 by comparing its advertised rpcVersion
+     * against the version this client library implements. A v4 / pre-28 OBS that somehow accepts the
+     * socket would report a different rpcVersion; we want a clear "wrong protocol" message rather
+     * than a cryptic request failure later.
+     */
+    private void verifyProtocol() {
+        OBSRemoteController c = this.controller;
+        if (c == null) {
+            throw new ObsException("OBS controller went away during handshake");
+        }
+        GetVersionResponse version = c.getVersion(REQUEST_TIMEOUT_MS);
+        if (version == null || !version.isSuccessful() || version.getRpcVersion() == null) {
+            throw new ObsException(
+                    "OBS did not answer GetVersion; it may be an old (v4) obs-websocket. "
+                            + "Update OBS to 28+ and enable the v5 WebSocket server.");
+        }
+        int serverRpc = version.getRpcVersion().intValue();
+        int clientRpc = OBSCommunicator.RPC_VERSION;
+        if (serverRpc != clientRpc) {
+            throw new ObsException(
+                    "OBS WebSocket protocol mismatch: OBS reports rpcVersion "
+                            + serverRpc
+                            + " ("
+                            + version.getObsWebSocketVersion()
+                            + ") but this app speaks v"
+                            + clientRpc
+                            + ". Use OBS 28+ with the built-in v5 WebSocket server.");
+        }
+    }
+
+    @Override
+    public boolean isReady() {
+        // Connected + a program scene is active + at least one desktop-audio input exists. These are
+        // read-only existence checks: they prove a scene/source is CONFIGURED, not that pixels are
+        // non-black -- but they catch the common "green GSI, OBS records nothing" failure (no scene,
+        // no audio device) before the FSM arms a recording.
+        if (!health.isConnected()) {
+            return false;
+        }
+        OBSRemoteController c = this.controller;
+        if (c == null) {
+            return false;
+        }
+        try {
+            boolean sceneOk = refreshSceneActive();
+            boolean audioOk = hasDesktopAudio(c);
+            return sceneOk && audioOk;
+        } catch (Exception e) {
+            log.warn("OBS readiness check failed: {}", e.toString());
+            return false;
+        }
+    }
+
+    @Override
+    public String startRecording() {
+        OBSRemoteController c = requireController();
+        var resp = c.startRecord(REQUEST_TIMEOUT_MS);
+        if (resp == null || !resp.isSuccessful()) {
+            throw new ObsException(
+                    "OBS StartRecord failed"
+                            + (resp == null ? " (no response / timeout)" : ""));
+        }
+        // recording=true and recordConfirmedAt are set by the OUTPUT_STARTED event on the socket
+        // thread, not here -- StartRecord returning success only means OBS accepted the request,
+        // not that frames are flowing. The FSM should treat OUTPUT_STARTED as the real anchor.
+        log.info("OBS StartRecord accepted");
+        return events.recordConfirmedAt() == null ? null : events.recordConfirmedAt().toString();
+    }
+
+    @Override
+    public String stopRecording() {
+        OBSRemoteController c = requireController();
+        StopRecordResponse resp = c.stopRecord(REQUEST_TIMEOUT_MS);
+        if (resp == null || !resp.isSuccessful()) {
+            throw new ObsException(
+                    "OBS StopRecord failed" + (resp == null ? " (no response / timeout)" : ""));
+        }
+        // PRIMARY path source: the StopRecord response. The OUTPUT_STARTED event carries a null
+        // outputPath in v5, so this is the authoritative way to learn where OBS wrote the file.
+        String path = resp.getOutputPath();
+        if (path == null || path.isBlank()) {
+            // Fallback to the STOPPED event path if the response somehow omitted it.
+            path = events.lastStoppedOutputPath();
+        }
+        health.setRecording(false);
+        log.info("OBS StopRecord saved file: {}", path);
+        return path;
+    }
+
+    @Override
+    public Instant recordConfirmedAt() {
+        return events.recordConfirmedAt();
+    }
+
+    /**
+     * Refreshes {@link ObsHealth#setSceneActive} from the current program scene and returns whether
+     * one is active. A non-blank current program scene name counts as active.
+     */
+    private boolean refreshSceneActive() {
+        OBSRemoteController c = this.controller;
+        if (c == null) {
+            health.setSceneActive(false);
+            return false;
+        }
+        try {
+            GetCurrentProgramSceneResponse scene = c.getCurrentProgramScene(REQUEST_TIMEOUT_MS);
+            boolean active =
+                    scene != null
+                            && scene.isSuccessful()
+                            && scene.getCurrentProgramSceneName() != null
+                            && !scene.getCurrentProgramSceneName().isBlank();
+            health.setSceneActive(active);
+            return active;
+        } catch (Exception e) {
+            health.setSceneActive(false);
+            return false;
+        }
+    }
+
+    /**
+     * True when OBS exposes at least one desktop-audio special input that is not muted. Catches the
+     * silent-VOD failure mode (recording with no audio device). Mic inputs are ignored here -- this
+     * app cares that game/system audio is captured.
+     */
+    private boolean hasDesktopAudio(OBSRemoteController c) {
+        GetSpecialInputsResponse special = c.getSpecialInputs(REQUEST_TIMEOUT_MS);
+        if (special == null || !special.isSuccessful()) {
+            return false;
+        }
+        return isAudioInputLive(c, special.getDesktop1())
+                || isAudioInputLive(c, special.getDesktop2());
+    }
+
+    private boolean isAudioInputLive(OBSRemoteController c, String inputName) {
+        if (inputName == null || inputName.isBlank()) {
+            return false;
+        }
+        try {
+            GetInputMuteResponse mute = c.getInputMute(inputName, REQUEST_TIMEOUT_MS);
+            // Present and not muted. A muted desktop device would yield a silent VOD.
+            return mute != null
+                    && mute.isSuccessful()
+                    && Boolean.FALSE.equals(mute.getInputMuted());
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** The live controller; only callers that already require an active connection use this. */
+    OBSRemoteController controller() {
+        return controller;
+    }
+
+    private OBSRemoteController requireController() {
+        OBSRemoteController c = this.controller;
+        if (c == null || !health.isConnected()) {
+            throw new ObsException("OBS is not connected");
+        }
+        return c;
+    }
+
+    /** Forwards the event's already-extracted fields to {@link ObsEvents} on the socket thread. */
+    private void handleRecordStateChanged(RecordStateChangedEvent event) {
+        if (event == null) {
+            return;
+        }
+        events.onRecordStateChanged(event.getOutputState(), event.getOutputPath());
+    }
+
+    private void onConnectionLost() {
+        health.setConnected(false);
+        health.setSceneActive(false);
+        health.setRecording(false);
+        log.info("OBS connection lost");
+    }
+
+    private void onError(Throwable t) {
+        log.warn("OBS websocket error: {}", t == null ? "unknown" : t.toString());
+        health.setConnected(false);
+    }
+
+    private void disconnectQuietly() {
+        OBSRemoteController c = this.controller;
+        this.controller = null;
+        if (c != null) {
+            try {
+                c.disconnect();
+            } catch (Exception e) {
+                log.debug("Ignoring error during OBS disconnect: {}", e.toString());
+            }
+        }
+    }
 }
