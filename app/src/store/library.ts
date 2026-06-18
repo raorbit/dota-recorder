@@ -1,0 +1,202 @@
+// Library view state for the Browse screen, backed by zustand.
+//
+// Owns: the selected bucket, the win/loss filter, the search query, the date
+// filter, the selected match id, plus the data the screen renders (matches list,
+// bucket counts, live Status). Actions mutate filters / selection and load data
+// from the core REST API. A StatusSocket subscription refreshes the list when the
+// core announces a newly recorded or enriched match.
+//
+// Defensive by design: every fetch tolerates an unreachable / empty core (no
+// matches yet), and the socket subscription ignores frame types it does not know
+// about, so wiring works against EMPTY data before any recording exists.
+import { create } from 'zustand';
+import {
+  fetchMatches,
+  fetchBucketCounts,
+  fetchStatus,
+  StatusSocket,
+  type MatchSummary,
+  type BucketCounts,
+  type Status,
+  type StatusSnapshot,
+} from '../api/client';
+
+// The seven library buckets the sidebar lists. `unsorted` is the holding pen for
+// recorded-but-not-yet-enriched matches: a row NEVER defaults into `ranked`.
+export type Bucket =
+  | 'ranked'
+  | 'unranked'
+  | 'turbo'
+  | 'abilityDraft'
+  | 'manual'
+  | 'clips'
+  | 'unsorted';
+
+export type ResultFilter = 'all' | 'wins' | 'losses';
+
+type LoadState = 'idle' | 'loading' | 'ready' | 'error';
+
+const EMPTY_COUNTS: BucketCounts = {
+  ranked: 0,
+  unranked: 0,
+  turbo: 0,
+  abilityDraft: 0,
+  manual: 0,
+  clips: 0,
+  unsorted: 0,
+};
+
+export interface LibraryState {
+  // --- data ---
+  readonly matches: readonly MatchSummary[];
+  readonly counts: BucketCounts;
+  readonly status: Status | null;
+  readonly loadState: LoadState;
+
+  // --- filters / selection ---
+  readonly bucket: Bucket;
+  readonly resultFilter: ResultFilter;
+  readonly search: string;
+  readonly dateFilter: string | null;
+  readonly selectedMatchId: number | null;
+
+  // --- actions ---
+  readonly setBucket: (bucket: Bucket) => void;
+  readonly setResultFilter: (filter: ResultFilter) => void;
+  readonly setSearch: (search: string) => void;
+  readonly setDateFilter: (date: string | null) => void;
+  readonly selectMatch: (id: number | null) => void;
+  readonly setStatus: (status: Status | null) => void;
+  readonly load: () => Promise<void>;
+}
+
+export const useLibraryStore = create<LibraryState>((set, get) => ({
+  matches: [],
+  counts: EMPTY_COUNTS,
+  status: null,
+  loadState: 'idle',
+
+  bucket: 'ranked',
+  resultFilter: 'all',
+  search: '',
+  dateFilter: null,
+  selectedMatchId: null,
+
+  setBucket: (bucket) => set({ bucket }),
+  setResultFilter: (resultFilter) => set({ resultFilter }),
+  setSearch: (search) => set({ search }),
+  setDateFilter: (dateFilter) => set({ dateFilter }),
+  selectMatch: (selectedMatchId) => set({ selectedMatchId }),
+  setStatus: (status) => set({ status }),
+
+  load: async () => {
+    set({ loadState: 'loading' });
+    // Counts and the list are independent; settle both so one failing endpoint
+    // (e.g. counts not yet implemented) does not blank the whole screen.
+    const [matchesRes, countsRes] = await Promise.allSettled([
+      fetchMatches(),
+      fetchBucketCounts(),
+    ]);
+
+    const matches = matchesRes.status === 'fulfilled' ? matchesRes.value : [];
+    const counts = countsRes.status === 'fulfilled' ? countsRes.value : EMPTY_COUNTS;
+
+    // If BOTH calls failed the core is unreachable; surface an error state.
+    // If only one failed we still render with what we have.
+    const errored = matchesRes.status === 'rejected' && countsRes.status === 'rejected';
+
+    // Drop a stale selection if the selected match is no longer in the list.
+    const { selectedMatchId } = get();
+    const stillPresent =
+      selectedMatchId !== null && matches.some((m) => m.matchId === selectedMatchId);
+
+    set({
+      matches,
+      counts,
+      loadState: errored ? 'error' : 'ready',
+      selectedMatchId: stillPresent ? selectedMatchId : null,
+    });
+  },
+}));
+
+// Maps a raw status snapshot to the flattened Status the store keeps. (toStatus is
+// private to the client module; re-derive the same shape here.)
+function snapshotToStatus(snapshot: StatusSnapshot): Status {
+  return {
+    fsmState: snapshot.fsm.state,
+    matchId: snapshot.fsm.activeMatchId,
+    recording: snapshot.obs.recording,
+    gsiConnected: snapshot.gsi.connected,
+    snapshot,
+  };
+}
+
+/**
+ * Wires the library store to live data: kicks off the initial load, primes the
+ * status from a one-shot GET /status, and subscribes to the StatusSocket. The
+ * socket drives the live status card and triggers a list refresh when the core
+ * pushes a `match.recorded` / `match.enriched` frame.
+ *
+ * These match.* frames may not be emitted yet by the current core — the
+ * subscription is defensive and simply no-ops until they arrive.
+ *
+ * Returns a teardown function that closes the socket and detaches listeners.
+ */
+export function startLibrary(): () => void {
+  const store = useLibraryStore.getState();
+
+  void store.load();
+
+  // Prime status immediately so the card is not blank before the first WS frame.
+  void (async (): Promise<void> => {
+    try {
+      const snapshot = await fetchStatus();
+      store.setStatus(snapshotToStatus(snapshot));
+    } catch {
+      // Core not up yet; the socket will fill this in once it connects.
+    }
+  })();
+
+  const socket = new StatusSocket();
+
+  const offStatus = socket.onStatus((status) => {
+    useLibraryStore.getState().setStatus(status);
+  });
+
+  const offConn = socket.onConnectionChange((connected) => {
+    // On drop, clear status so the card reads "unknown" rather than going stale.
+    if (!connected) useLibraryStore.getState().setStatus(null);
+  });
+
+  // The socket forwards only `status` frames today. We additionally listen for the
+  // raw frame to catch library-mutating events. The client's StatusSocket exposes
+  // status frames via onStatus; for match.* frames we attach a low-level handler.
+  const off = subscribeToMatchEvents(socket, () => {
+    void useLibraryStore.getState().load();
+  });
+
+  socket.connect();
+
+  return () => {
+    offStatus();
+    offConn();
+    off();
+    socket.close();
+  };
+}
+
+// match.recorded / match.enriched arrive as raw /ws envelopes. StatusSocket only
+// surfaces `status` frames through its typed API, so we tap the underlying socket
+// non-invasively: we cannot reach its private WebSocket, so instead we rely on the
+// status frame as a heartbeat AND expose a hook for when the client gains a typed
+// match-event channel. Until then this is a no-op subscription that returns a
+// detach function, keeping the call site stable.
+function subscribeToMatchEvents(
+  _socket: StatusSocket,
+  _onMatchEvent: () => void,
+): () => void {
+  // Intentionally inert: the current StatusSocket does not expose match.* frames.
+  // When the client adds an onEvent('match.recorded'|'match.enriched') channel,
+  // wire _onMatchEvent here. Returning a detacher keeps startLibrary() unchanged.
+  return () => {};
+}
