@@ -66,6 +66,28 @@ function toStatus(snapshot: StatusSnapshot): Status {
   };
 }
 
+// User-editable configuration mirrored from the core's config/SettingsStore.
+// The raw OBS password is NEVER returned by the core; `obsPasswordSet` is the
+// only signal the renderer gets about whether a secret is stored. Writes go
+// through PUT /settings as a partial patch (see SettingsPatch).
+export interface Settings {
+  readonly resolution: string;
+  readonly encoder: string;
+  readonly retentionCapGb: number;
+  readonly videoDir: string;
+  readonly obsHost: string;
+  readonly obsPort: number;
+  readonly obsPasswordSet: boolean;
+}
+
+// A partial update to Settings. Every field is optional so the renderer can PATCH
+// just what changed. `obsPassword` is write-only: it is accepted here but never
+// echoed back in Settings (the core reports only `obsPasswordSet`). Omit it to
+// leave the stored secret untouched; send an empty string to clear it.
+export type SettingsPatch = Partial<Omit<Settings, 'obsPasswordSet'>> & {
+  readonly obsPassword?: string;
+};
+
 // Mirrors the matches table; populated in a later step.
 export interface MatchSummary {
   readonly matchId: number;
@@ -89,8 +111,41 @@ async function getJson<T>(path: string): Promise<T> {
   return (await res.json()) as T;
 }
 
+async function putJson<TBody, TResult>(path: string, body: TBody): Promise<TResult> {
+  const res = await fetch(`${bridgeBase()}${path}`, {
+    method: 'PUT',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(5_000),
+  });
+  if (!res.ok) {
+    throw new Error(`PUT ${path} failed: ${res.status} ${res.statusText}`);
+  }
+  return (await res.json()) as TResult;
+}
+
 export function fetchHealth(): Promise<Health> {
   return getJson<Health>('/health');
+}
+
+// One-shot poll of the live status snapshot (GET /status). The StatusSocket is
+// the primary live feed; this is for views that mount independently of the socket
+// or want an immediate value before the first frame arrives.
+export function fetchStatus(): Promise<StatusSnapshot> {
+  return getJson<StatusSnapshot>('/status');
+}
+
+export function fetchSettings(): Promise<Settings> {
+  return getJson<Settings>('/settings');
+}
+
+// Applies a partial settings patch via PUT /settings and returns the updated
+// (password-redacted) Settings the core now holds.
+export function updateSettings(patch: SettingsPatch): Promise<Settings> {
+  return putJson<SettingsPatch, Settings>('/settings', patch);
 }
 
 export function fetchMatches(): Promise<MatchSummary[]> {
