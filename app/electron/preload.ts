@@ -2,7 +2,7 @@
 // locked-down contextBridge. No Node APIs are leaked into the renderer.
 import { contextBridge } from 'electron';
 import { BRIDGE_BASE, HEALTH_URL, WS_URL } from './paths';
-import type { DotaRecBridge } from '../src/api/bridge';
+import type { DotaRecBridge } from './bridge-contract';
 
 const bridge: DotaRecBridge = {
   bridgeBase: BRIDGE_BASE,
