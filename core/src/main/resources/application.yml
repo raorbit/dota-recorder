@@ -1,0 +1,23 @@
+server:
+  # REST + WebSocket bridge the Electron shell talks to. Loopback-only: binding
+  # to 127.0.0.1 (never 0.0.0.0) keeps the service off the LAN and avoids the
+  # Windows Defender Firewall "Allow access?" prompt entirely.
+  port: 3224
+  address: 127.0.0.1
+
+spring:
+  application:
+    name: dota-recorder-core
+  # Launch-once, long-lived sidecar (one Dota session = one launch). Lazy init
+  # roughly halves cold-start with no downside for this usage pattern.
+  main:
+    lazy-initialization: true
+
+app:
+  # Second Tomcat connector dedicated to Dota GSI POSTs (see GsiConnectorConfig),
+  # also bound to 127.0.0.1 only.
+  gsi:
+    port: 3223
+  # Empty -> AppPaths resolves the default %APPDATA%/dota-recorder location.
+  # Override only for tests or non-standard installs.
+  data-dir: ""
