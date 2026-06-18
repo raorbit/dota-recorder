@@ -1,9 +1,8 @@
 {
   "extends": "../tsconfig.base.json",
   "compilerOptions": {
-    "module": "CommonJS",
-    "moduleResolution": "node10",
-    "ignoreDeprecations": "6.0",
+    "module": "node16",
+    "moduleResolution": "node16",
     "verbatimModuleSyntax": false,
     "lib": ["ES2022"],
     "types": ["node"],
