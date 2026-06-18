@@ -15,4 +15,4 @@ added here once a framework is in place.
 
 ## License
 
-TBD
+[MIT](LICENSE)
