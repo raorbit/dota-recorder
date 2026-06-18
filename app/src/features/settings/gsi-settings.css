@@ -1,0 +1,111 @@
+/* Game State Integration settings panel. Mirrors scene-obs-panel.css structure
+   and uses the shared design tokens from styles/tokens.css. */
+
+.gsi-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 560px;
+  padding: 20px;
+  background: var(--panel);
+  border: 1px solid var(--border-panel);
+  border-radius: var(--radius-card);
+}
+
+.gsi-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.gsi-panel-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 18px;
+  letter-spacing: 0.03em;
+}
+
+.gsi-conn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-chip);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.gsi-conn-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+
+.gsi-conn-dot[data-state='disconnected'] {
+  background: var(--loss);
+}
+
+.gsi-conn-dot[data-state='connected'] {
+  background: var(--win);
+}
+
+.gsi-intro {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 13.5px;
+  line-height: 1.7;
+}
+
+.gsi-code {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--code-literal, #e8a99f);
+}
+
+.gsi-doc {
+  padding: 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--gold);
+  border-radius: var(--radius-panel);
+}
+
+.gsi-doc-title {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--gold);
+  margin-bottom: 10px;
+}
+
+.gsi-doc-steps {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  color: var(--text-secondary);
+  font-size: 13.5px;
+  line-height: 1.6;
+}
+
+.gsi-doc-steps strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.gsi-doc-foot {
+  margin: 12px 0 0;
+  color: var(--text-muted);
+  font-size: 12.5px;
+}

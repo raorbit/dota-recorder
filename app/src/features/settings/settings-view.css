@@ -1,0 +1,43 @@
+/* Settings host laid out in the Main column. Uses shared design tokens. */
+
+.settings-view {
+  height: 100%;
+  overflow-y: auto;
+  padding: 28px;
+}
+
+.general-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 560px;
+  padding: 20px;
+  background: var(--panel);
+  border: 1px solid var(--border-panel);
+  border-radius: var(--radius-card);
+}
+
+.general-head {
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.general-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 18px;
+  letter-spacing: 0.03em;
+}
+
+.general-note {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 13.5px;
+  line-height: 1.7;
+}
+
+.general-note strong {
+  color: var(--text);
+  font-weight: 600;
+}
