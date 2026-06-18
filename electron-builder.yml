@@ -22,11 +22,13 @@ directories:
   output: release
   buildResources: build-resources
 
-# Renderer bundle (Vite) + compiled Electron main/preload output.
+# Renderer bundle (Vite) + compiled Electron main/preload output. These globs are
+# relative to the app/ directory: app/package.json makes app/ the electron-builder
+# appDir (two-package layout), so paths must NOT be prefixed with app/.
 files:
-  - app/dist/**/*
-  - app/electron-dist/**/*
-  - app/package.json
+  - dist/**/*
+  - electron-dist/**/*
+  - package.json
 
 # Shipped alongside the app, addressable at runtime via process.resourcesPath.
 # These come from the core/ Gradle build (see note above).
