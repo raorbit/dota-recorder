@@ -21,3 +21,18 @@ app:
   # Empty -> AppPaths resolves the default %APPDATA%/dota-recorder location.
   # Override only for tests or non-standard installs.
   data-dir: ""
+
+# Findable, rolling core log next to the data dir (matches AppPaths.logDir()).
+# Spring Boot auto-configures a rolling file appender when logging.file.name is set,
+# alongside the console. APPDATA is always set on Windows (the only target); the
+# user.home fallback keeps tests/non-standard envs from failing to resolve a path.
+logging:
+  file:
+    name: ${APPDATA:${user.home}}/dota-recorder/log/core.log
+  logback:
+    rollingpolicy:
+      max-file-size: 10MB
+      max-history: 7
+      total-size-cap: 100MB
+  level:
+    root: INFO
