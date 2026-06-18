@@ -2,7 +2,6 @@
   "name": "@dota-recorder/app",
   "version": "0.1.0",
   "private": true,
-  "type": "module",
   "main": "electron-dist/main.js",
   "scripts": {
     "dev": "vite",
