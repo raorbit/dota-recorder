@@ -33,7 +33,14 @@ dependencies {
     // would NOT authenticate against a stock modern OBS. Pulls in Jetty's
     // websocket-client + Gson transitively, isolated from Spring's Jackson.
     // Coordinate confirmed to resolve from Maven Central.
-    implementation("io.obs-websocket.community:client:2.0.0")
+    implementation("io.obs-websocket.community:client:2.0.0") {
+        // This client bundles slf4j-simple, a SECOND SLF4J binding that competes
+        // with Spring Boot's Logback. SLF4J picks a provider by classpath order, so
+        // it intermittently selects slf4j-simple -> Spring's LogbackLoggingSystem
+        // throws at startup ("not a Logback LoggerContext") AND file logging breaks.
+        // Exclude it so Logback is the only binding.
+        exclude(group = "org.slf4j", module = "slf4j-simple")
+    }
 
     // Test stack: JUnit 5 + AssertJ (the `test` task already declares
     // useJUnitPlatform()). Brings the JUnit Jupiter engine the runner needs.
