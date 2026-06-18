@@ -26,6 +26,19 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
+# Java / Gradle
+.gradle/
+
+# App packaging output
+app/electron-dist/
+release/
+
+# Local SQLite db + write-ahead files / migration backups
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite.*.bak
+
 # Test / coverage
 coverage/
 .nyc_output/
