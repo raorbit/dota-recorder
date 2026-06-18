@@ -5,14 +5,25 @@
 // to start or crashes mid-session ("core stopped - recordings paused") instead of
 // the bare dialog used here.
 import { app, BrowserWindow, dialog } from 'electron';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { JvmSupervisor } from './jvm-supervisor';
-import { packagedIndexHtml } from './paths';
+import { electronLogPath, logDir, packagedIndexHtml } from './paths';
 
 const isDev = process.env.DOTAREC_DEV === '1' || !app.isPackaged;
 const DEV_SERVER_URL = 'http://localhost:5173';
 
-const supervisor = new JvmSupervisor();
+/** Append a line to electron.log (best-effort) and mirror to the console. */
+function logLine(line: string): void {
+  try {
+    fs.appendFileSync(electronLogPath(), `${new Date().toISOString()} ${line}\n`);
+  } catch {
+    /* logging must never break the app. */
+  }
+  console.log(line);
+}
+
+const supervisor = new JvmSupervisor({ onLog: (line) => logLine(`[core] ${line}`) });
 let mainWindow: BrowserWindow | null = null;
 
 if (!app.requestSingleInstanceLock()) {
@@ -40,7 +51,10 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 async function bootstrap(): Promise<void> {
+  fs.mkdirSync(logDir(), { recursive: true });
+  logLine('app starting; launching core');
   await supervisor.start();
+  logLine('core healthy; opening window');
   createWindow();
 }
 
@@ -87,6 +101,7 @@ async function shutdown(): Promise<void> {
 
 function fatal(err: unknown): void {
   const message = err instanceof Error ? err.message : String(err);
+  logLine(`fatal: ${message}`);
   dialog.showErrorBox('Dota 2 Recorder', `Failed to start the recorder core.\n\n${message}`);
   void supervisor.stop().finally(() => app.exit(1));
 }

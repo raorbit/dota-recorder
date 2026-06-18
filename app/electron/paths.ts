@@ -60,3 +60,17 @@ export function resolveCoreJar(): string | null {
 export function packagedIndexHtml(): string {
   return path.join(app.getAppPath(), 'dist', 'index.html');
 }
+
+/**
+ * App log directory, shared with the core. Electron's `appData` path is %APPDATA%
+ * (Roaming) on Windows, so this matches the core's AppPaths.logDir()
+ * (%APPDATA%/dota-recorder/log) — both logs land in one findable place.
+ */
+export function logDir(): string {
+  return path.join(app.getPath('appData'), 'dota-recorder', 'log');
+}
+
+/** Absolute path to the Electron-side log file (core stdout/stderr + main process). */
+export function electronLogPath(): string {
+  return path.join(logDir(), 'electron.log');
+}
