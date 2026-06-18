@@ -2,10 +2,6 @@
 
 > Early setup — design phase.
 
-A project being designed with [Claude design](https://claude.ai). The application
-scaffold and feature set are not yet decided; this repository currently holds the
-initial git setup and project documentation.
-
 ## Status
 
 - [x] Public repository created
