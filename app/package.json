@@ -1,0 +1,23 @@
+{
+  "name": "@dota-recorder/app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "electron-dist/main.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "build:electron": "tsc -p tsconfig.electron.json",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.electron.json"
+  },
+  "dependencies": {
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "zustand": "^5.0.3"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@types/node": "^22.10.0"
+  }
+}
