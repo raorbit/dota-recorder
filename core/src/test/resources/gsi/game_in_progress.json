@@ -1,0 +1,101 @@
+{
+	"provider": {
+		"name": "Dota 2",
+		"appid": 570,
+		"version": 48,
+		"timestamp": 1781827370
+	},
+	"map": {
+		"name": "hero_demo_main",
+		"matchid": "0",
+		"game_time": 169,
+		"clock_time": 167,
+		"daytime": true,
+		"nightstalker_night": false,
+		"radiant_score": 8,
+		"dire_score": 0,
+		"game_state": "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS",
+		"paused": false,
+		"win_team": "none",
+		"customgamename": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\dota 2 beta\\game\\dota_addons\\hero_demo",
+		"ward_purchase_cooldown": 0
+	},
+	"player": {
+		"steamid": "76561190000000000",
+		"accountid": "0",
+		"name": "player",
+		"activity": "playing",
+		"kills": 8,
+		"deaths": 0,
+		"assists": 0,
+		"last_hits": 9,
+		"denies": 0,
+		"kill_streak": 8,
+		"commands_issued": 309,
+		"kill_list": {
+			"victimid_1": 8
+		},
+		"team_name": "radiant",
+		"player_slot": 0,
+		"team_slot": 0,
+		"gold": 99999,
+		"gold_reliable": 0,
+		"gold_unreliable": 99999,
+		"gold_from_hero_kills": 1199,
+		"gold_from_creep_kills": 357,
+		"gold_from_income": 251,
+		"gold_from_shared": 0,
+		"gpm": 60909,
+		"xpm": 0
+	},
+	"hero": {
+		"facet": 0,
+		"xpos": -2105,
+		"ypos": 952,
+		"id": 6,
+		"name": "npc_dota_hero_drow_ranger",
+		"level": 30,
+		"xp": 64400,
+		"alive": true,
+		"respawn_seconds": 0,
+		"buyback_cost": 10096,
+		"buyback_cooldown": 0,
+		"health": 1990,
+		"max_health": 1990,
+		"health_percent": 100,
+		"mana": 611,
+		"max_mana": 903,
+		"mana_percent": 67,
+		"silenced": false,
+		"stunned": false,
+		"disarmed": false,
+		"magicimmune": false,
+		"hexed": false,
+		"muted": false,
+		"break": false,
+		"aghanims_scepter": false,
+		"aghanims_shard": false,
+		"smoked": false,
+		"permanent_buffs": {
+
+		},
+		"has_debuff": false,
+		"talent_1": true,
+		"talent_2": true,
+		"talent_3": true,
+		"talent_4": true,
+		"talent_5": true,
+		"talent_6": true,
+		"talent_7": true,
+		"talent_8": true,
+		"attributes_level": 7
+	},
+	"previously": {
+		"player": {
+			"gpm": 60998
+		},
+		"hero": {
+			"mana": 610
+		}
+	}
+}
