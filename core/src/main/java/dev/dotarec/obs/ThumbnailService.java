@@ -25,7 +25,7 @@ import org.springframework.stereotype.Service;
  * valid screenshot source, so we shoot the current program scene directly.
  */
 @Service
-public class ThumbnailService {
+public class ThumbnailService implements ThumbnailCapturer {
 
     private static final Logger log = LoggerFactory.getLogger(ThumbnailService.class);
 
@@ -55,6 +55,7 @@ public class ThumbnailService {
      * @return the absolute path the thumbnail was written to
      * @throws ObsException if OBS is not connected, has no active scene, or the save fails
      */
+    @Override
     public Path captureCurrentScene(String id) {
         OBSRemoteController controller = obs.controller();
         if (controller == null) {
