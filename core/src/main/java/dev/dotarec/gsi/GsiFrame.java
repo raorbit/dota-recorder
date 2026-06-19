@@ -9,19 +9,30 @@ package dev.dotarec.gsi;
  * recorded .mp4"); {@code gameClock} is kept for display/enrichment only and is never used for
  * offset math (see {@code VideoOffsetCalculator}).
  *
- * <p>TODO(plan: Storage model / Event detection): fields will be populated by mapping from
- * {@link GsiPayload}; add validation once parsing lands.
+ * <p>Null-safety contract (built from the real fixture + heartbeat samples):
+ * <ul>
+ *   <li>{@code gameState} is never null -- {@link GsiPayload#toFrame} maps an absent
+ *       {@code map.game_state} to {@code "UNKNOWN"} so the FSM no-ops instead of NPEing.</li>
+ *   <li>On HERO_SELECTION / heartbeat pings the {@code hero} and {@code player} blocks are ABSENT.
+ *       {@code heroPresent} reflects that; {@code alive} is only true when the hero block exists
+ *       AND reports alive, so a missing hero never reads as a (phantom) death.</li>
+ *   <li>{@code gameClock} is {@code map.clock_time} verbatim and may be negative pre-horn.</li>
+ * </ul>
  */
 public record GsiFrame(
         long wallClockMillis,
         String gameState,
         int gameClock,
+        boolean paused,
+        boolean heroPresent,
         boolean alive,
+        long matchId,
+        String hero,
+        int heroId,
+        String activity,
         int kills,
         int deaths,
         int assists,
-        boolean paused,
-        boolean heroPresent,
-        long matchId,
-        String hero) {
+        int radiantScore,
+        int direScore) {
 }
