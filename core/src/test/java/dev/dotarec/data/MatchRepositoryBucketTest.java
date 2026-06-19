@@ -168,7 +168,7 @@ class MatchRepositoryBucketTest {
                     null, recordKind, enrichmentState, hero,
                     1, 2, 3, 400, 500, 10000, 120,
                     result, lobbyType, gameMode, null, null, 1800,
-                    playedAt, videoPath, null, fileSizeBytes, starred, 1_000L);
+                    playedAt, videoPath, null, fileSizeBytes, starred, 1_000L, null);
         }
     }
 }
