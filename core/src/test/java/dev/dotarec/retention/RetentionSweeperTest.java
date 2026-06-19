@@ -163,6 +163,7 @@ class RetentionSweeperTest {
                 null, "match", "enriched", "puck",
                 1, 2, 3, 400, 500, 10000, 120,
                 "win", 7, 22, null, null, 1800,
-                playedAt, videoPath.toString(), thumbPath.toString(), sizeBytes, starred, playedAt));
+                playedAt, videoPath.toString(), thumbPath.toString(), sizeBytes, starred, playedAt,
+                null));
     }
 }

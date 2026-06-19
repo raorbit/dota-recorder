@@ -29,7 +29,7 @@ class MarkerPauseRepositoryTest {
                 null, "match", "enriched", "puck",
                 null, null, null, null, null, null, null,
                 "win", 7, 22, null, null, 1800,
-                1_000L, "C:/v/m.mp4", null, 1024L, false, 1_000L));
+                1_000L, "C:/v/m.mp4", null, 1024L, false, 1_000L, null));
     }
 
     @Test
@@ -55,7 +55,7 @@ class MarkerPauseRepositoryTest {
                 null, "match", "enriched", "lina",
                 null, null, null, null, null, null, null,
                 "loss", 7, 22, null, null, 1200,
-                2_000L, "C:/v/o.mp4", null, 2048L, false, 2_000L));
+                2_000L, "C:/v/o.mp4", null, 2048L, false, 2_000L, null));
         markers.insert(matchId, "kill", 10.0, 30, null, "gsi");
         markers.insert(other, "kill", 10.0, 30, null, "gsi");
 

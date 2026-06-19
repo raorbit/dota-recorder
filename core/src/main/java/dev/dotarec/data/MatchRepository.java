@@ -248,8 +248,9 @@ public class MatchRepository {
                     dota_match_id, record_kind, enrichment_state, hero,
                     kills, deaths, assists, gpm, xpm, net_worth, last_hits,
                     result, lobby_type, game_mode, rank_tier, mmr_delta, duration_s,
+                    record_started_wall_ms,
                     played_at, video_path, thumb_path, file_size_bytes, starred, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """;
         try (Connection conn = dataSource.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
@@ -271,6 +272,7 @@ public class MatchRepository {
             setNullableInt(ps, i++, m.rankTier());
             setNullableInt(ps, i++, m.mmrDelta());
             setNullableInt(ps, i++, m.durationS());
+            setNullableLong(ps, i++, m.recordStartedWallMs());
             setNullableLong(ps, i++, m.playedAt());
             ps.setString(i++, m.videoPath());
             ps.setString(i++, m.thumbPath());
@@ -358,6 +360,10 @@ public class MatchRepository {
      * Insertable shape for {@link #insert(NewMatch)}. Every field is nullable except {@code createdAt}
      * (NOT NULL in the schema) and {@code starred}. {@code recordKind}/{@code enrichmentState} fall
      * back to the schema defaults ({@code match}/{@code pending}) when null.
+     *
+     * <p>{@code recordStartedWallMs} is the OBS record-confirmed wall clock the recorder anchors
+     * video offsets on; it is persisted so the later replay-enrichment pass can re-derive offsets
+     * deterministically. It is appended last so existing positional call sites only grow by one.
      */
     public record NewMatch(
             Long dotaMatchId,
@@ -382,7 +388,8 @@ public class MatchRepository {
             String thumbPath,
             Long fileSizeBytes,
             boolean starred,
-            long createdAt
+            long createdAt,
+            Long recordStartedWallMs
     ) {
     }
 }
