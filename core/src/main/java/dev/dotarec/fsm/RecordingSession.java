@@ -1,5 +1,10 @@
 package dev.dotarec.fsm;
 
+import dev.dotarec.gsi.GsiFrame;
+import dev.dotarec.tagger.PendingMarker;
+import java.util.ArrayList;
+import java.util.List;
+
 /**
  * Mutable holder for the in-flight recording, owned by the FSM while in RECORDING/STOPPING.
  *
@@ -8,14 +13,34 @@ package dev.dotarec.fsm;
  * {@code VideoOffsetCalculator}). {@code surrogateId} keys the in-progress recording before the
  * official Dota match_id is known/confirmed by enrichment.
  *
- * <p>TODO(plan): populate on START; persist into the {@code matches} row on finalize.
+ * <p>It also carries the live-tagging working set: the {@code lastFrame} the {@code EventTagger}
+ * diffs against and the buffered {@link PendingMarker}s flushed to the DB in one batch at finalize.
+ * The latest snapshot of hero/K/D/A/match-id is kept here so the finalized {@code matches} row can
+ * be written even though the POST_GAME frame itself usually has the hero block absent.
  */
 public class RecordingSession {
 
     private String surrogateId;
     private long recordConfirmedWallMs;
+    private long recordStartedWallMs;
     private String videoPath;
     private String scene;
+
+    /** The most recent frame the tagger diffs the next one against. */
+    private GsiFrame lastFrame;
+
+    /** Markers detected live, flushed to {@code markers} at finalize. */
+    private final List<PendingMarker> markers = new ArrayList<>();
+
+    // Latest observed match facts, snapshotted as frames arrive so finalize can persist them even
+    // when the terminal POST_GAME frame omits the hero/player block.
+    private String hero;
+    private long matchId;
+    private int kills;
+    private int deaths;
+    private int assists;
+    private int radiantScore;
+    private int direScore;
 
     public String getSurrogateId() {
         return surrogateId;
@@ -33,6 +58,14 @@ public class RecordingSession {
         this.recordConfirmedWallMs = recordConfirmedWallMs;
     }
 
+    public long getRecordStartedWallMs() {
+        return recordStartedWallMs;
+    }
+
+    public void setRecordStartedWallMs(long recordStartedWallMs) {
+        this.recordStartedWallMs = recordStartedWallMs;
+    }
+
     public String getVideoPath() {
         return videoPath;
     }
@@ -47,5 +80,68 @@ public class RecordingSession {
 
     public void setScene(String scene) {
         this.scene = scene;
+    }
+
+    public GsiFrame getLastFrame() {
+        return lastFrame;
+    }
+
+    public void setLastFrame(GsiFrame lastFrame) {
+        this.lastFrame = lastFrame;
+    }
+
+    public List<PendingMarker> getMarkers() {
+        return markers;
+    }
+
+    public void addMarkers(List<PendingMarker> more) {
+        markers.addAll(more);
+    }
+
+    public String getHero() {
+        return hero;
+    }
+
+    public long getMatchId() {
+        return matchId;
+    }
+
+    public int getKills() {
+        return kills;
+    }
+
+    public int getDeaths() {
+        return deaths;
+    }
+
+    public int getAssists() {
+        return assists;
+    }
+
+    public int getRadiantScore() {
+        return radiantScore;
+    }
+
+    public int getDireScore() {
+        return direScore;
+    }
+
+    /**
+     * Snapshots the match facts from a frame that carries them. Frames with the hero block absent
+     * (heartbeats, hero-select, the terminal POST_GAME frame) leave the last good hero/id intact so
+     * finalize still records who played; counters are always taken from the latest frame.
+     */
+    public void observe(GsiFrame frame) {
+        if (frame.matchId() != 0L) {
+            this.matchId = frame.matchId();
+        }
+        if (frame.heroPresent() && frame.hero() != null) {
+            this.hero = frame.hero();
+        }
+        this.kills = frame.kills();
+        this.deaths = frame.deaths();
+        this.assists = frame.assists();
+        this.radiantScore = frame.radiantScore();
+        this.direScore = frame.direScore();
     }
 }
