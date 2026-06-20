@@ -12,7 +12,8 @@
     "build:electron": "npm --prefix app run build:electron",
     "typecheck": "npm --prefix app run typecheck",
     "build:all": "npm run build:app && npm run build:electron",
-    "dist": "npm run build:all && electron-builder --win nsis --x64"
+    "fetch:obs": "node scripts/fetch-obs.mjs",
+    "dist": "npm run fetch:obs && npm run build:all && electron-builder --win nsis --x64"
   },
   "devDependencies": {
     "concurrently": "^9.1.2",
