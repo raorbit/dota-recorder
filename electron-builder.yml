@@ -40,6 +40,11 @@ extraResources:
     to: core/core.jar
   - from: core/build/jre-image
     to: jre
+  # Portable OBS fetched at build time by scripts/fetch-obs.mjs (npm run fetch:obs,
+  # chained into dist). Ships to <resourcesPath>/obs; at first run the app copies it
+  # to a writable per-user dir, auto-configures it, and drives it over obs-websocket.
+  - from: build-resources/obs/obs-portable
+    to: obs
 
 # koffi (optional native FFI for the Job Object) must stay outside the asar so its
 # .node binary is loadable; harmless when koffi isn't installed (nothing matches).
