@@ -13,6 +13,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.security.SecureRandom;
 import java.util.Base64;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.stream.Stream;
@@ -130,12 +131,42 @@ public class ObsConfigWriter {
             return;
         }
         try {
-            log.info("Materializing bundled OBS {} -> {}", obsVersion, layout.root());
+            if (Files.isRegularFile(layout.obs64())) {
+                // Version bump over an existing install: copyTree only overwrites, never deletes, so a
+                // file removed in the new OBS would linger and could be loaded as a stale plugin. Prune
+                // the bundle-owned trees first; config/obs-studio and our markers are left untouched.
+                log.info("Re-materializing OBS {} -> {} (pruning stale files)", obsVersion, layout.root());
+                pruneBundleTrees(layout.root());
+            } else {
+                log.info("Materializing bundled OBS {} -> {}", obsVersion, layout.root());
+            }
             copyTree(source, layout.root());
             Files.writeString(layout.portableMarker(), "");
             Files.writeString(layout.versionStamp(), obsVersion);
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to copy bundled OBS into " + layout.root(), e);
+        }
+    }
+
+    /** The top-level trees an OBS portable zip ships; pruned wholesale before a version-bump re-copy. */
+    private static final String[] BUNDLE_TREES = {"bin", "data", "obs-plugins"};
+
+    /** Removes the bundle-owned subtrees under {@code root}, preserving config/obs-studio and markers. */
+    private static void pruneBundleTrees(Path root) throws IOException {
+        for (String tree : BUNDLE_TREES) {
+            deleteRecursively(root.resolve(tree));
+        }
+    }
+
+    private static void deleteRecursively(Path dir) throws IOException {
+        if (!Files.exists(dir)) {
+            return;
+        }
+        try (Stream<Path> walk = Files.walk(dir)) {
+            // Deepest entries first so each directory is empty before it is removed.
+            for (Path p : (Iterable<Path>) walk.sorted(Comparator.reverseOrder())::iterator) {
+                Files.delete(p);
+            }
         }
     }
 
