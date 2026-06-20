@@ -21,6 +21,17 @@ app:
   # Empty -> AppPaths resolves the default %APPDATA%/dota-recorder location.
   # Override only for tests or non-standard installs.
   data-dir: ""
+  # Bundled OBS auto-configuration (Recording engine — bundle + auto-configure OBS).
+  obs:
+    # Writable OBS install root. Empty -> AppPaths uses %LOCALAPPDATA%/dota-recorder/obs.
+    # Electron passes the same path it launches obs64.exe from.
+    dir: ""
+    # Read-only bundled OBS (electron-builder ships it to <resourcesPath>/obs). Empty ->
+    # no first-run copy (dev / tests); config is still written into `dir`.
+    source-dir: ""
+    # Shipped OBS version, used as the first-run copy stamp so a version bump re-copies.
+    # Default keeps dev / tests from copying; Electron passes the real bundled version.
+    version: "0"
 
 # Findable, rolling core log next to the data dir (matches AppPaths.logDir()).
 # Spring Boot auto-configures a rolling file appender when logging.file.name is set,

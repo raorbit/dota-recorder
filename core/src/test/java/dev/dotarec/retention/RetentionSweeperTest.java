@@ -47,7 +47,8 @@ class RetentionSweeperTest {
 
         videoDir = Files.createDirectories(dir.resolve("video"));
         // Real SettingsStore over a temp data dir; default cap is 50GB, we shrink it per-test.
-        settings = new SettingsStore(new AppPaths(dir.resolve("data").toString()));
+        settings = new SettingsStore(
+                new AppPaths(dir.resolve("data").toString(), dir.resolve("obs").toString()));
         settings.get().videoDir = videoDir.toString();
 
         events = mock(EventPublisher.class);
