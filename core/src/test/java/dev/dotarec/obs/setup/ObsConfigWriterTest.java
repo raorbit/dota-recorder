@@ -111,6 +111,48 @@ class ObsConfigWriterTest {
     }
 
     @Test
+    void versionBumpReCopiesAndPrunesStaleFiles(@TempDir Path dir) throws Exception {
+        // v1 bundle ships a plugin that v2 will drop.
+        Path v1 = dir.resolve("bundle-v1");
+        Files.createDirectories(v1.resolve("bin/64bit"));
+        Files.writeString(v1.resolve("bin/64bit/obs64.exe"), "MZ");
+        Files.createDirectories(v1.resolve("obs-plugins/64bit"));
+        Files.writeString(v1.resolve("obs-plugins/64bit/old-plugin.dll"), "OLD");
+
+        AppPaths paths = paths(dir);
+        SettingsStore settings = new SettingsStore(paths);
+        writer(paths, settings, v1.toString(), "32.1.2").configure();
+
+        Path stalePlugin =
+                paths.obsDir().resolve("obs-plugins").resolve("64bit").resolve("old-plugin.dll");
+        assertThat(stalePlugin).exists();
+
+        // A user/runtime file under the config tree must survive the upgrade prune.
+        Path userScene =
+                paths.obsDir().resolve("config").resolve("obs-studio").resolve("user-scene.json");
+        Files.createDirectories(userScene.getParent());
+        Files.writeString(userScene, "KEEP");
+
+        // v2 bundle no longer ships old-plugin.dll; it ships a different plugin instead.
+        Path v2 = dir.resolve("bundle-v2");
+        Files.createDirectories(v2.resolve("bin/64bit"));
+        Files.writeString(v2.resolve("bin/64bit/obs64.exe"), "MZ2");
+        Files.createDirectories(v2.resolve("obs-plugins/64bit"));
+        Files.writeString(v2.resolve("obs-plugins/64bit/new-plugin.dll"), "NEW");
+
+        writer(paths, settings, v2.toString(), "33.0.0").configure();
+
+        ObsLayout layout = new ObsLayout(paths.obsDir());
+        // Orphan from v1 is gone; the new tree + version stamp are in place.
+        assertThat(stalePlugin).doesNotExist();
+        assertThat(paths.obsDir().resolve("obs-plugins").resolve("64bit").resolve("new-plugin.dll"))
+                .exists();
+        assertThat(Files.readString(layout.versionStamp()).trim()).isEqualTo("33.0.0");
+        // The config tree was preserved across the prune.
+        assertThat(Files.readString(userScene)).isEqualTo("KEEP");
+    }
+
+    @Test
     void skipsCopyButStillWritesConfigWhenNoSource(@TempDir Path dir) {
         AppPaths paths = paths(dir);
         SettingsStore settings = new SettingsStore(paths);
