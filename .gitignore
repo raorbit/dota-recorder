@@ -33,6 +33,11 @@ pnpm-debug.log*
 app/electron-dist/
 release/
 
+# Bundled OBS — fetched + extracted at build time by scripts/fetch-obs.mjs.
+# Not tracked (multi-hundred-MB binaries); CI/build regenerates it from the pinned
+# version + sha256. Leaves the rest of build-resources/ trackable (icons, etc.).
+build-resources/obs/
+
 # Local SQLite db + write-ahead files / migration backups
 *.sqlite
 *.sqlite-shm
