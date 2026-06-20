@@ -22,13 +22,17 @@ public class SettingsStore {
     /** Persisted settings shape. Field names map 1:1 to JSON keys. */
     public static class Settings {
         public String resolution = "1920x1080";
-        public String encoder = "x264";
+        /** Blank = auto: the OBS config writer probes the GPU (HW encoder, x264 fallback). */
+        public String encoder = "";
         /** Disk budget in GiB for the VOD retention/pruning policy. */
         public int retentionCapGb = 50;
         /** OBS WebSocket host; loopback-only for this single-user local app. */
         public String obsHost = "127.0.0.1";
-        /** OBS WebSocket v5 server port; OBS default is 4455 (v4 used 4444). */
-        public int obsPort = 4455;
+        /**
+         * obs-websocket v5 port. We bundle and manage our own OBS on a private 4466
+         * (not the 4455 stock default) so it never clashes with a user's own OBS.
+         */
+        public int obsPort = 4466;
         public String obsPassword = "";
         /** Video output directory; null/blank means use the default video dir. */
         public String videoDir = "";
@@ -66,9 +70,9 @@ public class SettingsStore {
         if (loaded.obsHost == null || loaded.obsHost.isBlank()) {
             loaded.obsHost = "127.0.0.1";
         }
-        // Port 0 means "absent / never set"; restore the OBS v5 default rather than bind to 0.
+        // Port 0 means "absent / never set"; restore our managed port rather than bind to 0.
         if (loaded.obsPort <= 0) {
-            loaded.obsPort = 4455;
+            loaded.obsPort = 4466;
         }
         return loaded;
     }
