@@ -75,12 +75,12 @@ class ObsConfigWriterTest {
         assertThat(Files.readString(ini))
                 .contains("Mode=Simple")
                 .contains("RecFormat2=hybrid_mp4")
-                .contains("RecEncoder=jim_nvenc")
+                .contains("RecEncoder=nvenc")
                 .contains("BaseCX=2560")
                 .contains("BaseCY=1440")
                 .contains("FilePath=" + settings.get().videoDir);
-        // Probed encoder is persisted so the UI can reflect it.
-        assertThat(settings.get().encoder).isEqualTo("jim_nvenc");
+        // Probed encoder token is persisted so the UI can reflect it.
+        assertThat(settings.get().encoder).isEqualTo("nvenc");
     }
 
     @Test

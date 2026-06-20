@@ -32,11 +32,14 @@ public class EncoderProbe {
 
     private static final Logger log = LoggerFactory.getLogger(EncoderProbe.class);
 
-    /** OBS Simple-output {@code RecEncoder} ids. */
+    // OBS Simple-output {@code RecEncoder} SELECTOR TOKENS, not the real encoder ids. OBS's
+    // get_simple_output_encoder() strcmp-matches these short tokens and resolves each to the actual
+    // encoder (nvenc -> jim_nvenc, qsv -> obs_qsv11_v2, amd -> h264_texture_amf); ANY unrecognized
+    // value silently falls back to software obs_x264, so the advanced ids must NOT be used here.
     static final String X264 = "x264";
-    static final String NVENC = "jim_nvenc";
-    static final String AMF = "h264_texture_amf";
-    static final String QSV = "obs_qsv11";
+    static final String NVENC = "nvenc";
+    static final String AMF = "amd";
+    static final String QSV = "qsv";
 
     private final Supplier<List<String>> gpuNames;
 
@@ -50,8 +53,8 @@ public class EncoderProbe {
     }
 
     /**
-     * Returns the OBS {@code RecEncoder} id for the best available encoder: NVENC (NVIDIA) &gt;
-     * AMF (AMD) &gt; QSV (Intel) &gt; x264. Any failure to enumerate GPUs degrades to x264.
+     * Returns the OBS Simple-output {@code RecEncoder} token for the best available encoder: NVENC
+     * (NVIDIA) &gt; AMF (AMD) &gt; QSV (Intel) &gt; x264. Any failure to enumerate GPUs degrades to x264.
      */
     public String detect() {
         List<String> names;
