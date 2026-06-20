@@ -15,6 +15,10 @@ import org.springframework.stereotype.Component;
  * {@code log} subdirectories created on startup. If {@code APPDATA} is unset
  * (non-standard environment / tests) it falls back to
  * {@code ~/.dota-recorder} so resolution never fails.
+ *
+ * <p>The writable OBS install ({@link #obsDir()}) is resolved separately: it is a
+ * large, machine-local, regenerable binary tree, so it lives under
+ * {@code %LOCALAPPDATA%} (non-roaming) rather than under the Roaming data root.
  */
 @Component
 public class AppPaths {
@@ -23,13 +27,17 @@ public class AppPaths {
     private final Path videoDir;
     private final Path dbDir;
     private final Path logDir;
+    private final Path obsDir;
 
-    public AppPaths(@Value("${app.data-dir:}") String configuredDataDir) {
+    public AppPaths(
+            @Value("${app.data-dir:}") String configuredDataDir,
+            @Value("${app.obs.dir:}") String configuredObsDir) {
         Path root = resolveRoot(configuredDataDir);
         this.dataDir = ensureDir(root);
         this.videoDir = ensureDir(root.resolve("video"));
         this.dbDir = ensureDir(root.resolve("db"));
         this.logDir = ensureDir(root.resolve("log"));
+        this.obsDir = ensureDir(resolveObsRoot(configuredObsDir, root));
     }
 
     private static Path resolveRoot(String configuredDataDir) {
@@ -41,6 +49,19 @@ public class AppPaths {
             return Path.of(appData, "dota-recorder");
         }
         return Path.of(System.getProperty("user.home"), ".dota-recorder");
+    }
+
+    private static Path resolveObsRoot(String configuredObsDir, Path dataRoot) {
+        if (configuredObsDir != null && !configuredObsDir.isBlank()) {
+            return Path.of(configuredObsDir);
+        }
+        // Non-roaming: the writable OBS copy is large and regenerable, so it belongs in
+        // LOCALAPPDATA, never Roaming. Electron launches obs64.exe from this same path.
+        String localAppData = System.getenv("LOCALAPPDATA");
+        if (localAppData != null && !localAppData.isBlank()) {
+            return Path.of(localAppData, "dota-recorder", "obs");
+        }
+        return dataRoot.resolve("obs");
     }
 
     private static Path ensureDir(Path dir) {
@@ -70,5 +91,14 @@ public class AppPaths {
     /** Directory for the rotating core log (findable for troubleshooting). */
     public Path logDir() {
         return logDir;
+    }
+
+    /**
+     * Writable OBS install root ({@code %LOCALAPPDATA%/dota-recorder/obs} by default).
+     * A first-run copy of the bundled portable OBS lives here; the auto-config writer
+     * writes OBS config into it and Electron launches {@code obs64.exe} from it.
+     */
+    public Path obsDir() {
+        return obsDir;
     }
 }
