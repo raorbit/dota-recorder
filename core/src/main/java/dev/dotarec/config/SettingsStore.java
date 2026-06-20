@@ -6,6 +6,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.function.UnaryOperator;
 import org.springframework.stereotype.Component;
 
 /**
@@ -36,6 +37,19 @@ public class SettingsStore {
         public String obsPassword = "";
         /** Video output directory; null/blank means use the default video dir. */
         public String videoDir = "";
+
+        /** Field-by-field copy (all fields are primitive/immutable) for atomic copy-on-write updates. */
+        Settings copy() {
+            Settings c = new Settings();
+            c.resolution = resolution;
+            c.encoder = encoder;
+            c.retentionCapGb = retentionCapGb;
+            c.obsHost = obsHost;
+            c.obsPort = obsPort;
+            c.obsPassword = obsPassword;
+            c.videoDir = videoDir;
+            return c;
+        }
     }
 
     private static final String FILE_NAME = "settings.json";
@@ -90,5 +104,15 @@ public class SettingsStore {
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to write settings: " + file, e);
         }
+    }
+
+    /**
+     * Atomically read-copy-mutate-persist under the store lock. The mutator is handed a private copy
+     * of the current settings and returns the version to persist, so a check-then-act stays atomic and
+     * concurrent {@link #get()} readers only ever observe the old or new instance whole — never a
+     * half-applied state. Prefer this over {@code get()} + field mutation + {@code save()}.
+     */
+    public synchronized void update(UnaryOperator<Settings> mutator) {
+        save(mutator.apply(settings.copy()));
     }
 }

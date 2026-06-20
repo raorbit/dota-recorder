@@ -76,27 +76,35 @@ public class ObsConfigWriter {
     /** Runs the full idempotent configuration. */
     public synchronized void configure() {
         ObsLayout layout = new ObsLayout(paths.obsDir());
-        ensureCredentials();
+        ensureSettings();
         firstRunCopy(layout);
         writeWebsocketConfig(layout);
         writeProfile(layout);
         log.info("OBS auto-config ready at {}", layout.root());
     }
 
-    private void ensureCredentials() {
-        SettingsStore.Settings s = settings.get();
-        boolean changed = false;
-        if (s.obsPassword == null || s.obsPassword.isBlank()) {
-            s.obsPassword = generatePassword();
-            changed = true;
-        }
-        if (s.obsPort <= 0) {
-            s.obsPort = MANAGED_PORT;
-            changed = true;
-        }
-        if (changed) {
-            settings.save(s);
-        }
+    /**
+     * Pins the obs-websocket password, the managed port, and the auto-detected encoder in a single
+     * atomic settings update so the read-modify-write cannot race a concurrent {@code PUT /settings}.
+     * The (possibly slow) GPU probe runs OUTSIDE the settings lock; its result is applied only if the
+     * encoder is still unset when the update commits.
+     */
+    private void ensureSettings() {
+        String current = settings.get().encoder;
+        String probed = (current == null || current.isBlank()) ? encoderProbe.detect() : null;
+        settings.update(
+                s -> {
+                    if (s.obsPassword == null || s.obsPassword.isBlank()) {
+                        s.obsPassword = generatePassword();
+                    }
+                    if (s.obsPort <= 0) {
+                        s.obsPort = MANAGED_PORT;
+                    }
+                    if (probed != null && (s.encoder == null || s.encoder.isBlank())) {
+                        s.encoder = probed;
+                    }
+                    return s;
+                });
     }
 
     /** 24-char URL-safe token (144 bits of entropy) — ample for a loopback-only server. */
@@ -179,15 +187,9 @@ public class ObsConfigWriter {
     private void writeProfile(ObsLayout layout) {
         SettingsStore.Settings s = settings.get();
         int[] res = parseResolution(s.resolution);
-        String encoder;
-        if (s.encoder == null || s.encoder.isBlank()) {
-            // Blank = auto: probe once and persist so the UI (PR4) reflects the choice.
-            encoder = encoderProbe.detect();
-            s.encoder = encoder;
-            settings.save(s);
-        } else {
-            encoder = s.encoder;
-        }
+        // ensureSettings() has already resolved+persisted the encoder (auto-detect on blank); this is
+        // a defensive fallback only, and never mutates/saves settings here.
+        String encoder = (s.encoder == null || s.encoder.isBlank()) ? EncoderProbe.X264 : s.encoder;
         String recPath =
                 (s.videoDir == null || s.videoDir.isBlank())
                         ? paths.videoDir().toString()
