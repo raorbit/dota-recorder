@@ -13,18 +13,18 @@ class EncoderProbeTest {
 
     @Test
     void nvidiaPicksNvenc() {
-        assertThat(detectFrom(List.of("NVIDIA GeForce RTX 4070"))).isEqualTo("jim_nvenc");
+        assertThat(detectFrom(List.of("NVIDIA GeForce RTX 4070"))).isEqualTo("nvenc");
     }
 
     @Test
     void amdPicksAmf() {
-        assertThat(detectFrom(List.of("AMD Radeon RX 7800 XT"))).isEqualTo("h264_texture_amf");
-        assertThat(detectFrom(List.of("Radeon RX 580 Series"))).isEqualTo("h264_texture_amf");
+        assertThat(detectFrom(List.of("AMD Radeon RX 7800 XT"))).isEqualTo("amd");
+        assertThat(detectFrom(List.of("Radeon RX 580 Series"))).isEqualTo("amd");
     }
 
     @Test
     void intelPicksQsv() {
-        assertThat(detectFrom(List.of("Intel(R) UHD Graphics 770"))).isEqualTo("obs_qsv11");
+        assertThat(detectFrom(List.of("Intel(R) UHD Graphics 770"))).isEqualTo("qsv");
     }
 
     @Test
@@ -36,7 +36,7 @@ class EncoderProbeTest {
     @Test
     void discreteNvidiaWinsOverIntelIgpu() {
         assertThat(detectFrom(List.of("Intel(R) UHD Graphics", "NVIDIA GeForce RTX 4090")))
-                .isEqualTo("jim_nvenc");
+                .isEqualTo("nvenc");
     }
 
     @Test
