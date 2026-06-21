@@ -30,6 +30,7 @@ public record MatchSummary(
         String thumbPath,
         Long fileSizeBytes,
         boolean starred,
-        long createdAt
+        long createdAt,
+        Long recordStartedWallMs
 ) {
 }
