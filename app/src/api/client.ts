@@ -67,26 +67,19 @@ function toStatus(snapshot: StatusSnapshot): Status {
 }
 
 // User-editable configuration mirrored from the core's config/SettingsStore.
-// The raw OBS password is NEVER returned by the core; `obsPasswordSet` is the
-// only signal the renderer gets about whether a secret is stored. Writes go
-// through PUT /settings as a partial patch (see SettingsPatch).
+// The OBS connection is app-managed and no longer part of this surface; only the
+// recording knobs are exposed. Writes go through PUT /settings as a partial patch
+// (see SettingsPatch).
 export interface Settings {
   readonly resolution: string;
   readonly encoder: string;
   readonly retentionCapGb: number;
   readonly videoDir: string;
-  readonly obsHost: string;
-  readonly obsPort: number;
-  readonly obsPasswordSet: boolean;
 }
 
 // A partial update to Settings. Every field is optional so the renderer can PATCH
-// just what changed. `obsPassword` is write-only: it is accepted here but never
-// echoed back in Settings (the core reports only `obsPasswordSet`). Omit it to
-// leave the stored secret untouched; send an empty string to clear it.
-export type SettingsPatch = Partial<Omit<Settings, 'obsPasswordSet'>> & {
-  readonly obsPassword?: string;
-};
+// just what changed; the core carries forward any field the patch omits.
+export type SettingsPatch = Partial<Settings>;
 
 // Mirrors the matches table; populated in a later step.
 export interface MatchSummary {
@@ -159,7 +152,7 @@ export function fetchSettings(): Promise<Settings> {
 }
 
 // Applies a partial settings patch via PUT /settings and returns the updated
-// (password-redacted) Settings the core now holds.
+// Settings the core now holds (the OBS connection is app-managed and off-surface).
 export function updateSettings(patch: SettingsPatch): Promise<Settings> {
   return putJson<SettingsPatch, Settings>('/settings', patch);
 }

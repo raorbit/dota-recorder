@@ -2,7 +2,7 @@ import { useLibraryStore, type Bucket } from '../store/library';
 import type { BucketCounts, Status } from '../api/client';
 import './sidebar.css';
 
-export type SettingsTab = 'general' | 'sceneObs' | 'gsi';
+export type SettingsTab = 'recording' | 'gsi';
 
 interface SidebarProps {
   // Which top-level view is showing, so the SETTINGS group can mark its active
@@ -104,8 +104,7 @@ export function Sidebar({
   const showUnsorted = counts.unsorted > 0;
 
   const settingsItems: readonly { readonly tab: SettingsTab; readonly label: string }[] = [
-    { tab: 'general', label: 'General' },
-    { tab: 'sceneObs', label: 'Scene & OBS' },
+    { tab: 'recording', label: 'Recording' },
     { tab: 'gsi', label: 'Game State Integration' },
   ];
 
