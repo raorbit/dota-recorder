@@ -121,6 +121,19 @@
   height: 12px;
   border-radius: 50%;
   background: #fff;
+  z-index: 2;
+}
+
+/* Dimmed pause span: a translucent grey overlay across paused stretches of the
+   scrub track. Sits BELOW markers + playhead (z-index 0) and ignores pointer
+   events so it never intercepts a seek click. */
+.vp-pause {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(128, 128, 128, 0.3);
+  pointer-events: none;
+  z-index: 0;
 }
 
 .vp-marker {
@@ -130,6 +143,7 @@
   height: 12px;
   border-radius: 2px;
   cursor: pointer;
+  z-index: 1;
 }
 
 .vp-marker:focus-visible {

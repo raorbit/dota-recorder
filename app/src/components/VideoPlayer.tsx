@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import type { MatchSummary, Marker } from '../api/client';
-import { fetchMarkers, fetchMatch, fetchVideo } from '../api/client';
+import type { MatchSummary, Marker, PauseSpan } from '../api/client';
+import { fetchMarkers, fetchMatch, fetchPauses, fetchVideo } from '../api/client';
 import './video-player.css';
 
 interface VideoPlayerProps {
@@ -52,6 +52,11 @@ export function VideoPlayer({ match }: VideoPlayerProps): React.JSX.Element {
   // Marker / duration / video state is LOCAL to the player — the zustand library
   // store is scoped to list/filter/selection and deliberately doesn't carry it.
   const [markers, setMarkers] = useState<readonly Marker[]>([]);
+  const [pauses, setPauses] = useState<readonly PauseSpan[]>([]);
+  // Wall-clock epoch millis of recording start, the anchor for converting pause
+  // spans (also wall-clock) into video offsets. Null on seeded/legacy rows -> the
+  // pause loop renders nothing rather than guessing.
+  const [recordStartWall, setRecordStartWall] = useState<number | null>(null);
   const [durationS, setDurationS] = useState<number | null>(null);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [progress, setProgress] = useState(0); // playhead %, driven by timeupdate
@@ -65,6 +70,8 @@ export function VideoPlayer({ match }: VideoPlayerProps): React.JSX.Element {
   // out-of-order resolves can't overwrite the current match's state.
   useEffect(() => {
     setMarkers([]);
+    setPauses([]);
+    setRecordStartWall(null);
     setDurationS(null);
     setVideoUrl(null);
     setProgress(0);
@@ -74,15 +81,23 @@ export function VideoPlayer({ match }: VideoPlayerProps): React.JSX.Element {
     let cancelled = false;
     const id = matchId;
 
-    void Promise.allSettled([fetchMarkers(id), fetchMatch(id), fetchVideo(id)]).then(
-      ([markersRes, detailRes, videoRes]) => {
-        if (cancelled) return; // a newer selection (or unmount) superseded this fetch
-        if (markersRes.status === 'fulfilled') setMarkers(markersRes.value);
-        if (detailRes.status === 'fulfilled') setDurationS(detailRes.value.durationS);
-        // 404 (no file) just leaves videoUrl null — markers/duration still render.
-        if (videoRes.status === 'fulfilled') setVideoUrl(videoRes.value.url);
-      },
-    );
+    void Promise.allSettled([
+      fetchMarkers(id),
+      fetchMatch(id),
+      fetchVideo(id),
+      fetchPauses(id),
+    ]).then(([markersRes, detailRes, videoRes, pausesRes]) => {
+      if (cancelled) return; // a newer selection (or unmount) superseded this fetch
+      if (markersRes.status === 'fulfilled') setMarkers(markersRes.value);
+      if (detailRes.status === 'fulfilled') {
+        setDurationS(detailRes.value.durationS);
+        setRecordStartWall(detailRes.value.recordStartedWallMs);
+      }
+      // 404 (no file) just leaves videoUrl null — markers/duration still render.
+      if (videoRes.status === 'fulfilled') setVideoUrl(videoRes.value.url);
+      // A failed /pauses (none, or seeded) just leaves the span list empty.
+      if (pausesRes.status === 'fulfilled') setPauses(pausesRes.value);
+    });
 
     return () => {
       cancelled = true;
@@ -170,6 +185,34 @@ export function VideoPlayer({ match }: VideoPlayerProps): React.JSX.Element {
         <div className="vp-scrub" onClick={handleScrubClick}>
           <div className="vp-scrub-fill" style={{ width: `${progress}%` }} />
           <div className="vp-scrub-head" style={{ left: `${progress}%` }} />
+          {/* Dimmed pause spans render BEHIND the markers/playhead (lower z-index,
+              pointer-events:none in CSS) so they never intercept seek clicks. Only
+              when we have a positive duration AND a record-start anchor; seeded rows
+              (null anchor) render nothing rather than mis-position. */}
+          {canPosition &&
+            recordStartWall !== null &&
+            pauses.map((p) => {
+              // Convert wall-clock pause edges into video offsets relative to the
+              // record-start anchor. An open pause (null endWall) extends to the
+              // known end of the recording.
+              const anchor = recordStartWall;
+              const startOffsetS = (p.startWall - anchor) / 1000;
+              const endOffsetS = p.endWall != null ? (p.endWall - anchor) / 1000 : dur;
+              if (Number.isNaN(startOffsetS) || Number.isNaN(endOffsetS)) return null;
+              const startPct = Math.min(100, Math.max(0, (startOffsetS / dur) * 100));
+              const endPct = Math.min(100, Math.max(0, (endOffsetS / dur) * 100));
+              const widthPct = Math.max(0, endPct - startPct);
+              if (widthPct <= 0) return null; // degenerate span collapses to nothing
+              return (
+                <div
+                  key={p.id}
+                  className="vp-pause"
+                  style={{ left: `${startPct}%`, width: `${widthPct}%` }}
+                  title="paused"
+                  aria-hidden="true"
+                />
+              );
+            })}
           {canPosition &&
             markers.map((m) => {
               const offset = m.videoOffsetS;
