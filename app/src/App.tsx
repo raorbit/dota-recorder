@@ -13,13 +13,13 @@ type View = 'library' | 'settings';
 // The Browse / Library shell. Top-level layout is the custom title bar
 // (WindowFrame) over a two-column body: a 230px Sidebar and a fluid Main column.
 // Main shows either the library (VideoPlayer + FilterRow + MatchTable) or the
-// Settings view, which still reaches the existing SceneObsPanel + GsiSettings.
+// Settings view, which reaches the RecordingSettings + GsiSettings panels.
 //
 // Live data (matches, bucket counts, status) is owned by the zustand library
 // store; startLibrary() kicks off the initial load and the StatusSocket here.
 export function App(): React.JSX.Element {
   const [view, setView] = useState<View>('library');
-  const [settingsTab, setSettingsTab] = useState<SettingsTab>('general');
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>('recording');
 
   const matches = useLibraryStore((s) => s.matches);
   const selectedMatchId = useLibraryStore((s) => s.selectedMatchId);
