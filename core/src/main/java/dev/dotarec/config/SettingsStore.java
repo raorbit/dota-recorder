@@ -37,6 +37,17 @@ public class SettingsStore {
         public String obsPassword = "";
         /** Video output directory; null/blank means use the default video dir. */
         public String videoDir = "";
+        /**
+         * Dota 2 32-bit account id (the OpenDota {@code account_id}). Used by the enricher to find
+         * OUR player in the 10-player scoreboard so result/stats can be attributed. Null until the
+         * user configures it; a null id holds matches in {@code pending} rather than failing them.
+         */
+        public Long accountId = null;
+        /**
+         * Optional OpenDota API key. When present the enricher appends {@code ?api_key=} to lift the
+         * anonymous rate limit. Out of scope for B7 unit tests; the live transport uses it in PR5.
+         */
+        public String opendotaApiKey = "";
 
         /** Field-by-field copy (all fields are primitive/immutable) for atomic copy-on-write updates. */
         Settings copy() {
@@ -48,6 +59,8 @@ public class SettingsStore {
             c.obsPort = obsPort;
             c.obsPassword = obsPassword;
             c.videoDir = videoDir;
+            c.accountId = accountId;
+            c.opendotaApiKey = opendotaApiKey;
             return c;
         }
     }
