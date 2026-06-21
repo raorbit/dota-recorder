@@ -1,0 +1,49 @@
+{
+  "match_id": 7654321098,
+  "radiant_win": true,
+  "duration": 2415,
+  "start_time": 1718900000,
+  "lobby_type": 7,
+  "game_mode": 22,
+  "players": [
+    {
+      "account_id": 96828122,
+      "player_slot": 0,
+      "hero_id": 86,
+      "kills": 9,
+      "deaths": 4,
+      "assists": 21,
+      "gold_per_min": 412,
+      "xp_per_min": 533,
+      "net_worth": 18240,
+      "last_hits": 121,
+      "rank_tier": 74
+    },
+    {
+      "account_id": 11111111,
+      "player_slot": 1,
+      "hero_id": 1,
+      "kills": 12,
+      "deaths": 3,
+      "assists": 8,
+      "gold_per_min": 620,
+      "xp_per_min": 710,
+      "net_worth": 27400,
+      "last_hits": 310,
+      "rank_tier": 75
+    },
+    {
+      "account_id": 22222222,
+      "player_slot": 129,
+      "hero_id": 8,
+      "kills": 3,
+      "deaths": 11,
+      "assists": 6,
+      "gold_per_min": 280,
+      "xp_per_min": 340,
+      "net_worth": 9100,
+      "last_hits": 95,
+      "rank_tier": 62
+    }
+  ]
+}
