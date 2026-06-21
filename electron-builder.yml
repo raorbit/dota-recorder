@@ -62,3 +62,7 @@ nsis:
   perMachine: false
   allowToChangeInstallationDirectory: true
   artifactName: ${productName}-Setup-${version}.${ext}
+  # Custom install/uninstall hooks (project-root-relative; the default build/installer.nsh
+  # would miss our build-resources/ buildResources dir). Adds an elevated Windows Firewall
+  # rule scoping the managed OBS websocket port (4466) to loopback — issue #14.
+  include: build-resources/installer.nsh
