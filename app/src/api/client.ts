@@ -186,6 +186,10 @@ export interface MatchDetail {
   readonly rankTier: number | null;
   readonly mmrDelta: number | null;
   readonly durationS: number | null;
+  // Wall-clock epoch millis when recording started — the anchor the player uses to
+  // convert pause spans (also wall-clock epoch millis) into video offsets. Null on
+  // seeded/legacy rows that predate the column being written.
+  readonly recordStartedWallMs: number | null;
   readonly playedAt: number | null;
   readonly videoPath: string | null;
   readonly thumbPath: string | null;
