@@ -41,8 +41,11 @@ public class MigrationRunner implements ApplicationRunner {
 
     private static final Logger log = LoggerFactory.getLogger(MigrationRunner.class);
 
-    private static final int LATEST_VERSION = 1;
-    private static final String[] SCRIPTS = {"db/migration/V1__init.sql"};
+    private static final int LATEST_VERSION = 2;
+    private static final String[] SCRIPTS = {
+        "db/migration/V1__init.sql",
+        "db/migration/V2__enrich_retry.sql",
+    };
 
     private final DataSource dataSource;
     private final AtomicInteger currentVersion = new AtomicInteger(0);
