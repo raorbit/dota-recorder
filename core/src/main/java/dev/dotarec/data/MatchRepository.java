@@ -34,6 +34,9 @@ public class MatchRepository {
             record_started_wall_ms
             """;
 
+    /** Cap on rows {@link #findPendingEnrichment} returns per tick, so a backlog can't flood the pool. */
+    private static final int PENDING_LIMIT = 25;
+
     private final DataSource dataSource;
 
     public MatchRepository(DataSource dataSource) {
@@ -299,6 +302,100 @@ public class MatchRepository {
         }
     }
 
+    // ---- enrichment --------------------------------------------------------
+
+    /**
+     * Eligibility query for the enrichment queue: {@code pending} match rows that have a Dota
+     * match id, are under the attempt cap, and whose backoff window has elapsed. Oldest-first
+     * (by id) and capped at {@value #PENDING_LIMIT} so a backlog can't flood the bounded enrich
+     * pool in one tick. The {@code dota_match_id IS NOT NULL} guard ensures manual/clip rows are
+     * never fetched.
+     *
+     * @param maxAttempts exclusive cap on {@code enrich_attempts}
+     * @param nowMs       current wall clock; a row is eligible when {@code enrich_next_after_ms}
+     *                    is null or has passed
+     */
+    public List<PendingMatch> findPendingEnrichment(int maxAttempts, long nowMs) {
+        String sql = "SELECT id, dota_match_id, enrich_attempts FROM matches "
+                + "WHERE enrichment_state = 'pending' AND dota_match_id IS NOT NULL "
+                + "AND enrich_attempts < ? "
+                + "AND (enrich_next_after_ms IS NULL OR enrich_next_after_ms <= ?) "
+                + "ORDER BY id ASC LIMIT " + PENDING_LIMIT;
+        List<PendingMatch> out = new ArrayList<>();
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setInt(1, maxAttempts);
+            ps.setLong(2, nowMs);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    out.add(new PendingMatch(
+                            rs.getLong("id"),
+                            rs.getLong("dota_match_id"),
+                            rs.getInt("enrich_attempts")));
+                }
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to query pending enrichment", e);
+        }
+        return out;
+    }
+
+    /**
+     * Current {@code enrich_attempts} for a row, or 0 if the row is absent. The enricher reads this
+     * to compute the next attempt count + backoff without inflating {@link MatchSummary}.
+     */
+    public int enrichAttempts(long id) {
+        String sql = "SELECT enrich_attempts FROM matches WHERE id = ?";
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, id);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getInt(1) : 0;
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to read enrich_attempts for match " + id, e);
+        }
+    }
+
+    /**
+     * Applies an enrichment outcome to a single row in one UPDATE. Serves all three enricher
+     * paths via the {@link EnrichmentUpdate}'s terminal {@code state}: full enrich
+     * ({@code enriched}), partial NotReady ({@code pending}), and permanent fail ({@code failed}).
+     * The retry bookkeeping ({@code enrich_attempts}/{@code enrich_next_after_ms}) is written here
+     * too so the queue's WHERE sees the bump. {@code mmr_delta} is always bound null (no API has
+     * it). Keyed on the surrogate {@code id}.
+     *
+     * @return rows updated (0 if no such match)
+     */
+    public int applyEnrichment(long id, EnrichmentUpdate u) {
+        String sql = "UPDATE matches SET "
+                + "result = ?, lobby_type = ?, game_mode = ?, gpm = ?, xpm = ?, net_worth = ?, "
+                + "last_hits = ?, rank_tier = ?, mmr_delta = NULL, duration_s = ?, played_at = ?, "
+                + "enrichment_state = ?, enrich_attempts = ?, enrich_next_after_ms = ? "
+                + "WHERE id = ?";
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            int i = 1;
+            ps.setString(i++, u.result());
+            setNullableInt(ps, i++, u.lobbyType());
+            setNullableInt(ps, i++, u.gameMode());
+            setNullableInt(ps, i++, u.gpm());
+            setNullableInt(ps, i++, u.xpm());
+            setNullableInt(ps, i++, u.netWorth());
+            setNullableInt(ps, i++, u.lastHits());
+            setNullableInt(ps, i++, u.rankTier());
+            setNullableInt(ps, i++, u.durationS());
+            setNullableLong(ps, i++, u.playedAt());
+            ps.setString(i++, u.state());
+            ps.setInt(i++, u.attempts());
+            setNullableLong(ps, i++, u.nextAfterMs());
+            ps.setLong(i, id);
+            return ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to apply enrichment to match " + id, e);
+        }
+    }
+
     // ---- mapping / binding -------------------------------------------------
 
     private MatchSummary map(ResultSet rs) throws SQLException {
@@ -402,6 +499,36 @@ public class MatchRepository {
             boolean starred,
             long createdAt,
             Long recordStartedWallMs
+    ) {
+    }
+
+    /**
+     * Minimal shape the enrichment queue dispatches on -- just the surrogate id, the Dota match id
+     * to fetch, and the current attempt count. Deliberately not the heavy {@link MatchSummary}.
+     */
+    public record PendingMatch(long id, long dotaMatchId, int attempts) {
+    }
+
+    /**
+     * Carrier for {@link #applyEnrichment(long, EnrichmentUpdate)}. The {@code state} is the terminal
+     * enrichment state to write ({@code enriched}/{@code failed}/{@code pending}), so one method
+     * serves the full-enrich, partial-NotReady, and fail paths. {@code attempts}/{@code nextAfterMs}
+     * carry the retry bookkeeping. {@code mmr_delta} is intentionally absent -- always written null.
+     */
+    public record EnrichmentUpdate(
+            String result,
+            Integer lobbyType,
+            Integer gameMode,
+            Integer gpm,
+            Integer xpm,
+            Integer netWorth,
+            Integer lastHits,
+            Integer rankTier,
+            Integer durationS,
+            Long playedAt,
+            String state,
+            int attempts,
+            Long nextAfterMs
     ) {
     }
 }
