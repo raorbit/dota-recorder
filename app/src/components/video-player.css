@@ -13,6 +13,17 @@
   overflow: hidden;
 }
 
+/* Real VOD fills the stage behind the placeholder / score / clock / scrubber
+   chrome. With no src (seeded / pruned / 404) it's an empty, invisible element. */
+.vp-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: transparent;
+}
+
 .vp-hatch {
   position: absolute;
   inset: 0;
@@ -118,6 +129,12 @@
   width: 8px;
   height: 12px;
   border-radius: 2px;
+  cursor: pointer;
+}
+
+.vp-marker:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 1px;
 }
 
 .vp-marker[data-kind='death'] {

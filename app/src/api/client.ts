@@ -243,6 +243,14 @@ export function fetchMarkers(id: number): Promise<Marker[]> {
   return getJson<Marker[]>(`/matches/${id}/markers`);
 }
 
+// GET /matches/{id}/video — resolves the recorded file as { path, url } where
+// `url` is a file:// URI the renderer can drop straight into <video src>. Throws
+// (404) when the row has no video_path or retention pruned the file; callers wrap
+// it in Promise.allSettled so markers/duration still render without a file.
+export function fetchVideo(id: number): Promise<VideoLocation> {
+  return getJson<VideoLocation>(`/matches/${id}/video`);
+}
+
 export function fetchPauses(id: number): Promise<PauseSpan[]> {
   return getJson<PauseSpan[]>(`/matches/${id}/pauses`);
 }
