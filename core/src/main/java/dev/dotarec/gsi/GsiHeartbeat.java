@@ -23,6 +23,16 @@ public class GsiHeartbeat {
         lastFrameEpochMillis = System.currentTimeMillis();
     }
 
+    /**
+     * Test/internal hook: stamps the last-frame instant at an arbitrary epoch so a test can simulate
+     * a stale feed (e.g. {@code now - 31s}) without sleeping. Production code only ever calls
+     * {@link #mark()}; this is {@code public} only so the watchdog test (a different package) can
+     * reach it.
+     */
+    public void markAt(long epochMillis) {
+        lastFrameEpochMillis = epochMillis;
+    }
+
     public long lastFrameAgoMillis() {
         long last = lastFrameEpochMillis;
         return last == 0L ? Long.MAX_VALUE : System.currentTimeMillis() - last;
