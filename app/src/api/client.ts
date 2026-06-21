@@ -270,6 +270,10 @@ export function setStarred(id: number, starred: boolean): Promise<MatchDetail> {
 
 export type StatusListener = (status: Status) => void;
 export type StateListener = (connected: boolean) => void;
+// Receives raw /ws envelopes for library-mutating match.* events
+// (match.recorded / match.enriched / match.enrichFailed). The renderer reacts by
+// re-fetching the list + counts; the payload shape is intentionally opaque here.
+export type MatchEventListener = (evt: { type: string; payload: unknown }) => void;
 
 /**
  * WebSocket client to the core's /ws endpoint with exponential-backoff reconnect.
@@ -283,6 +287,7 @@ export class StatusSocket {
   private readonly maxBackoffMs = 10_000;
   private readonly statusListeners = new Set<StatusListener>();
   private readonly stateListeners = new Set<StateListener>();
+  private readonly matchEventListeners = new Set<MatchEventListener>();
 
   connect(): void {
     this.closed = false;
@@ -303,6 +308,13 @@ export class StatusSocket {
   onConnectionChange(listener: StateListener): () => void {
     this.stateListeners.add(listener);
     return () => this.stateListeners.delete(listener);
+  }
+
+  // Subscribe to library-mutating match.* frames (match.recorded /
+  // match.enriched / match.enrichFailed). Mirrors onStatus(): returns a detacher.
+  onEvent(listener: MatchEventListener): () => void {
+    this.matchEventListeners.add(listener);
+    return () => this.matchEventListeners.delete(listener);
   }
 
   private open(): void {
@@ -326,6 +338,14 @@ export class StatusSocket {
       if (envelope?.type === 'status') {
         const status = toStatus(envelope.payload as StatusSnapshot);
         for (const listener of this.statusListeners) listener(status);
+      } else if (
+        envelope?.type === 'match.enriched' ||
+        envelope?.type === 'match.enrichFailed' ||
+        envelope?.type === 'match.recorded'
+      ) {
+        // Library-mutating events: fan out to onEvent() subscribers, which
+        // re-fetch the list + counts. Unknown types still fall through ignored.
+        for (const listener of this.matchEventListeners) listener(envelope);
       }
     };
 

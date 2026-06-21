@@ -168,9 +168,10 @@ export function startLibrary(): () => void {
     if (!connected) useLibraryStore.getState().setStatus(null);
   });
 
-  // The socket forwards only `status` frames today. We additionally listen for the
-  // raw frame to catch library-mutating events. The client's StatusSocket exposes
-  // status frames via onStatus; for match.* frames we attach a low-level handler.
+  // Beyond `status` frames, the socket forwards library-mutating match.* events
+  // (match.recorded / match.enriched / match.enrichFailed) via onEvent. Any of
+  // them re-loads the list + counts so an enriched row jumps Unsorted -> its
+  // real bucket and the sidebar badges refresh together.
   const off = subscribeToMatchEvents(socket, () => {
     void useLibraryStore.getState().load();
   });
@@ -185,18 +186,15 @@ export function startLibrary(): () => void {
   };
 }
 
-// match.recorded / match.enriched arrive as raw /ws envelopes. StatusSocket only
-// surfaces `status` frames through its typed API, so we tap the underlying socket
-// non-invasively: we cannot reach its private WebSocket, so instead we rely on the
-// status frame as a heartbeat AND expose a hook for when the client gains a typed
-// match-event channel. Until then this is a no-op subscription that returns a
-// detach function, keeping the call site stable.
+// match.recorded / match.enriched / match.enrichFailed arrive as raw /ws
+// envelopes. StatusSocket now surfaces them through its typed onEvent() channel,
+// so we forward every such frame to onMatchEvent — which re-fetches the list +
+// counts. A newly-enriched row thus leaves Unsorted for its real bucket and the
+// badge counts update in one shot. load() replaces (not increments) state, so
+// duplicate frames for the same id are naturally idempotent — no double-counting.
 function subscribeToMatchEvents(
-  _socket: StatusSocket,
-  _onMatchEvent: () => void,
+  socket: StatusSocket,
+  onMatchEvent: () => void,
 ): () => void {
-  // Intentionally inert: the current StatusSocket does not expose match.* frames.
-  // When the client adds an onEvent('match.recorded'|'match.enriched') channel,
-  // wire _onMatchEvent here. Returning a detacher keeps startLibrary() unchanged.
-  return () => {};
+  return socket.onEvent(() => onMatchEvent());
 }
