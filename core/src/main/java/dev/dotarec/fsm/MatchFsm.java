@@ -4,6 +4,8 @@ import dev.dotarec.bridge.EventPublisher;
 import dev.dotarec.data.MarkerRepository;
 import dev.dotarec.data.MatchRepository;
 import dev.dotarec.data.MatchRepository.NewMatch;
+import dev.dotarec.data.PauseRepository;
+import dev.dotarec.fsm.RecordingSession.PauseSpanBuffer;
 import dev.dotarec.gsi.GsiFrame;
 import dev.dotarec.obs.ObsException;
 import dev.dotarec.obs.ObsRecorder;
@@ -68,6 +70,7 @@ public class MatchFsm {
     private final EventTagger tagger;
     private final MatchRepository matches;
     private final MarkerRepository markers;
+    private final PauseRepository pauses;
     private final EventPublisher events;
 
     private volatile MatchState state = MatchState.IDLE;
@@ -79,12 +82,14 @@ public class MatchFsm {
             EventTagger tagger,
             MatchRepository matches,
             MarkerRepository markers,
+            PauseRepository pauses,
             EventPublisher events) {
         this.obs = obs;
         this.thumbnails = thumbnails;
         this.tagger = tagger;
         this.matches = matches;
         this.markers = markers;
+        this.pauses = pauses;
         this.events = events;
     }
 
@@ -184,10 +189,22 @@ public class MatchFsm {
         if (s == null) {
             return;
         }
+        GsiFrame last = s.getLastFrame();
         List<PendingMarker> detected =
-                tagger.diff(s.getLastFrame(), frame, s.getRecordConfirmedWallMs(), LIVE_DURATION_CLAMP);
+                tagger.diff(last, frame, s.getRecordConfirmedWallMs(), LIVE_DURATION_CLAMP);
         if (!detected.isEmpty()) {
             s.addMarkers(detected);
+        }
+        // Pause edge: buffer a span open on false->true, close it on true->false. Persisted at
+        // finalize once the matches row (the FK target) exists. last==null (the first frame, before
+        // setLastFrame runs) is treated as not-paused, so a recording that opens mid-pause still
+        // starts a span — and never NPEs.
+        boolean was = last != null && last.paused();
+        boolean now = frame.paused();
+        if (!was && now) {
+            s.openPause(frame.wallClockMillis());
+        } else if (was && !now) {
+            s.closePause(frame.wallClockMillis());
         }
         s.observe(frame);
         s.setLastFrame(frame);
@@ -227,6 +244,7 @@ public class MatchFsm {
 
         long matchRowId = persistMatch(s, videoPath, thumbPath, durationS, now);
         persistMarkers(matchRowId, s, durationS);
+        persistPauses(matchRowId, s, now);
 
         publishRecorded(matchRowId, s, durationS);
 
@@ -276,6 +294,14 @@ public class MatchFsm {
             // end of the file (live tagging used a generous bound).
             double offset = Math.min(m.videoOffsetS(), durationS);
             markers.insert(matchRowId, m.type(), offset, m.gameClock(), m.label(), m.source());
+        }
+    }
+
+    private void persistPauses(long matchRowId, RecordingSession s, long finalizeWall) {
+        // drainPauses closes any still-open span to finalize time so no row carries a null end_wall
+        // (the match ended while paused, or the watchdog force-finalized mid-pause).
+        for (PauseSpanBuffer span : s.drainPauses(finalizeWall)) {
+            pauses.insert(matchRowId, span.startWall(), span.endWall());
         }
     }
 

@@ -13,6 +13,7 @@ import dev.dotarec.data.MarkerRepository;
 import dev.dotarec.data.MarkerRow;
 import dev.dotarec.data.MatchRepository;
 import dev.dotarec.data.MatchSummary;
+import dev.dotarec.data.PauseRepository;
 import dev.dotarec.data.TestDb;
 import dev.dotarec.gsi.GsiFrame;
 import dev.dotarec.obs.ObsException;
@@ -86,6 +87,7 @@ class MatchFsmTest {
     private FakeThumbs thumbs;
     private MatchRepository matches;
     private MarkerRepository markers;
+    private PauseRepository pauses;
     private EventPublisher events;
     private MatchFsm fsm;
 
@@ -94,10 +96,11 @@ class MatchFsmTest {
         DataSource ds = TestDb.migrated(dir);
         matches = new MatchRepository(ds);
         markers = new MarkerRepository(ds);
+        pauses = new PauseRepository(ds);
         events = mock(EventPublisher.class);
         obs = new FakeObs();
         thumbs = new FakeThumbs();
-        fsm = new MatchFsm(obs, thumbs, new EventTagger(), matches, markers, events);
+        fsm = new MatchFsm(obs, thumbs, new EventTagger(), matches, markers, pauses, events);
     }
 
     @Test
@@ -206,7 +209,7 @@ class MatchFsmTest {
     @Test
     void thumbnailFailure_doesNotLoseTheRecording() {
         ThumbnailCapturer failing = id -> { throw new ObsException("no scene"); };
-        fsm = new MatchFsm(obs, failing, new EventTagger(), matches, markers, events);
+        fsm = new MatchFsm(obs, failing, new EventTagger(), matches, markers, pauses, events);
 
         fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
         fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_POST_GAME").noHero().build());
