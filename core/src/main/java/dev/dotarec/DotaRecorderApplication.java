@@ -2,6 +2,7 @@ package dev.dotarec;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
  * Entry point for the Dota 2 Recorder core service.
@@ -10,8 +11,12 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  * the Electron shell. It exposes a REST/WebSocket bridge on 127.0.0.1:3224 and a
  * dedicated GSI ingest connector on 127.0.0.1:3223 (see
  * {@link dev.dotarec.bridge.GsiConnectorConfig}).
+ *
+ * <p>{@code @EnableScheduling} is required for the OBS connect/scene-setup retry loop
+ * ({@link dev.dotarec.obs.ObsConnectionScheduler}).
  */
 @SpringBootApplication
+@EnableScheduling
 public class DotaRecorderApplication {
 
     public static void main(String[] args) {
