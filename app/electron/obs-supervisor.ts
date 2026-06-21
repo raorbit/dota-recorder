@@ -12,7 +12,7 @@
 //  - the OBS pid is assigned to the same kill-on-close Job Object as the core so
 //    a hard Electron crash reaps OBS too (it would otherwise hold the websocket
 //    port and a capture lock, blocking the next launch).
-import { spawn, type ChildProcess } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as assignJob from './job-object';
@@ -77,6 +77,9 @@ export class ObsSupervisor {
       '--websocket_ipv4_only',
     ];
 
+    // Scope the managed websocket port to loopback before OBS binds it (issue #14).
+    await this.scopePortToLoopback();
+
     // OBS resolves portable data relative to its own dir, so spawn with cwd set
     // to the OBS dir to keep --portable config/logs alongside the binary.
     this.child = spawn(obs64Path, args, {
@@ -137,6 +140,41 @@ export class ObsSupervisor {
       child.kill('SIGKILL');
     }
     this.child = null;
+  }
+
+  /**
+   * Best-effort: block inbound LAN access to the managed obs-websocket port, scoping it to
+   * loopback. obs-websocket binds all interfaces (0.0.0.0) and exposes no bind-address option, so
+   * a Windows Firewall block rule on the port is the only scoping (issue #14). Loopback traffic
+   * (127.0.0.1 — our own client) bypasses the firewall entirely, so the block hits the LAN only.
+   *
+   * Editing firewall rules needs admin, so an unelevated (per-user) launch logs a warning and runs
+   * with the port exposed-but-authed; the reliable, elevated form is an installer-time rule.
+   */
+  private async scopePortToLoopback(): Promise<void> {
+    if (process.platform !== 'win32') return;
+    const name = `DotaRecorder OBS WebSocket loopback ${this.port}`;
+    const port = String(this.port);
+    // Idempotent: drop any prior rule of this name (ignoring "not found"), then add a fresh block.
+    await this.runNetsh([
+      'advfirewall', 'firewall', 'delete', 'rule', `name=${name}`, 'protocol=TCP', `localport=${port}`,
+    ]);
+    const added = await this.runNetsh([
+      'advfirewall', 'firewall', 'add', 'rule',
+      `name=${name}`, 'dir=in', 'action=block', 'protocol=TCP', `localport=${port}`,
+    ]);
+    this.onLog(
+      added
+        ? `firewall: scoped obs-websocket :${port} to loopback`
+        : `firewall: could not scope :${port} to loopback (needs admin); port is auth-protected but LAN-reachable`,
+    );
+  }
+
+  /** Runs a netsh command; resolves true on exit 0, false otherwise (never throws). */
+  private runNetsh(args: string[]): Promise<boolean> {
+    return new Promise((resolve) => {
+      execFile('netsh', args, { windowsHide: true, timeout: 10_000 }, (err) => resolve(!err));
+    });
   }
 
   private emitLines(buf: Buffer): void {
