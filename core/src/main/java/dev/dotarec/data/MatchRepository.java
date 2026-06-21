@@ -30,7 +30,8 @@ public class MatchRepository {
             id, dota_match_id, record_kind, enrichment_state, hero,
             kills, deaths, assists, gpm, xpm, net_worth, last_hits,
             result, lobby_type, game_mode, rank_tier, mmr_delta, duration_s,
-            played_at, video_path, thumb_path, file_size_bytes, starred, created_at
+            played_at, video_path, thumb_path, file_size_bytes, starred, created_at,
+            record_started_wall_ms
             """;
 
     private final DataSource dataSource;
@@ -315,7 +316,8 @@ public class MatchRepository {
                 rs.getString("thumb_path"),
                 getNullableLong(rs, "file_size_bytes"),
                 rs.getInt("starred") != 0,
-                rs.getLong("created_at")
+                rs.getLong("created_at"),
+                getNullableLong(rs, "record_started_wall_ms")
         );
     }
 
