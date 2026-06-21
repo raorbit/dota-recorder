@@ -8,7 +8,8 @@ import { app, BrowserWindow, dialog } from 'electron';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { JvmSupervisor } from './jvm-supervisor';
-import { electronLogPath, logDir, packagedIndexHtml } from './paths';
+import { ObsSupervisor } from './obs-supervisor';
+import { BRIDGE_BASE, electronLogPath, logDir, packagedIndexHtml } from './paths';
 
 const isDev = process.env.DOTAREC_DEV === '1' || !app.isPackaged;
 const DEV_SERVER_URL = 'http://localhost:5173';
@@ -24,7 +25,9 @@ function logLine(line: string): void {
 }
 
 const supervisor = new JvmSupervisor({ onLog: (line) => logLine(`[core] ${line}`) });
+let obsSupervisor: ObsSupervisor | null = null;
 let mainWindow: BrowserWindow | null = null;
+let shuttingDown = false;
 
 if (!app.requestSingleInstanceLock()) {
   app.quit();
@@ -56,6 +59,63 @@ async function bootstrap(): Promise<void> {
   await supervisor.start();
   logLine('core healthy; opening window');
   createWindow();
+  // Launch OBS in the background so a slow or failed OBS never blocks the UI; the
+  // status card reflects OBS connectivity from /status as the core connects to it.
+  void launchObs();
+}
+
+/**
+ * Spawn + supervise OBS once the core's config bootstrap has finished. Detached from
+ * window startup; failure is non-fatal — the status card surfaces "recorder not ready".
+ */
+async function launchObs(): Promise<void> {
+  try {
+    // The core generates the OBS port/password and writes its config during its
+    // bootstrap; GET /obs/launch-args returns 409 until that completes, so poll.
+    const launchArgs = await pollLaunchArgs();
+    if (shuttingDown) return;
+    obsSupervisor = new ObsSupervisor({
+      obsDir: launchArgs.obsDir,
+      port: launchArgs.port,
+      password: launchArgs.password,
+      onLog: (line) => logLine(`[obs] ${line}`),
+    });
+    await obsSupervisor.start();
+    logLine('OBS connected');
+  } catch (err) {
+    logLine(`OBS startup failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/**
+ * Poll GET /obs/launch-args until the core's config bootstrap completes (200).
+ * Returns the OBS dir + websocket port/password the core generated. Throws if the
+ * core never becomes ready within the retry budget.
+ */
+async function pollLaunchArgs(
+  maxRetries = 30,
+): Promise<{ obsDir: string; port: number; password: string }> {
+  for (let i = 0; i < maxRetries; i++) {
+    if (shuttingDown) break;
+    try {
+      const res = await fetch(`${BRIDGE_BASE}/obs/launch-args`, {
+        signal: AbortSignal.timeout(1_500),
+      });
+      if (res.ok) {
+        const a = (await res.json()) as { obsDir?: string; port?: number; password?: string };
+        // 200 only once config is fully written; still guard against a blank password
+        // so we never launch OBS with auth effectively disabled.
+        if (a.obsDir && typeof a.port === 'number' && a.password) {
+          return { obsDir: a.obsDir, port: a.port, password: a.password };
+        }
+      }
+      // 409 (not ready) or an incomplete body — fall through and retry.
+    } catch {
+      /* core not reachable yet; retry. */
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  throw new Error('Core did not provide OBS launch args within timeout');
 }
 
 function createWindow(): void {
@@ -86,11 +146,14 @@ function createWindow(): void {
   }
 }
 
-let shuttingDown = false;
 async function shutdown(): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
   try {
+    // Stop OBS first so the core can observe a clean disconnect, then the core.
+    if (obsSupervisor) {
+      await obsSupervisor.stop();
+    }
     await supervisor.stop();
   } catch {
     /* best-effort - we are exiting regardless. */
