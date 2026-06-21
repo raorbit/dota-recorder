@@ -32,6 +32,15 @@ public class RecordingSession {
     /** Markers detected live, flushed to {@code markers} at finalize. */
     private final List<PendingMarker> markers = new ArrayList<>();
 
+    /**
+     * Pause spans observed live (from {@code map.paused} edges), flushed to {@code pauses} at
+     * finalize. The matches row only exists at finalize, while pause edges happen mid-RECORDING, so
+     * they must be buffered here (like markers) rather than written through {@code PauseRepository}
+     * which needs a real {@code matchId}. The last entry's {@code endWall} is null while a pause is
+     * still open; {@link #drainPauses(long)} closes it to the finalize wall clock.
+     */
+    private final List<PauseSpanBuffer> pauseSpans = new ArrayList<>();
+
     // Latest observed match facts, snapshotted as frames arrive so finalize can persist them even
     // when the terminal POST_GAME frame omits the hero/player block.
     private String hero;
@@ -98,6 +107,45 @@ public class RecordingSession {
         markers.addAll(more);
     }
 
+    /**
+     * Opens a pause span at {@code startWall} (a false-&gt;true {@code paused} edge). A no-op if a span
+     * is already open so a stutter in the {@code paused} flag can't nest spans.
+     */
+    public void openPause(long startWall) {
+        if (hasOpenPause()) {
+            return;
+        }
+        pauseSpans.add(new PauseSpanBuffer(startWall, null));
+    }
+
+    /**
+     * Closes the currently-open pause span at {@code endWall} (a true-&gt;false {@code paused} edge). A
+     * no-op when no span is open (a resume without a matching pause).
+     */
+    public void closePause(long endWall) {
+        if (!hasOpenPause()) {
+            return;
+        }
+        PauseSpanBuffer open = pauseSpans.get(pauseSpans.size() - 1);
+        pauseSpans.set(pauseSpans.size() - 1, new PauseSpanBuffer(open.startWall(), endWall));
+    }
+
+    /**
+     * Returns the buffered pause spans for persistence, closing a still-open span to
+     * {@code finalizeWall} first so no span is left with a null {@code endWall} (the game ended while
+     * paused, or the watchdog force-finalized mid-pause).
+     */
+    public List<PauseSpanBuffer> drainPauses(long finalizeWall) {
+        if (hasOpenPause()) {
+            closePause(finalizeWall);
+        }
+        return pauseSpans;
+    }
+
+    private boolean hasOpenPause() {
+        return !pauseSpans.isEmpty() && pauseSpans.get(pauseSpans.size() - 1).endWall() == null;
+    }
+
     public String getHero() {
         return hero;
     }
@@ -143,5 +191,12 @@ public class RecordingSession {
         this.assists = frame.assists();
         this.radiantScore = frame.radiantScore();
         this.direScore = frame.direScore();
+    }
+
+    /**
+     * A buffered pause span in wall-clock millis. {@code endWall} is null only while the pause is
+     * open mid-recording; {@link #drainPauses(long)} guarantees it is non-null before persistence.
+     */
+    public record PauseSpanBuffer(long startWall, Long endWall) {
     }
 }
