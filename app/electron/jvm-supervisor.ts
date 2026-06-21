@@ -11,7 +11,14 @@
 // loud status-card error on crash are later steps; this is the Step 0 skeleton.
 import { spawn, type ChildProcess } from 'node:child_process';
 import * as assignJob from './job-object';
-import { HEALTH_URL, bundledJavawPath, resolveCoreJar } from './paths';
+import {
+  HEALTH_URL,
+  bundledJavawPath,
+  obsDir,
+  obsSourceDir,
+  obsVersion,
+  resolveCoreJar,
+} from './paths';
 
 export interface SupervisorOptions {
   /** Total time to wait for /health before giving up. */
@@ -43,7 +50,19 @@ export class JvmSupervisor {
     // Packaged: bundled javaw.exe. Dev: rely on javaw on PATH.
     const javaw = bundledJavawPath() ?? 'javaw';
 
-    this.child = spawn(javaw, ['-jar', jar], {
+    // Thread OBS locations into the JVM as system properties so the core's
+    // ObsConfigWriter knows where to materialize/launch OBS from. source-dir is
+    // omitted in dev when no bundled OBS is present (core skips the first-run copy).
+    const source = obsSourceDir();
+    const jvmArgs = [
+      `-Dapp.obs.dir=${obsDir()}`,
+      ...(source ? [`-Dapp.obs.source-dir=${source}`] : []),
+      `-Dapp.obs.version=${obsVersion()}`,
+      '-jar',
+      jar,
+    ];
+
+    this.child = spawn(javaw, jvmArgs, {
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     });

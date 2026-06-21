@@ -74,3 +74,56 @@ export function logDir(): string {
 export function electronLogPath(): string {
   return path.join(logDir(), 'electron.log');
 }
+
+/**
+ * Writable OBS directory (%LOCALAPPDATA%/dota-recorder/obs on Windows). Electron
+ * launches obs64.exe from here, and the core materializes/configures it on first
+ * run. Falls back to appData when LOCALAPPDATA is unset (non-Windows / odd envs).
+ */
+export function obsDir(): string {
+  const localAppData = process.env.LOCALAPPDATA;
+  if (localAppData) {
+    return path.join(localAppData, 'dota-recorder', 'obs');
+  }
+  return path.join(app.getPath('appData'), 'dota-recorder', 'obs');
+}
+
+/**
+ * Source (bundled) OBS directory the core copies from on first run.
+ *  - packaged: <resourcesPath>/obs/obs-portable
+ *  - dev:      <repoRoot>/build-resources/obs/obs-portable (null if absent)
+ */
+export function obsSourceDir(): string | null {
+  if (isPackaged()) {
+    return path.join(process.resourcesPath, 'obs', 'obs-portable');
+  }
+  // Dev mode: app.getAppPath() points at app/; the repo root is one level up.
+  const devPath = path.resolve(app.getAppPath(), '..', 'build-resources', 'obs', 'obs-portable');
+  return fs.existsSync(devPath) ? devPath : null;
+}
+
+/**
+ * OBS version string read from the `.obs-<version>.ok` marker filename (e.g.
+ * "32.1.2"). Used to detect when a bundled OBS upgrade needs re-materializing.
+ *  - packaged: <resourcesPath>/obs/.obs-<version>.ok
+ *  - dev:      <repoRoot>/build-resources/obs/.obs-<version>.ok
+ * Returns "0" when no marker is present.
+ */
+export function obsVersion(): string {
+  const dir = isPackaged()
+    ? path.join(process.resourcesPath, 'obs')
+    : path.resolve(app.getAppPath(), '..', 'build-resources', 'obs');
+
+  return readObsVersionMarker(dir);
+}
+
+/** Find the first `.obs-<version>.ok` marker in `dir` and return its version, else "0". */
+function readObsVersionMarker(dir: string): string {
+  if (!fs.existsSync(dir)) return '0';
+  const marker = fs
+    .readdirSync(dir)
+    .filter((f) => f.startsWith('.obs-') && f.endsWith('.ok'))
+    .sort()[0];
+  if (!marker) return '0';
+  return marker.replace(/^\.obs-/, '').replace(/\.ok$/, '');
+}
