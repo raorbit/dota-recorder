@@ -43,6 +43,7 @@ class MatchFsmTest {
     static final class FakeObs implements ObsRecorder {
         boolean connected = true;
         boolean ready = true;
+        boolean stopThrowsRuntime = false;
         Instant confirmedAt;
         int startCalls;
         int stopCalls;
@@ -67,6 +68,10 @@ class MatchFsmTest {
                 throw new ObsException("OBS is not connected");
             }
             stopCalls++;
+            if (stopThrowsRuntime) {
+                // A non-ObsException library failure (socket reset, internal NPE/ISE, etc.).
+                throw new IllegalStateException("obs-websocket library failure");
+            }
             thenStopCalledAt = System.nanoTime();
             return savedPath;
         }
@@ -261,6 +266,23 @@ class MatchFsmTest {
     }
 
     @Test
+    void nonObsExceptionFromStopRecording_stillPersistsRowAndResetsIdle() {
+        // A stop failure that isn't a typed ObsException (a socket reset / library RuntimeException)
+        // must still fall through to persist the row with a null video path, not abort finalize and
+        // strand OBS recording with no row written.
+        obs.stopThrowsRuntime = true;
+
+        fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
+        fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_POST_GAME").noHero().build());
+
+        assertThat(fsm.getState()).isEqualTo(MatchState.IDLE);
+        assertThat(obs.stopCalls).isEqualTo(1);
+        List<MatchSummary> rows = matches.findAll();
+        assertThat(rows).hasSize(1);
+        assertThat(rows.get(0).videoPath()).isNull();
+    }
+
+    @Test
     void concurrentForceFinalizeAndPostGame_finalizesExactlyOnce() throws Exception {
         fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
         assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
@@ -269,6 +291,8 @@ class MatchFsmTest {
         // FSM and flip RECORDING->STOPPING before any side effect, so exactly one stop + one row result
         // no matter which wins (a future "finalize on an executor" refactor must keep this true).
         CyclicBarrier gate = new CyclicBarrier(2);
+        java.util.concurrent.atomic.AtomicReference<Throwable> threadError =
+                new java.util.concurrent.atomic.AtomicReference<>();
         Thread watchdog = new Thread(() -> {
             await(gate);
             fsm.forceFinalize();
@@ -277,11 +301,19 @@ class MatchFsmTest {
             await(gate);
             fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_POST_GAME").noHero().build());
         });
+        watchdog.setUncaughtExceptionHandler((t, e) -> threadError.set(e));
+        postGame.setUncaughtExceptionHandler((t, e) -> threadError.set(e));
         watchdog.start();
         postGame.start();
         watchdog.join(2_000);
         postGame.join(2_000);
 
+        // The threads must have actually finished (a deadlock under the synchronized monitor would
+        // leave one alive past the join timeout) and neither may have thrown -- otherwise the
+        // assertions below could pass off the surviving thread alone, masking a regression.
+        assertThat(watchdog.isAlive()).as("watchdog thread terminated").isFalse();
+        assertThat(postGame.isAlive()).as("postGame thread terminated").isFalse();
+        assertThat(threadError.get()).as("neither thread threw").isNull();
         assertThat(fsm.getState()).isEqualTo(MatchState.IDLE);
         assertThat(obs.stopCalls).as("exactly one OBS stop despite the race").isEqualTo(1);
         assertThat(matches.findAll()).hasSize(1);
