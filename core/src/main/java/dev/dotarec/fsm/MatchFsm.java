@@ -178,11 +178,12 @@ public class MatchFsm {
         s.setRecordStartedWallMs(anchor);
         s.observe(frame);
         s.setLastFrame(frame);
-        // If recording opens while the game is already paused (launched mid-match during a pause),
-        // seed the leading pause span here: tagAndObserve only detects edges from the SECOND frame
-        // on (the first frame is consumed here), so a begins-paused match would otherwise never open
-        // one and the leading dimmed span would be silently dropped.
-        if (frame.paused()) {
+        // If recording opens mid-match while already paused (launched during a live-game pause), seed
+        // the leading pause span here: tagAndObserve only detects edges from the SECOND frame on (the
+        // first frame is consumed here), so a begins-paused match would otherwise drop the leading
+        // span. Gate on the steady-play entry so a paused flag on an arm-state frame (hero
+        // select/strategy) can't open a span before the match is actually rolling.
+        if (GAME_IN_PROGRESS.equals(frame.gameState()) && isPlaying(frame) && frame.paused()) {
             s.openPause(frame.wallClockMillis());
         }
 
@@ -239,9 +240,13 @@ public class MatchFsm {
                 }
 
                 videoPath = obs.stopRecording();
-            } catch (ObsException e) {
-                // OBS rejected StopRecord: we still persist what we have so markers/stats survive.
-                log.warn("StopRecord failed: {}; persisting match row without video path", e.getMessage());
+            } catch (RuntimeException e) {
+                // ANY StopRecord failure -- a typed ObsException, a socket reset, or a library-level
+                // RuntimeException -- must still fall through to persist what we have so markers/stats
+                // survive. Catching only ObsException here would let an unexpected stop failure abort
+                // finalize before the row is written, leaving OBS possibly still recording with no
+                // row and the FSM back IDLE (so the watchdog can't re-cut it).
+                log.warn("StopRecord failed: {}; persisting match row without video path", e.toString());
             }
 
             long now = System.currentTimeMillis();
