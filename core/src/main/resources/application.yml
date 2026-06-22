@@ -12,6 +12,15 @@ spring:
   # roughly halves cold-start with no downside for this usage pattern.
   main:
     lazy-initialization: true
+  # @Scheduled tasks share one thread by default (pool size 1). Several run here:
+  # the safety-critical ForceStopWatchdog (cuts a runaway recording every 5s),
+  # ObsConnectionScheduler (can block ~5s on a down OBS), RetentionSweeper, and the
+  # EnrichmentQueue. A dedicated small pool keeps a blocking/slow task on one thread
+  # from delaying the watchdog tick on another.
+  task:
+    scheduling:
+      pool:
+        size: 4
 
 app:
   # Second Tomcat connector dedicated to Dota GSI POSTs (see GsiConnectorConfig),
