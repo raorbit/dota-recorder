@@ -7,6 +7,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import dev.dotarec.bridge.EventPublisher;
 import dev.dotarec.data.MarkerRepository;
@@ -23,6 +24,7 @@ import dev.dotarec.tagger.EventTagger;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
+import java.util.concurrent.CyclicBarrier;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -235,5 +237,61 @@ class MatchFsmTest {
         // forceFinalize when idle is a harmless no-op.
         fsm.forceFinalize();
         assertThat(matches.findAll()).hasSize(1);
+    }
+
+    @Test
+    void persistFailureDuringFinalize_doesNotStrandStopping_andCanRecordAgain() {
+        // A repo that throws on insert simulates a disk-full / constraint failure mid-finalize.
+        MatchRepository throwing = mock(MatchRepository.class);
+        when(throwing.insert(any())).thenThrow(new IllegalStateException("disk full"));
+        fsm = new MatchFsm(obs, thumbs, new EventTagger(), throwing, markers, pauses, events);
+
+        fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
+        assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
+
+        // POST_GAME finalize: persist throws, but the FSM must return to IDLE, not stick in STOPPING.
+        fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_POST_GAME").noHero().build());
+        assertThat(fsm.getState()).isEqualTo(MatchState.IDLE);
+        assertThat(obs.stopCalls).isEqualTo(1);
+
+        // A stuck STOPPING would make this next frame a no-op; instead the next match records cleanly.
+        fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
+        assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
+        assertThat(obs.startCalls).isEqualTo(2);
+    }
+
+    @Test
+    void concurrentForceFinalizeAndPostGame_finalizesExactlyOnce() throws Exception {
+        fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
+        assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
+
+        // Race a watchdog forceFinalize() against a normal POST_GAME finalize. Both synchronize on the
+        // FSM and flip RECORDING->STOPPING before any side effect, so exactly one stop + one row result
+        // no matter which wins (a future "finalize on an executor" refactor must keep this true).
+        CyclicBarrier gate = new CyclicBarrier(2);
+        Thread watchdog = new Thread(() -> {
+            await(gate);
+            fsm.forceFinalize();
+        });
+        Thread postGame = new Thread(() -> {
+            await(gate);
+            fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_POST_GAME").noHero().build());
+        });
+        watchdog.start();
+        postGame.start();
+        watchdog.join(2_000);
+        postGame.join(2_000);
+
+        assertThat(fsm.getState()).isEqualTo(MatchState.IDLE);
+        assertThat(obs.stopCalls).as("exactly one OBS stop despite the race").isEqualTo(1);
+        assertThat(matches.findAll()).hasSize(1);
+    }
+
+    private static void await(CyclicBarrier gate) {
+        try {
+            gate.await();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 }

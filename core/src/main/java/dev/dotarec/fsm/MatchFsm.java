@@ -218,40 +218,50 @@ public class MatchFsm {
             return;
         }
         this.state = MatchState.STOPPING;
-
-        String videoPath = null;
-        String thumbPath = null;
         try {
-            // Thumbnail BEFORE stop: a screenshot after the scene goes idle is black.
+            String videoPath = null;
+            String thumbPath = null;
             try {
-                Path thumb = thumbnails.captureCurrentScene(s.getSurrogateId());
-                thumbPath = thumb != null ? thumb.toString() : null;
-            } catch (Exception e) {
-                // A missing thumbnail must not lose the recording; persist the row without it.
-                log.warn("Thumbnail capture failed for {}: {}", s.getSurrogateId(), e.toString());
+                // Thumbnail BEFORE stop: a screenshot after the scene goes idle is black.
+                try {
+                    Path thumb = thumbnails.captureCurrentScene(s.getSurrogateId());
+                    thumbPath = thumb != null ? thumb.toString() : null;
+                } catch (Exception e) {
+                    // A missing thumbnail must not lose the recording; persist the row without it.
+                    log.warn("Thumbnail capture failed for {}: {}", s.getSurrogateId(), e.toString());
+                }
+
+                videoPath = obs.stopRecording();
+            } catch (ObsException e) {
+                // OBS rejected StopRecord: we still persist what we have so markers/stats survive.
+                log.warn("StopRecord failed: {}; persisting match row without video path", e.getMessage());
             }
 
-            videoPath = obs.stopRecording();
-        } catch (ObsException e) {
-            // OBS rejected StopRecord: we still persist what we have so markers/stats survive.
-            log.warn("StopRecord failed: {}; persisting match row without video path", e.getMessage());
+            long now = System.currentTimeMillis();
+            long anchor = s.getRecordConfirmedWallMs();
+            // Duration from the confirmed start to stop; clamp to >= 0.
+            int durationS = (int) Math.max(0, (now - anchor) / 1000);
+
+            long matchRowId = persistMatch(s, videoPath, thumbPath, durationS, now);
+            persistMarkers(matchRowId, s, durationS);
+            persistPauses(matchRowId, s, now);
+
+            publishRecorded(matchRowId, s, durationS);
+
+            log.info("Recording finalized -> match row {} ({} markers, {}s)",
+                    matchRowId, s.getMarkers().size(), durationS);
+        } catch (RuntimeException e) {
+            // A persistence failure (disk full, FK/constraint violation, a publisher error) must NOT
+            // strand the FSM in STOPPING: both onFrame and the watchdog gate on RECORDING, so a stuck
+            // STOPPING would silently kill recording for the rest of the session. Log and fall through
+            // to the reset below. The row may be only partially persisted (the writes aren't yet one
+            // transaction) -- acceptable vs. losing all future recordings.
+            log.error("Finalize failed after stopping the recording: {}", e.toString(), e);
+        } finally {
+            // Always return to IDLE so the next match can record, regardless of how finalize fared.
+            this.session = null;
+            this.state = MatchState.IDLE;
         }
-
-        long now = System.currentTimeMillis();
-        long anchor = s.getRecordConfirmedWallMs();
-        // Duration from the confirmed start to stop; clamp to >= 0.
-        int durationS = (int) Math.max(0, (now - anchor) / 1000);
-
-        long matchRowId = persistMatch(s, videoPath, thumbPath, durationS, now);
-        persistMarkers(matchRowId, s, durationS);
-        persistPauses(matchRowId, s, now);
-
-        publishRecorded(matchRowId, s, durationS);
-
-        this.session = null;
-        this.state = MatchState.IDLE;
-        log.info("Recording finalized -> match row {} ({} markers, {}s)",
-                matchRowId, s.getMarkers().size(), durationS);
     }
 
     private long persistMatch(
