@@ -13,11 +13,14 @@ import dev.dotarec.obs.ThumbnailCapturer;
 import dev.dotarec.tagger.EventTagger;
 import dev.dotarec.tagger.PendingMarker;
 import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.SQLException;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import javax.sql.DataSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -72,6 +75,7 @@ public class MatchFsm {
     private final MarkerRepository markers;
     private final PauseRepository pauses;
     private final EventPublisher events;
+    private final DataSource dataSource;
 
     private volatile MatchState state = MatchState.IDLE;
     private RecordingSession session;
@@ -83,7 +87,8 @@ public class MatchFsm {
             MatchRepository matches,
             MarkerRepository markers,
             PauseRepository pauses,
-            EventPublisher events) {
+            EventPublisher events,
+            DataSource dataSource) {
         this.obs = obs;
         this.thumbnails = thumbnails;
         this.tagger = tagger;
@@ -91,6 +96,7 @@ public class MatchFsm {
         this.markers = markers;
         this.pauses = pauses;
         this.events = events;
+        this.dataSource = dataSource;
     }
 
     public MatchState getState() {
@@ -254,9 +260,10 @@ public class MatchFsm {
             // Duration from the confirmed start to stop; clamp to >= 0.
             int durationS = (int) Math.max(0, (now - anchor) / 1000);
 
-            long matchRowId = persistMatch(s, videoPath, thumbPath, durationS, now);
-            persistMarkers(matchRowId, s, durationS);
-            persistPauses(matchRowId, s, now);
+            // Persist the match row + its markers + pauses in ONE transaction so a child-write
+            // failure can't leave an orphan match row. publishRecorded runs only after commit, so the
+            // UI never sees a match that rolled back.
+            long matchRowId = persistFinalized(s, videoPath, thumbPath, durationS, now);
 
             publishRecorded(matchRowId, s, durationS);
 
@@ -265,9 +272,9 @@ public class MatchFsm {
         } catch (RuntimeException e) {
             // A persistence failure (disk full, FK/constraint violation, a publisher error) must NOT
             // strand the FSM in STOPPING: both onFrame and the watchdog gate on RECORDING, so a stuck
-            // STOPPING would silently kill recording for the rest of the session. Log and fall through
-            // to the reset below. The row may be only partially persisted (the writes aren't yet one
-            // transaction) -- acceptable vs. losing all future recordings.
+            // STOPPING would silently kill recording for the rest of the session. The finalize writes
+            // are one transaction now, so a failure here rolls back cleanly -- no partial row -- and we
+            // fall through to the reset below rather than losing all future recordings.
             log.error("Finalize failed after stopping the recording: {}", e.toString(), e);
         } finally {
             // Always return to IDLE so the next match can record, regardless of how finalize fared.
@@ -276,55 +283,78 @@ public class MatchFsm {
         }
     }
 
-    private long persistMatch(
+    /**
+     * Persists the finalized match row plus its markers and pauses in a single transaction on one
+     * connection, committing on success and rolling back on ANY failure -- so a marker/pause write
+     * error can never leave an orphan match row with the buffered children silently dropped (the
+     * three writes used to run on independent connections). SQLite sees the uncommitted parent row on
+     * the same connection, so the children's foreign key resolves before commit. Returns the new
+     * match row id.
+     */
+    private long persistFinalized(
+            RecordingSession s, String videoPath, String thumbPath, int durationS, long now) {
+        NewMatch row = newMatchRow(s, videoPath, thumbPath, durationS, now);
+        try (Connection conn = dataSource.getConnection()) {
+            conn.setAutoCommit(false);
+            try {
+                long matchRowId = matches.insert(conn, row);
+                for (PendingMarker m : s.getMarkers()) {
+                    // Re-clamp the live offset to the now-known real duration so a marker can't sit
+                    // past the end of the file (live tagging used a generous bound).
+                    double offset = Math.min(m.videoOffsetS(), durationS);
+                    markers.insert(conn, matchRowId, m.type(), offset, m.gameClock(), m.label(),
+                            m.source());
+                }
+                // drainPauses closes any still-open span to finalize time so no row carries a null
+                // end_wall (match ended while paused, or the watchdog force-finalized mid-pause).
+                for (PauseSpanBuffer span : s.drainPauses(now)) {
+                    pauses.insert(conn, matchRowId, span.startWall(), span.endWall());
+                }
+                conn.commit();
+                return matchRowId;
+            } catch (SQLException | RuntimeException e) {
+                conn.rollback();
+                throw e instanceof RuntimeException re
+                        ? re
+                        : new IllegalStateException("Failed to persist finalized match", e);
+            } finally {
+                conn.setAutoCommit(true);
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to persist finalized match", e);
+        }
+    }
+
+    private NewMatch newMatchRow(
             RecordingSession s, String videoPath, String thumbPath, int durationS, long now) {
         Long dotaMatchId = s.getMatchId() != 0L ? s.getMatchId() : null;
-        NewMatch row =
-                new NewMatch(
-                        dotaMatchId,
-                        "match",
-                        // result/MMR/lobby/etc. are enrichment's job; live GSI can't reliably know
-                        // win/loss for the player without team context, so leave them null.
-                        "pending",
-                        s.getHero(),
-                        s.getKills(),
-                        s.getDeaths(),
-                        s.getAssists(),
-                        null, // gpm
-                        null, // xpm
-                        null, // net_worth
-                        null, // last_hits
-                        null, // result
-                        null, // lobby_type
-                        null, // game_mode
-                        null, // rank_tier
-                        null, // mmr_delta
-                        durationS,
-                        now, // played_at (finalize time; enrichment may correct to match start)
-                        videoPath,
-                        thumbPath,
-                        null, // file_size_bytes (retention pass / enrichment fills this)
-                        false,
-                        now, // created_at
-                        s.getRecordStartedWallMs());
-        return matches.insert(row);
-    }
-
-    private void persistMarkers(long matchRowId, RecordingSession s, int durationS) {
-        for (PendingMarker m : s.getMarkers()) {
-            // Re-clamp the live offset to the now-known real duration so a marker can't sit past the
-            // end of the file (live tagging used a generous bound).
-            double offset = Math.min(m.videoOffsetS(), durationS);
-            markers.insert(matchRowId, m.type(), offset, m.gameClock(), m.label(), m.source());
-        }
-    }
-
-    private void persistPauses(long matchRowId, RecordingSession s, long finalizeWall) {
-        // drainPauses closes any still-open span to finalize time so no row carries a null end_wall
-        // (the match ended while paused, or the watchdog force-finalized mid-pause).
-        for (PauseSpanBuffer span : s.drainPauses(finalizeWall)) {
-            pauses.insert(matchRowId, span.startWall(), span.endWall());
-        }
+        return new NewMatch(
+                dotaMatchId,
+                "match",
+                // result/MMR/lobby/etc. are enrichment's job; live GSI can't reliably know win/loss
+                // for the player without team context, so leave them null.
+                "pending",
+                s.getHero(),
+                s.getKills(),
+                s.getDeaths(),
+                s.getAssists(),
+                null, // gpm
+                null, // xpm
+                null, // net_worth
+                null, // last_hits
+                null, // result
+                null, // lobby_type
+                null, // game_mode
+                null, // rank_tier
+                null, // mmr_delta
+                durationS,
+                now, // played_at (finalize time; enrichment may correct to match start)
+                videoPath,
+                thumbPath,
+                null, // file_size_bytes (retention pass / enrichment fills this)
+                false,
+                now, // created_at
+                s.getRecordStartedWallMs());
     }
 
     private void publishRecorded(long matchRowId, RecordingSession s, int durationS) {
