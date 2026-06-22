@@ -112,6 +112,31 @@ class EnrichmentQueueTest {
         assertThat(enricher.dispatched).hasSize(25);
     }
 
+    @Test
+    void secondSweepDoesNotRedispatchClaimedRow() {
+        insertPending(5555L);
+        queue.sweep();
+        assertThat(enricher.dispatched).hasSize(1);
+
+        // The recording enricher never writes back (it models an in-flight slow fetch), so the ONLY
+        // thing that can suppress a re-dispatch is the claim lease findPendingEnrichment stamps on
+        // dispatch. A second sweep in the same window must NOT re-dispatch the same row.
+        queue.sweep();
+        assertThat(enricher.dispatched).hasSize(1);
+    }
+
+    @Test
+    void claimedRowBecomesEligibleAgainAfterLeaseExpires() {
+        long id = insertPending(5556L);
+        queue.sweep();
+
+        // A row whose async task died mid-fetch must not be stuck forever: once the lease window
+        // passes, the row is eligible (and re-claimable) again. Query past the 5-minute lease.
+        List<MatchRepository.PendingMatch> after = repo.findPendingEnrichment(
+                EnrichmentQueue.MAX_ATTEMPTS, System.currentTimeMillis() + 6L * 60_000L);
+        assertThat(after).extracting(MatchRepository.PendingMatch::id).contains(id);
+    }
+
     // ---- helpers -----------------------------------------------------------
 
     private long insertPending(long dotaMatchId) {

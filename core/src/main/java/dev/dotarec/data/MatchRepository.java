@@ -37,6 +37,17 @@ public class MatchRepository {
     /** Cap on rows {@link #findPendingEnrichment} returns per tick, so a backlog can't flood the pool. */
     private static final int PENDING_LIMIT = 25;
 
+    /**
+     * Lease stamped into {@code enrich_next_after_ms} when {@link #findPendingEnrichment} claims a row
+     * for dispatch, so a subsequent sweep won't re-select a row whose fetch is still in flight. It
+     * comfortably exceeds the worst-case fetch wall time (a 10s-timeout fetch for up to
+     * {@value #PENDING_LIMIT} rows serialized through the 2-thread enrich pool). The lease only
+     * suppresses duplicate dispatch: a successful enrich clears the row from eligibility (state
+     * becomes {@code enriched}) and a retry overwrites this with the real backoff -- so the only
+     * lasting effect is self-healing a row whose async task died mid-fetch once the lease expires.
+     */
+    private static final long CLAIM_LEASE_MS = 5L * 60_000L;
+
     private final DataSource dataSource;
 
     public MatchRepository(DataSource dataSource) {
@@ -316,23 +327,52 @@ public class MatchRepository {
      *                    is null or has passed
      */
     public List<PendingMatch> findPendingEnrichment(int maxAttempts, long nowMs) {
-        String sql = "SELECT id, dota_match_id, enrich_attempts FROM matches "
+        String select = "SELECT id, dota_match_id, enrich_attempts FROM matches "
                 + "WHERE enrichment_state = 'pending' AND dota_match_id IS NOT NULL "
                 + "AND enrich_attempts < ? "
                 + "AND (enrich_next_after_ms IS NULL OR enrich_next_after_ms <= ?) "
                 + "ORDER BY id ASC LIMIT " + PENDING_LIMIT;
         List<PendingMatch> out = new ArrayList<>();
-        try (Connection conn = dataSource.getConnection();
-             PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setInt(1, maxAttempts);
-            ps.setLong(2, nowMs);
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    out.add(new PendingMatch(
-                            rs.getLong("id"),
-                            rs.getLong("dota_match_id"),
-                            rs.getInt("enrich_attempts")));
+        try (Connection conn = dataSource.getConnection()) {
+            // Select + claim run in one transaction so a concurrent/next sweep can't read the same
+            // rows before they're leased. SQLite is configured WAL + busy_timeout, so the brief
+            // write lock is safe on this single-user app.
+            conn.setAutoCommit(false);
+            try {
+                try (PreparedStatement ps = conn.prepareStatement(select)) {
+                    ps.setInt(1, maxAttempts);
+                    ps.setLong(2, nowMs);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        while (rs.next()) {
+                            out.add(new PendingMatch(
+                                    rs.getLong("id"),
+                                    rs.getLong("dota_match_id"),
+                                    rs.getInt("enrich_attempts")));
+                        }
+                    }
                 }
+                // Claim the selected rows by stamping a short lease into enrich_next_after_ms so the
+                // next tick skips them while their fetch is in flight. The enricher's real outcome
+                // (enriched, or a retry with the actual backoff) overwrites this lease afterwards.
+                if (!out.isEmpty()) {
+                    String claim = "UPDATE matches SET enrich_next_after_ms = ? "
+                            + "WHERE enrichment_state = 'pending' AND id IN ("
+                            + placeholders(out.size()) + ")";
+                    try (PreparedStatement ps = conn.prepareStatement(claim)) {
+                        int i = 1;
+                        ps.setLong(i++, nowMs + CLAIM_LEASE_MS);
+                        for (PendingMatch m : out) {
+                            ps.setLong(i++, m.id());
+                        }
+                        ps.executeUpdate();
+                    }
+                }
+                conn.commit();
+            } catch (SQLException e) {
+                conn.rollback();
+                throw e;
+            } finally {
+                conn.setAutoCommit(true);
             }
         } catch (SQLException e) {
             throw new IllegalStateException("Failed to query pending enrichment", e);
@@ -396,6 +436,38 @@ public class MatchRepository {
         }
     }
 
+    /**
+     * Narrow retry/fail UPDATE for the enricher's non-Ready paths. Touches ONLY the retry bookkeeping
+     * ({@code enrichment_state}, {@code enrich_attempts}, {@code enrich_next_after_ms}) and NEVER the
+     * recorder-owned columns -- notably {@code duration_s}/{@code played_at}, which {@link #applyEnrichment}
+     * blanks when its carrier is null. Since OpenDota lags a finalized match, the first poll is almost
+     * always NotReady/Missing; routing those through here keeps the recorder's real values intact.
+     *
+     * <p>{@code enrich_attempts} is bumped self-relatively ({@code + delta}) so two racing dispatches
+     * can't lose an increment, and the {@code enrichment_state <> 'enriched'} guard stops a late
+     * straggler from reverting an already-enriched row back to pending/failed.
+     *
+     * @param attemptsDelta amount to add to {@code enrich_attempts} (1 per poll)
+     * @param nextAfterMs   next-eligible wall clock, or null to clear the backoff
+     * @return rows updated (0 if no such row, or it was already enriched)
+     */
+    public int applyRetry(long id, String state, int attemptsDelta, Long nextAfterMs) {
+        String sql = "UPDATE matches SET "
+                + "enrichment_state = ?, enrich_attempts = enrich_attempts + ?, "
+                + "enrich_next_after_ms = ? "
+                + "WHERE id = ? AND enrichment_state <> 'enriched'";
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, state);
+            ps.setInt(2, attemptsDelta);
+            setNullableLong(ps, 3, nextAfterMs);
+            ps.setLong(4, id);
+            return ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to apply enrichment retry to match " + id, e);
+        }
+    }
+
     // ---- mapping / binding -------------------------------------------------
 
     private MatchSummary map(ResultSet rs) throws SQLException {
@@ -453,6 +525,11 @@ public class MatchRepository {
         } else {
             ps.setNull(idx, java.sql.Types.INTEGER);
         }
+    }
+
+    /** Comma-separated {@code ?} placeholders for an {@code IN (...)} clause of {@code n} ids. */
+    private static String placeholders(int n) {
+        return String.join(", ", java.util.Collections.nCopies(n, "?"));
     }
 
     private Integer getNullableInt(ResultSet rs, String column) throws SQLException {
