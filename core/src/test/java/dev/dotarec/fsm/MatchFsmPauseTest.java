@@ -152,6 +152,23 @@ class MatchFsmPauseTest {
         assertThat(pauses.findByMatchId(matches.findAll().get(0).id())).hasSize(1);
     }
 
+    @Test
+    void recordingThatStartsPaused_opensLeadingSpan() {
+        // First frame already paused (launched mid-match during a pause): the leading span must open
+        // from startRecording, since tagAndObserve only sees edges from the second frame on.
+        fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing")
+                .hero("npc_dota_hero_drow_ranger").paused(true).wall(1000).build());
+        assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
+        playing(false, 2000); // resume: close at 2000
+
+        long id = finalizeAndGetRowId();
+
+        List<PauseSpan> spans = pauses.findByMatchId(id);
+        assertThat(spans).hasSize(1);
+        assertThat(spans.get(0).startWall()).isEqualTo(1000L);
+        assertThat(spans.get(0).endWall()).isEqualTo(2000L);
+    }
+
     // ---- helpers -----------------------------------------------------------
 
     private void start() {
