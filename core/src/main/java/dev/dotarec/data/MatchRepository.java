@@ -405,12 +405,18 @@ public class MatchRepository {
      * too so the queue's WHERE sees the bump. {@code mmr_delta} is always bound null (no API has
      * it). Keyed on the surrogate {@code id}.
      *
+     * <p>{@code duration_s} and {@code played_at} are recorder-owned: the recorder always writes a
+     * real value at finalize. A {@code Ready} body only guarantees a non-null {@code duration}, not
+     * a non-null {@code start_time}, so both are bound through {@code COALESCE(?, column)} -- the API
+     * value wins when present, but a null one preserves the recorder's value rather than blanking it.
+     *
      * @return rows updated (0 if no such match)
      */
     public int applyEnrichment(long id, EnrichmentUpdate u) {
         String sql = "UPDATE matches SET "
                 + "result = ?, lobby_type = ?, game_mode = ?, gpm = ?, xpm = ?, net_worth = ?, "
-                + "last_hits = ?, rank_tier = ?, mmr_delta = NULL, duration_s = ?, played_at = ?, "
+                + "last_hits = ?, rank_tier = ?, mmr_delta = NULL, "
+                + "duration_s = COALESCE(?, duration_s), played_at = COALESCE(?, played_at), "
                 + "enrichment_state = ?, enrich_attempts = ?, enrich_next_after_ms = ? "
                 + "WHERE id = ?";
         try (Connection conn = dataSource.getConnection();

@@ -240,6 +240,24 @@ class EnricherTest {
         assertThat(events.types()).isEmpty();
     }
 
+    @Test
+    void readyWithNullStartTimePreservesRecorderPlayedAt() {
+        // The recorder always writes a real duration_s + played_at at finalize. A Ready body (duration
+        // present) whose start_time hasn't parsed yet must enrich result/stats WITHOUT blanking the
+        // recorder-owned played_at -- applyEnrichment COALESCEs it so a null API value keeps the row's.
+        long id = insertPendingWithStats(911L, 1800, 1_700_000_000_000L);
+        OpenDotaMatch match = new OpenDotaMatch(911L, true, 2400, null, 7, 22,
+                List.of(player(96828122L, 0)));
+        enricher(FetchResult.ready(match)).enrich(id, 911L);
+
+        MatchSummary row = repo.findById(id).orElseThrow();
+        assertThat(row.enrichmentState()).isEqualTo("enriched");
+        assertThat(row.result()).isEqualTo("win");
+        // API duration present -> overrides; API start_time null -> recorder played_at preserved.
+        assertThat(row.durationS()).isEqualTo(2400);
+        assertThat(row.playedAt()).isEqualTo(1_700_000_000_000L);
+    }
+
     // ---- helpers -----------------------------------------------------------
 
     private Enricher enricher(FetchResult result) {
