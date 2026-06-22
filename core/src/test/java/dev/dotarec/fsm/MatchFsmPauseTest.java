@@ -2,7 +2,10 @@ package dev.dotarec.fsm;
 
 import static dev.dotarec.gsi.GsiFrames.frame;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import dev.dotarec.bridge.EventPublisher;
 import dev.dotarec.data.MarkerRepository;
@@ -69,19 +72,22 @@ class MatchFsmPauseTest {
     }
 
     private FakeObs obs;
+    private DataSource ds;
     private MatchRepository matches;
+    private MarkerRepository markers;
     private PauseRepository pauses;
+    private EventPublisher events;
     private MatchFsm fsm;
 
     @BeforeEach
     void setUp(@TempDir Path dir) throws Exception {
-        DataSource ds = TestDb.migrated(dir);
+        ds = TestDb.migrated(dir);
         matches = new MatchRepository(ds);
-        MarkerRepository markers = new MarkerRepository(ds);
+        markers = new MarkerRepository(ds);
         pauses = new PauseRepository(ds);
-        EventPublisher events = mock(EventPublisher.class);
+        events = mock(EventPublisher.class);
         obs = new FakeObs();
-        fsm = new MatchFsm(obs, new FakeThumbs(), new EventTagger(), matches, markers, pauses, events);
+        fsm = new MatchFsm(obs, new FakeThumbs(), new EventTagger(), matches, markers, pauses, events, ds);
     }
 
     @Test
@@ -182,6 +188,29 @@ class MatchFsmPauseTest {
         long id = finalizeAndGetRowId();
 
         assertThat(pauses.findByMatchId(id)).isEmpty();
+    }
+
+    @Test
+    void childWriteFailureRollsBackTheMatchRow() throws Exception {
+        // A pause-insert failure mid-finalize must roll back the whole unit of work: no orphan match
+        // row left behind, and the FSM still returns to IDLE so the next match can record. The match
+        // row + markers + pauses are written in one transaction now, so a child write can't strand a
+        // half-persisted row.
+        PauseRepository throwingPauses = mock(PauseRepository.class);
+        when(throwingPauses.insert(any(), anyLong(), anyLong(), any()))
+                .thenThrow(new IllegalStateException("pause write failed"));
+        MatchFsm fsmWithBadPauses = new MatchFsm(
+                obs, new FakeThumbs(), new EventTagger(), matches, markers, throwingPauses, events, ds);
+
+        // Open a pause so finalize has a span to persist -- which then throws and triggers rollback.
+        fsmWithBadPauses.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")
+                .activity("playing").hero("npc_dota_hero_drow_ranger").wall(0).build());
+        fsmWithBadPauses.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")
+                .activity("playing").hero("npc_dota_hero_drow_ranger").paused(true).wall(1000).build());
+        fsmWithBadPauses.onFrame(frame().state("DOTA_GAMERULES_STATE_POST_GAME").noHero().build());
+
+        assertThat(fsmWithBadPauses.getState()).isEqualTo(MatchState.IDLE);
+        assertThat(matches.findAll()).isEmpty(); // the match insert rolled back -- no orphan row
     }
 
     // ---- helpers -----------------------------------------------------------

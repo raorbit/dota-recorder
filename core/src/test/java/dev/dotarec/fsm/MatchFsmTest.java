@@ -92,6 +92,7 @@ class MatchFsmTest {
 
     private FakeObs obs;
     private FakeThumbs thumbs;
+    private DataSource ds;
     private MatchRepository matches;
     private MarkerRepository markers;
     private PauseRepository pauses;
@@ -100,14 +101,14 @@ class MatchFsmTest {
 
     @BeforeEach
     void setUp(@TempDir Path dir) throws Exception {
-        DataSource ds = TestDb.migrated(dir);
+        ds = TestDb.migrated(dir);
         matches = new MatchRepository(ds);
         markers = new MarkerRepository(ds);
         pauses = new PauseRepository(ds);
         events = mock(EventPublisher.class);
         obs = new FakeObs();
         thumbs = new FakeThumbs();
-        fsm = new MatchFsm(obs, thumbs, new EventTagger(), matches, markers, pauses, events);
+        fsm = new MatchFsm(obs, thumbs, new EventTagger(), matches, markers, pauses, events, ds);
     }
 
     @Test
@@ -216,7 +217,7 @@ class MatchFsmTest {
     @Test
     void thumbnailFailure_doesNotLoseTheRecording() {
         ThumbnailCapturer failing = id -> { throw new ObsException("no scene"); };
-        fsm = new MatchFsm(obs, failing, new EventTagger(), matches, markers, pauses, events);
+        fsm = new MatchFsm(obs, failing, new EventTagger(), matches, markers, pauses, events, ds);
 
         fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
         fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_POST_GAME").noHero().build());
@@ -245,11 +246,12 @@ class MatchFsmTest {
     }
 
     @Test
-    void persistFailureDuringFinalize_doesNotStrandStopping_andCanRecordAgain() {
+    void persistFailureDuringFinalize_doesNotStrandStopping_andCanRecordAgain() throws Exception {
         // A repo that throws on insert simulates a disk-full / constraint failure mid-finalize.
         MatchRepository throwing = mock(MatchRepository.class);
-        when(throwing.insert(any())).thenThrow(new IllegalStateException("disk full"));
-        fsm = new MatchFsm(obs, thumbs, new EventTagger(), throwing, markers, pauses, events);
+        when(throwing.insert(any(java.sql.Connection.class), any(MatchRepository.NewMatch.class)))
+                .thenThrow(new IllegalStateException("disk full"));
+        fsm = new MatchFsm(obs, thumbs, new EventTagger(), throwing, markers, pauses, events, ds);
 
         fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
         assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
