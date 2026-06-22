@@ -110,6 +110,40 @@ class OpenDotaClientTest {
         assertThat(client.fetch(7654321098L)).isInstanceOf(FetchResult.Ready.class);
     }
 
+    @Test
+    void apiKeyIsUrlEncodedInRequestUri() {
+        // A URI-hostile key (space, '#') must be percent-encoded so URI.create accepts it and the
+        // raw key never appears verbatim in the request. Guards against a malformed key silently
+        // breaking enrichment for every match.
+        settings.update(s -> { s.opendotaApiKey = "ab cd#ef"; return s; });
+        java.util.concurrent.atomic.AtomicReference<URI> seen = new java.util.concurrent.atomic.AtomicReference<>();
+        HttpClient capturing = new StubHttpClient((req) -> {
+            seen.set(req.uri());
+            return new StubResponse(200, fixtureQuiet("opendota/match_response.json"), req);
+        });
+
+        new OpenDotaClient(capturing, mapper, settings).fetch(7654321098L);
+
+        assertThat(seen.get()).isNotNull();
+        assertThat(seen.get().toString())
+                .contains("api_key=ab+cd%23ef")
+                .doesNotContain("ab cd#ef");
+    }
+
+    @Test
+    void blankApiKeyProducesNoQueryString() {
+        // Default settings carry a blank key -> no ?api_key= appended.
+        java.util.concurrent.atomic.AtomicReference<URI> seen = new java.util.concurrent.atomic.AtomicReference<>();
+        HttpClient capturing = new StubHttpClient((req) -> {
+            seen.set(req.uri());
+            return new StubResponse(200, fixtureQuiet("opendota/match_response.json"), req);
+        });
+
+        new OpenDotaClient(capturing, mapper, settings).fetch(42L);
+
+        assertThat(seen.get().toString()).doesNotContain("api_key").endsWith("/matches/42");
+    }
+
     // ---- helpers -----------------------------------------------------------
 
     private static String fixture(String classpath) throws IOException {

@@ -4,9 +4,11 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.dotarec.config.SettingsStore;
 import java.net.URI;
+import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -56,11 +58,13 @@ public class OpenDotaClient implements MatchSource {
 
     @Override
     public FetchResult fetch(long dotaMatchId) {
-        HttpRequest request = HttpRequest.newBuilder(URI.create(url(dotaMatchId)))
-                .timeout(Duration.ofSeconds(10))
-                .GET()
-                .build();
         try {
+            // Build the request inside the try so a malformed URI (e.g. a stray char in the api_key)
+            // folds to Transient like any other failure, never escaping to break enrichment wholesale.
+            HttpRequest request = HttpRequest.newBuilder(URI.create(url(dotaMatchId)))
+                    .timeout(Duration.ofSeconds(10))
+                    .GET()
+                    .build();
             HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
             return classify(response.statusCode(), response.body());
         } catch (InterruptedException e) {
@@ -68,7 +72,9 @@ public class OpenDotaClient implements MatchSource {
             log.debug("Enrichment fetch interrupted for match {}", dotaMatchId);
             return FetchResult.Transient.INSTANCE;
         } catch (Exception e) {
-            // IOException, HttpTimeoutException, etc. -- all transient; retry, never throw out.
+            // IOException, HttpTimeoutException, a bad-URI IllegalArgumentException, etc. -- all
+            // transient; retry, never throw out. Log only matchId + exception (never the URL, which
+            // carries the api_key) to avoid leaking the credential into the log.
             log.debug("Enrichment fetch failed for match {}: {}", dotaMatchId, e.toString());
             return FetchResult.Transient.INSTANCE;
         }
@@ -105,7 +111,10 @@ public class OpenDotaClient implements MatchSource {
     private String url(long dotaMatchId) {
         String key = settings.get().opendotaApiKey;
         if (key != null && !key.isBlank()) {
-            return BASE + dotaMatchId + "?api_key=" + key.trim();
+            // Percent-encode the user-supplied key so a stray character can't yield a URI that
+            // URI.create rejects. A valid OpenDota key is URL-safe, so this is a no-op for it.
+            String encoded = URLEncoder.encode(key.trim(), StandardCharsets.UTF_8);
+            return BASE + dotaMatchId + "?api_key=" + encoded;
         }
         return BASE + dotaMatchId;
     }
