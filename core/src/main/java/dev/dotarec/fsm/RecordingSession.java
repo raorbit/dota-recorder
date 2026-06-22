@@ -127,7 +127,11 @@ public class RecordingSession {
             return;
         }
         PauseSpanBuffer open = pauseSpans.get(pauseSpans.size() - 1);
-        pauseSpans.set(pauseSpans.size() - 1, new PauseSpanBuffer(open.startWall(), endWall));
+        // Clamp so a backward wall-clock jump (NTP step) between the open and close edge can never
+        // persist end_wall < start_wall; a degenerate span collapses to zero width instead. This also
+        // covers drainPauses, which closes a still-open span to finalizeWall.
+        long clamped = Math.max(open.startWall(), endWall);
+        pauseSpans.set(pauseSpans.size() - 1, new PauseSpanBuffer(open.startWall(), clamped));
     }
 
     /**
