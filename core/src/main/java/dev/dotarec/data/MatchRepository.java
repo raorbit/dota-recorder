@@ -244,6 +244,19 @@ public class MatchRepository {
      * schema); the rest are nullable.
      */
     public long insert(NewMatch m) {
+        try (Connection conn = dataSource.getConnection()) {
+            return insert(conn, m);
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to insert match", e);
+        }
+    }
+
+    /**
+     * Inserts a match row on a caller-supplied connection (which the caller commits/rolls back), so
+     * the write can join a larger transaction -- e.g. the recorder persisting a match row plus its
+     * markers and pauses atomically. Does not open, commit, or close the connection.
+     */
+    public long insert(Connection conn, NewMatch m) throws SQLException {
         String sql = """
                 INSERT INTO matches (
                     dota_match_id, record_kind, enrichment_state, hero,
@@ -253,8 +266,7 @@ public class MatchRepository {
                     played_at, video_path, thumb_path, file_size_bytes, starred, created_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """;
-        try (Connection conn = dataSource.getConnection();
-             PreparedStatement ps = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
+        try (PreparedStatement ps = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
             int i = 1;
             setNullableLong(ps, i++, m.dotaMatchId());
             ps.setString(i++, m.recordKind() != null ? m.recordKind() : "match");
@@ -284,8 +296,6 @@ public class MatchRepository {
             try (ResultSet keys = ps.getGeneratedKeys()) {
                 return keys.next() ? keys.getLong(1) : -1L;
             }
-        } catch (SQLException e) {
-            throw new IllegalStateException("Failed to insert match", e);
         }
     }
 
