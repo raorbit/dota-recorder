@@ -178,6 +178,13 @@ public class MatchFsm {
         s.setRecordStartedWallMs(anchor);
         s.observe(frame);
         s.setLastFrame(frame);
+        // If recording opens while the game is already paused (launched mid-match during a pause),
+        // seed the leading pause span here: tagAndObserve only detects edges from the SECOND frame
+        // on (the first frame is consumed here), so a begins-paused match would otherwise never open
+        // one and the leading dimmed span would be silently dropped.
+        if (frame.paused()) {
+            s.openPause(frame.wallClockMillis());
+        }
 
         this.session = s;
         this.state = MatchState.RECORDING;
@@ -196,9 +203,9 @@ public class MatchFsm {
             s.addMarkers(detected);
         }
         // Pause edge: buffer a span open on false->true, close it on true->false. Persisted at
-        // finalize once the matches row (the FK target) exists. last==null (the first frame, before
-        // setLastFrame runs) is treated as not-paused, so a recording that opens mid-pause still
-        // starts a span — and never NPEs.
+        // finalize once the matches row (the FK target) exists. A recording that opens mid-pause has
+        // its leading span seeded in startRecording, so by here last is always non-null (set there);
+        // the null check is purely defensive.
         boolean was = last != null && last.paused();
         boolean now = frame.paused();
         if (!was && now) {
