@@ -124,6 +124,15 @@ public class Enricher {
             return;
         }
 
+        // A Ready body only guarantees a non-null duration; the winner or our player_slot can still
+        // be null on an early/partial parse. Don't fabricate a win/loss from a null (it would read as
+        // a confident "Dire" and get marked terminal forever) -- HOLD in pending and retry until the
+        // fields populate, or fail at the cap.
+        if (match.radiant_win() == null || me.player_slot() == null) {
+            retryOrFail(matchRowId, attempts);
+            return;
+        }
+
         boolean win = Boolean.TRUE.equals(match.radiant_win()) == isRadiant(me);
         EnrichmentUpdate update = new EnrichmentUpdate(
                 win ? "win" : "loss",
@@ -144,32 +153,32 @@ public class Enricher {
         log.info("Enriched match row {} (dota {}) -> {}", matchRowId, dotaMatchId, update.result());
     }
 
-    /** NotReady/Missing/Transient/null-account: bump attempts + backoff, or fail on the cap-crossing attempt. */
+    /**
+     * NotReady/Missing/Transient/null-account/partial-body: bump attempts + backoff, or fail on the
+     * cap-crossing attempt. Routes through the narrow {@link MatchRepository#applyRetry} so it only
+     * touches the retry bookkeeping and can never blank recorder-owned columns (duration/played_at).
+     */
     private void retryOrFail(long matchRowId, int attempts) {
         int nextAttempts = attempts + 1;
         if (nextAttempts >= MAX_ATTEMPTS) {
             failPermanently(matchRowId);
             return;
         }
-        EnrichmentUpdate update = new EnrichmentUpdate(
-                null, null, null, null, null, null, null, null, null, null,
-                "pending",
-                nextAttempts,
-                backoffNextAfterMs(nextAttempts));
-        matches.applyEnrichment(matchRowId, update);
+        matches.applyRetry(matchRowId, "pending", 1, backoffNextAfterMs(nextAttempts));
     }
 
     private void failPermanently(long matchRowId) {
-        EnrichmentUpdate update = new EnrichmentUpdate(
-                null, null, null, null, null, null, null, null, null, null,
-                "failed",
-                MAX_ATTEMPTS,
-                null);
-        matches.applyEnrichment(matchRowId, update);
+        // Terminal 'failed'; the +1 keeps the counter monotonic without a read-then-write (the exact
+        // value no longer matters once the state leaves 'pending'). Recorder columns are preserved.
+        matches.applyRetry(matchRowId, "failed", 1, null);
         events.publish("match.enrichFailed", Map.of("id", matchRowId));
         log.info("Enrichment permanently failed for match row {}", matchRowId);
     }
 
+    /**
+     * Our scoreboard row, matched by account id. Assumes exactly one row matches (always true for a
+     * real 10-player match); first match wins otherwise.
+     */
     private OpenDotaMatch.Player ourPlayer(OpenDotaMatch match, long accountId) {
         if (match.players() == null) {
             return null;

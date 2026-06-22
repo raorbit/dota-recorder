@@ -182,6 +182,64 @@ class EnricherTest {
         assertThat(events.types()).isEmpty();
     }
 
+    @Test
+    void retryPreservesRecorderOwnedDurationAndPlayedAt() {
+        // The recorder inserts every match with a real duration + played_at. OpenDota lags, so the
+        // first poll is almost always NotReady -> the retry path must NOT blank those columns.
+        long id = insertPendingWithStats(907L, 1800, 1_700_000_000_000L);
+        enricher(FetchResult.NotReady.INSTANCE).enrich(id, 907L);
+
+        MatchSummary row = repo.findById(id).orElseThrow();
+        assertThat(row.enrichmentState()).isEqualTo("pending");
+        assertThat(row.durationS()).isEqualTo(1800);
+        assertThat(row.playedAt()).isEqualTo(1_700_000_000_000L);
+        assertThat(repo.enrichAttempts(id)).isEqualTo(1);
+    }
+
+    @Test
+    void failPreservesRecorderOwnedColumnsOnCapCrossing() {
+        long id = insertPendingWithStats(908L, 2400, 1_700_000_000_000L);
+        // Bump attempts to one below the cap via the narrow retry path (NOT the wide applyEnrichment,
+        // which would itself blank the stats), then let one Missing cross the cap -> failed.
+        repo.applyRetry(id, "pending", Enricher.MAX_ATTEMPTS - 1, null);
+        enricher(FetchResult.Missing.INSTANCE).enrich(id, 908L);
+
+        MatchSummary row = repo.findById(id).orElseThrow();
+        assertThat(row.enrichmentState()).isEqualTo("failed");
+        assertThat(row.durationS()).isEqualTo(2400);
+        assertThat(row.playedAt()).isEqualTo(1_700_000_000_000L);
+    }
+
+    @Test
+    void nullRadiantWinHoldsInPendingNotGuessedEnriched() throws Exception {
+        long id = insertPending(909L);
+        // A Ready body (duration present) whose winner hasn't parsed yet: must not fabricate a result.
+        OpenDotaMatch match = new OpenDotaMatch(909L, null, 1800, 1000L, 7, 22,
+                List.of(player(96828122L, 0)));
+        enricher(FetchResult.ready(match)).enrich(id, 909L);
+
+        MatchSummary row = repo.findById(id).orElseThrow();
+        assertThat(row.enrichmentState()).isEqualTo("pending");
+        assertThat(row.result()).isNull();
+        assertThat(repo.enrichAttempts(id)).isEqualTo(1);
+        assertThat(events.types()).isEmpty();
+    }
+
+    @Test
+    void nullMatchedPlayerSlotHoldsInPending() throws Exception {
+        long id = insertPending(910L);
+        // Our player is present by account id but has a null player_slot -> side is unknown.
+        OpenDotaMatch.Player me = new OpenDotaMatch.Player(
+                96828122L, null, 1, 5, 5, 5, 300, 400, 12000, 100, 60);
+        OpenDotaMatch match = new OpenDotaMatch(910L, true, 1800, 1000L, 7, 22, List.of(me));
+        enricher(FetchResult.ready(match)).enrich(id, 910L);
+
+        MatchSummary row = repo.findById(id).orElseThrow();
+        assertThat(row.enrichmentState()).isEqualTo("pending");
+        assertThat(row.result()).isNull();
+        assertThat(events.types()).isEmpty();
+    }
+
     // ---- helpers -----------------------------------------------------------
 
     private Enricher enricher(FetchResult result) {
@@ -190,6 +248,15 @@ class EnricherTest {
 
     private long insertPending(long dotaMatchId) {
         return insertPendingWithAttempts(dotaMatchId, 0);
+    }
+
+    /** Seeds a pending row carrying recorder-owned duration_s + played_at, as the recorder writes them. */
+    private long insertPendingWithStats(long dotaMatchId, int durationS, long playedAt) {
+        return repo.insert(new NewMatch(
+                dotaMatchId, "match", "pending", "rubick",
+                null, null, null, null, null, null, null,
+                null, null, null, null, null, durationS,
+                playedAt, null, null, null, false, 1_000L, null));
     }
 
     private long insertPendingWithAttempts(long dotaMatchId, int attempts) {
