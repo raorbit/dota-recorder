@@ -169,6 +169,21 @@ class MatchFsmPauseTest {
         assertThat(spans.get(0).endWall()).isEqualTo(2000L);
     }
 
+    @Test
+    void armStatePausedFrame_doesNotSeedLeadingSpan() {
+        // Recording armed from an arm state (HERO_SELECTION) with the paused flag set must NOT seed a
+        // leading span: the begins-paused seed is gated to real GAME_IN_PROGRESS gameplay entry, so a
+        // draft-phase pause flag can't open a span before the match is rolling.
+        fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_HERO_SELECTION").noHero().activity(null)
+                .paused(true).wall(500).build());
+        assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
+        playing(false, 1000); // first gameplay frame, not paused -> no edge, no span
+
+        long id = finalizeAndGetRowId();
+
+        assertThat(pauses.findByMatchId(id)).isEmpty();
+    }
+
     // ---- helpers -----------------------------------------------------------
 
     private void start() {
