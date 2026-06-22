@@ -12,7 +12,7 @@ import org.mockito.Mockito;
 
 /**
  * Drives {@link ForceStopWatchdog#tick()} against a mock FSM + a real {@link GsiHeartbeat} stamped
- * via its package-private {@code markAt} hook. Proves the watchdog fires {@code forceFinalize} only
+ * via its public test-only {@code markAt} hook. Proves the watchdog fires {@code forceFinalize} only
  * when RECORDING AND the last frame is older than the silence threshold -- no clock injection, no
  * {@code Thread.sleep}.
  */
