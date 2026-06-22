@@ -55,9 +55,21 @@ public class PauseRepository {
      * that already know both ends.
      */
     public long insert(long matchId, long startWall, Long endWall) {
+        try (Connection conn = dataSource.getConnection()) {
+            return insert(conn, matchId, startWall, endWall);
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to insert pause for match " + matchId, e);
+        }
+    }
+
+    /**
+     * Inserts a complete pause span on a caller-supplied connection (which the caller commits/rolls
+     * back), so a pause write can join the recorder's atomic finalize transaction. Does not
+     * open/commit/close.
+     */
+    public long insert(Connection conn, long matchId, long startWall, Long endWall) throws SQLException {
         String sql = "INSERT INTO pauses (match_id, start_wall, end_wall) VALUES (?, ?, ?)";
-        try (Connection conn = dataSource.getConnection();
-             PreparedStatement ps = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
+        try (PreparedStatement ps = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
             ps.setLong(1, matchId);
             ps.setLong(2, startWall);
             if (endWall != null) {
@@ -69,8 +81,6 @@ public class PauseRepository {
             try (ResultSet keys = ps.getGeneratedKeys()) {
                 return keys.next() ? keys.getLong(1) : -1L;
             }
-        } catch (SQLException e) {
-            throw new IllegalStateException("Failed to insert pause for match " + matchId, e);
         }
     }
 

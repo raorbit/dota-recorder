@@ -40,12 +40,24 @@ public class MarkerRepository {
      */
     public long insert(long matchId, String type, double videoOffsetS, Integer gameClock,
                        String label, String source) {
+        try (Connection conn = dataSource.getConnection()) {
+            return insert(conn, matchId, type, videoOffsetS, gameClock, label, source);
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to insert marker for match " + matchId, e);
+        }
+    }
+
+    /**
+     * Inserts one marker on a caller-supplied connection (which the caller commits/rolls back), so a
+     * marker write can join the recorder's atomic finalize transaction. Does not open/commit/close.
+     */
+    public long insert(Connection conn, long matchId, String type, double videoOffsetS,
+                       Integer gameClock, String label, String source) throws SQLException {
         String sql = """
                 INSERT INTO markers (match_id, type, video_offset_s, game_clock, label, source)
                 VALUES (?, ?, ?, ?, ?, ?)
                 """;
-        try (Connection conn = dataSource.getConnection();
-             PreparedStatement ps = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
+        try (PreparedStatement ps = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
             ps.setLong(1, matchId);
             ps.setString(2, type);
             ps.setDouble(3, videoOffsetS);
@@ -60,8 +72,6 @@ public class MarkerRepository {
             try (ResultSet keys = ps.getGeneratedKeys()) {
                 return keys.next() ? keys.getLong(1) : -1L;
             }
-        } catch (SQLException e) {
-            throw new IllegalStateException("Failed to insert marker for match " + matchId, e);
         }
     }
 
