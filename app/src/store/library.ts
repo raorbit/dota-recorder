@@ -70,6 +70,12 @@ export interface LibraryState {
   readonly load: () => Promise<void>;
 }
 
+// Monotonic token guarding load() against out-of-order resolution: each load() bumps
+// it, so when an older in-flight load() resolves it sees a stale token and drops its
+// result rather than clobbering the fresher load that superseded it. Module-scoped (not
+// store state) so it never triggers a re-render.
+let loadToken = 0;
+
 export const useLibraryStore = create<LibraryState>((set, get) => ({
   matches: [],
   counts: EMPTY_COUNTS,
@@ -90,6 +96,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   setStatus: (status) => set({ status }),
 
   load: async () => {
+    const token = ++loadToken;
     set({ loadState: 'loading' });
     // Counts and the list are independent; settle both so one failing endpoint
     // (e.g. counts not yet implemented) does not blank the whole screen.
@@ -97,6 +104,10 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       fetchMatches(),
       fetchBucketCounts(),
     ]);
+
+    // A newer load() superseded this one while it was in flight (a burst of match.*
+    // frames each fire load()); drop the stale result so it can't clobber fresher data.
+    if (token !== loadToken) return;
 
     const matches = matchesRes.status === 'fulfilled' ? matchesRes.value : [];
     const counts = countsRes.status === 'fulfilled' ? countsRes.value : EMPTY_COUNTS;
