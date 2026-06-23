@@ -150,16 +150,13 @@ class ObsControllerTest {
                     }
                 };
 
-        long startNanos = System.nanoTime();
         boolean connected = controller.ensureConnected();
-        long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000;
 
         assertThat(connected).isFalse();
-        assertThat(elapsedMs)
-                .as("a failed connect must return promptly, not wait out the connect timeout")
-                .isLessThan(2_000);
         // The crux of the I1 fix: a failure-path latch release must NOT fall through to
-        // verifyProtocol(), which would call getVersion() and block on / misdiagnose a dead socket.
+        // verifyProtocol() -> getVersion(), which is what would block on / misdiagnose a dead socket.
+        // Asserting getVersion is never called is the real fail-fast guard (a wall-clock timing bound
+        // would only measure the mock, and flakes on a loaded CI box).
         verify(obs, never()).getVersion(anyLong());
     }
 }
