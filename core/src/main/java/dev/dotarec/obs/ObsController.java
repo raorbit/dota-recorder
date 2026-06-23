@@ -91,54 +91,61 @@ public class ObsController implements ObsRecorder {
         this.readyLatch = latch;
         this.connectionReady = false;
 
-        OBSRemoteController c =
-                OBSRemoteController.builder()
-                        .host(s.obsHost)
-                        .port(s.obsPort)
-                        // The library default is password-LESS; stock OBS v5 forces auth, so always
-                        // pass the configured password (may be "" if the user truly disabled auth).
-                        .password(s.obsPassword == null ? "" : s.obsPassword)
-                        .connectionTimeout(CONNECT_TIMEOUT_SECONDS)
-                        // Do not auto-connect from the builder; we drive connect() explicitly so a
-                        // down OBS at boot cannot throw during bean wiring.
-                        .autoConnect(false)
-                        .registerEventListener(
-                                RecordStateChangedEvent.class, this::handleRecordStateChanged)
-                        .lifecycle()
-                        // Release the latch on success AND on every failure path so a down OBS does
-                        // not strand ensureConnected() for the full timeout. Counting down an
-                        // already-zero latch (e.g. an error after a healthy onReady) is a no-op.
-                        // Only onReady sets connectionReady, so a failure-path release is told apart.
-                        .onReady(
-                                () -> {
-                                    connectionReady = true;
-                                    latch.countDown();
-                                })
-                        .onDisconnect(
-                                () -> {
-                                    onConnectionLost();
-                                    latch.countDown();
-                                })
-                        .onClose(
-                                code -> {
-                                    onConnectionLost();
-                                    latch.countDown();
-                                })
-                        .onControllerError(
-                                rt -> {
-                                    onError(rt == null ? null : rt.getThrowable());
-                                    latch.countDown();
-                                })
-                        .onCommunicatorError(
-                                rt -> {
-                                    onError(rt == null ? null : rt.getThrowable());
-                                    latch.countDown();
-                                })
-                        .and()
-                        .build();
+        OBSRemoteController c = buildController(s, latch);
         this.controller = c;
         events.reset();
         c.connect();
+    }
+
+    /**
+     * Builds the obs-websocket controller with its lifecycle callbacks bound to {@code latch} and
+     * {@link #connectionReady}. Package-private and overridable purely as a test seam: a test can
+     * subclass and return a fake controller to drive the ready / failure lifecycle without a live OBS.
+     */
+    OBSRemoteController buildController(SettingsStore.Settings s, CountDownLatch latch) {
+        return OBSRemoteController.builder()
+                .host(s.obsHost)
+                .port(s.obsPort)
+                // The library default is password-LESS; stock OBS v5 forces auth, so always pass the
+                // configured password (may be "" if the user truly disabled auth).
+                .password(s.obsPassword == null ? "" : s.obsPassword)
+                .connectionTimeout(CONNECT_TIMEOUT_SECONDS)
+                // Do not auto-connect from the builder; we drive connect() explicitly so a down OBS at
+                // boot cannot throw during bean wiring.
+                .autoConnect(false)
+                .registerEventListener(RecordStateChangedEvent.class, this::handleRecordStateChanged)
+                .lifecycle()
+                // Release the latch on success AND on every failure path so a down OBS does not strand
+                // ensureConnected() for the full timeout. Counting down an already-zero latch (e.g. an
+                // error after a healthy onReady) is a no-op. Only onReady sets connectionReady, so a
+                // failure-path release is told apart.
+                .onReady(
+                        () -> {
+                            connectionReady = true;
+                            latch.countDown();
+                        })
+                .onDisconnect(
+                        () -> {
+                            onConnectionLost();
+                            latch.countDown();
+                        })
+                .onClose(
+                        code -> {
+                            onConnectionLost();
+                            latch.countDown();
+                        })
+                .onControllerError(
+                        rt -> {
+                            onError(rt == null ? null : rt.getThrowable());
+                            latch.countDown();
+                        })
+                .onCommunicatorError(
+                        rt -> {
+                            onError(rt == null ? null : rt.getThrowable());
+                            latch.countDown();
+                        })
+                .and()
+                .build();
     }
 
     @Override

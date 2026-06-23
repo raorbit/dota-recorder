@@ -9,9 +9,11 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import dev.dotarec.config.SettingsStore;
 import io.obswebsocket.community.client.OBSRemoteController;
 import io.obswebsocket.community.client.message.response.record.StartRecordResponse;
 import io.obswebsocket.community.client.message.response.record.StopRecordResponse;
+import java.util.concurrent.CountDownLatch;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -95,5 +97,36 @@ class ObsControllerTest {
         order.verify(obs).stopRecord(anyLong());
         order.verify(obs).startRecord(anyLong());
         assertThat(health.isRecording()).isFalse();
+    }
+
+    @Test
+    void ensureConnected_whenConnectFailsWithoutReadyEvent_failsFastAndSkipsProtocolCheck() {
+        ObsHealth health = new ObsHealth();
+        SettingsStore settings = mock(SettingsStore.class);
+        when(settings.get()).thenReturn(new SettingsStore.Settings());
+        OBSRemoteController obs = mock(OBSRemoteController.class);
+
+        // Simulate a connect that FAILS: the latch is released as onClose/onError would, but the
+        // onReady event -- the only thing that sets connectionReady -- never fires.
+        ObsController controller =
+                new ObsController(settings, health, new ObsEvents(health)) {
+                    @Override
+                    OBSRemoteController buildController(SettingsStore.Settings s, CountDownLatch latch) {
+                        latch.countDown();
+                        return obs;
+                    }
+                };
+
+        long startNanos = System.nanoTime();
+        boolean connected = controller.ensureConnected();
+        long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000;
+
+        assertThat(connected).isFalse();
+        assertThat(elapsedMs)
+                .as("a failed connect must return promptly, not wait out the connect timeout")
+                .isLessThan(2_000);
+        // The crux of the I1 fix: a failure-path latch release must NOT fall through to
+        // verifyProtocol(), which would call getVersion() and block on / misdiagnose a dead socket.
+        verify(obs, never()).getVersion(anyLong());
     }
 }
