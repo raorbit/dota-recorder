@@ -59,8 +59,20 @@ public class ObsController implements ObsRecorder {
     /** The live controller; null when never connected or after a clean disconnect. */
     private volatile OBSRemoteController controller;
 
-    /** Latch that the {@code onReady} lifecycle callback counts down once identified. */
+    /**
+     * Latch {@link #ensureConnected()} waits on. Counted down on {@code onReady} (success) AND on the
+     * disconnect/close/error lifecycle callbacks (failure), so a down or connection-refused OBS frees
+     * the caller promptly instead of blocking it for the full connect timeout.
+     */
     private volatile CountDownLatch readyLatch;
+
+    /**
+     * Set true only by {@code onReady}, so {@link #ensureConnected()} can tell a real identified
+     * connection apart from a failure callback that merely released {@link #readyLatch}. Without it,
+     * a down OBS would fall through to {@code verifyProtocol()} and either block on a dead socket for
+     * the request timeout or misreport the outage as an "old obs-websocket". Reset at each connect.
+     */
+    private volatile boolean connectionReady;
 
     public ObsController(SettingsStore settings, ObsHealth health, ObsEvents events) {
         this.settings = settings;
@@ -77,31 +89,63 @@ public class ObsController implements ObsRecorder {
         SettingsStore.Settings s = settings.get();
         CountDownLatch latch = new CountDownLatch(1);
         this.readyLatch = latch;
+        this.connectionReady = false;
 
-        OBSRemoteController c =
-                OBSRemoteController.builder()
-                        .host(s.obsHost)
-                        .port(s.obsPort)
-                        // The library default is password-LESS; stock OBS v5 forces auth, so always
-                        // pass the configured password (may be "" if the user truly disabled auth).
-                        .password(s.obsPassword == null ? "" : s.obsPassword)
-                        .connectionTimeout(CONNECT_TIMEOUT_SECONDS)
-                        // Do not auto-connect from the builder; we drive connect() explicitly so a
-                        // down OBS at boot cannot throw during bean wiring.
-                        .autoConnect(false)
-                        .registerEventListener(
-                                RecordStateChangedEvent.class, this::handleRecordStateChanged)
-                        .lifecycle()
-                        .onReady(latch::countDown)
-                        .onDisconnect(this::onConnectionLost)
-                        .onClose(code -> onConnectionLost())
-                        .onControllerError(rt -> onError(rt == null ? null : rt.getThrowable()))
-                        .onCommunicatorError(rt -> onError(rt == null ? null : rt.getThrowable()))
-                        .and()
-                        .build();
+        OBSRemoteController c = buildController(s, latch);
         this.controller = c;
         events.reset();
         c.connect();
+    }
+
+    /**
+     * Builds the obs-websocket controller with its lifecycle callbacks bound to {@code latch} and
+     * {@link #connectionReady}. Package-private and overridable purely as a test seam: a test can
+     * subclass and return a fake controller to drive the ready / failure lifecycle without a live OBS.
+     */
+    OBSRemoteController buildController(SettingsStore.Settings s, CountDownLatch latch) {
+        return OBSRemoteController.builder()
+                .host(s.obsHost)
+                .port(s.obsPort)
+                // The library default is password-LESS; stock OBS v5 forces auth, so always pass the
+                // configured password (may be "" if the user truly disabled auth).
+                .password(s.obsPassword == null ? "" : s.obsPassword)
+                .connectionTimeout(CONNECT_TIMEOUT_SECONDS)
+                // Do not auto-connect from the builder; we drive connect() explicitly so a down OBS at
+                // boot cannot throw during bean wiring.
+                .autoConnect(false)
+                .registerEventListener(RecordStateChangedEvent.class, this::handleRecordStateChanged)
+                .lifecycle()
+                // Release the latch on success AND on every failure path so a down OBS does not strand
+                // ensureConnected() for the full timeout. Counting down an already-zero latch (e.g. an
+                // error after a healthy onReady) is a no-op. Only onReady sets connectionReady, so a
+                // failure-path release is told apart.
+                .onReady(
+                        () -> {
+                            connectionReady = true;
+                            latch.countDown();
+                        })
+                .onDisconnect(
+                        () -> {
+                            onConnectionLost();
+                            latch.countDown();
+                        })
+                .onClose(
+                        code -> {
+                            onConnectionLost();
+                            latch.countDown();
+                        })
+                .onControllerError(
+                        rt -> {
+                            onError(rt == null ? null : rt.getThrowable());
+                            latch.countDown();
+                        })
+                .onCommunicatorError(
+                        rt -> {
+                            onError(rt == null ? null : rt.getThrowable());
+                            latch.countDown();
+                        })
+                .and()
+                .build();
     }
 
     @Override
@@ -112,13 +156,15 @@ public class ObsController implements ObsRecorder {
         try {
             connect();
             CountDownLatch latch = this.readyLatch;
-            boolean ready =
+            boolean signaled =
                     latch != null
                             && latch.await(CONNECT_TIMEOUT_SECONDS + 2, TimeUnit.SECONDS);
-            if (!ready) {
-                // OBS not running / wrong host:port / wrong password -> degrade, do not crash.
+            if (!signaled || !connectionReady) {
+                // Either the connect timed out, or a disconnect/close/error woke us early. Either way
+                // OBS is not identified -> degrade WITHOUT calling verifyProtocol (which would block on
+                // a dead socket or misreport the outage as an old-protocol handshake). Do not crash.
                 log.warn(
-                        "OBS not reachable at {}:{} within timeout; staying disconnected",
+                        "OBS not reachable at {}:{}; staying disconnected",
                         settings.get().obsHost,
                         settings.get().obsPort);
                 disconnectQuietly();
@@ -203,7 +249,48 @@ public class ObsController implements ObsRecorder {
 
     @Override
     public String startRecording() {
+        // Clear the previous recording's confirmed-start anchor BEFORE issuing StartRecord. The FSM
+        // reads recordConfirmedAt() the instant this returns, but THIS match's OUTPUT_STARTED lands
+        // asynchronously a moment later -- and events.reset() otherwise only runs on (re)connect, not
+        // between matches on a live connection. Without this, the 2nd+ match per connection would
+        // anchor on the PRIOR match's start instant (the null-fallback never engages on a non-null
+        // stale value), inflating durationS and every marker video_offset_s by the inter-match gap.
+        events.reset();
         OBSRemoteController c = requireController();
+        // A previous StopRecord may have timed out while OBS kept recording: its OUTPUT_STOPPED never
+        // arrived, so health.recording is still true and OBS would reject this StartRecord (an output
+        // is already active), silently breaking this and every future match until the app restarts.
+        // If we still believe a recording is live, issue a best-effort corrective stop first.
+        if (health.isRecording()) {
+            log.warn("OBS still flagged as recording at StartRecord; issuing a corrective StopRecord first");
+            StopRecordResponse corrective;
+            try {
+                corrective = c.stopRecord(REQUEST_TIMEOUT_MS);
+            } catch (RuntimeException e) {
+                // Keep health.recording=true so the NEXT match retries this corrective stop instead of
+                // skipping it forever; bail so the FSM stays IDLE rather than issuing a StartRecord OBS
+                // will reject anyway.
+                throw new ObsException("Corrective StopRecord before StartRecord failed", e);
+            }
+            if (corrective != null && corrective.isSuccessful()) {
+                // Stopped cleanly.
+                health.setRecording(false);
+            } else if (!health.isRecording()) {
+                // The stop "failed", but OBS is no longer recording: its OUTPUT_STOPPED event landed
+                // between our health check and this call (a benign race), so the recording already
+                // ended on its own. Safe to proceed with the new recording.
+                log.info("Corrective StopRecord found no active output; OBS already stopped, proceeding");
+            } else {
+                // null / timeout, or OBS still believes it is recording: do NOT clear health.recording.
+                // The library returns null / unsuccessful on TIMEOUT -- it does NOT throw (see
+                // stopRecording()). Clearing the flag here would make every later match skip this block
+                // and fail silently, exactly the permanent breakage this guard exists to prevent. Bail
+                // and let the next match retry the corrective stop.
+                throw new ObsException(
+                        "Corrective StopRecord failed"
+                                + (corrective == null ? " (no response / timeout)" : ""));
+            }
+        }
         var resp = c.startRecord(REQUEST_TIMEOUT_MS);
         if (resp == null || !resp.isSuccessful()) {
             throw new ObsException(

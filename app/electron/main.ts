@@ -5,14 +5,27 @@
 // to start or crashes mid-session ("core stopped - recordings paused") instead of
 // the bare dialog used here.
 import { app, BrowserWindow, dialog } from 'electron';
+import { randomBytes } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { JvmSupervisor } from './jvm-supervisor';
 import { ObsSupervisor } from './obs-supervisor';
-import { BRIDGE_BASE, electronLogPath, logDir, packagedIndexHtml } from './paths';
+import {
+  BRIDGE_BASE,
+  BRIDGE_TOKEN_ARG_PREFIX,
+  BRIDGE_TOKEN_HEADER,
+  electronLogPath,
+  logDir,
+  packagedIndexHtml,
+} from './paths';
 
 const isDev = process.env.DOTAREC_DEV === '1' || !app.isPackaged;
 const DEV_SERVER_URL = 'http://localhost:5173';
+
+// Per-launch shared secret gating the bridge. Generated once here, handed to the core
+// (env), the renderer (preload arg), and every fetch the main process makes to the
+// bridge, so a web page in the user's browser can't read/mutate the loopback API.
+const bridgeToken = randomBytes(32).toString('hex');
 
 /** Append a line to electron.log (best-effort) and mirror to the console. */
 function logLine(line: string): void {
@@ -24,7 +37,7 @@ function logLine(line: string): void {
   console.log(line);
 }
 
-const supervisor = new JvmSupervisor({ onLog: (line) => logLine(`[core] ${line}`) });
+const supervisor = new JvmSupervisor({ bridgeToken, onLog: (line) => logLine(`[core] ${line}`) });
 let obsSupervisor: ObsSupervisor | null = null;
 let mainWindow: BrowserWindow | null = null;
 let shuttingDown = false;
@@ -78,6 +91,7 @@ async function launchObs(): Promise<void> {
       obsDir: launchArgs.obsDir,
       port: launchArgs.port,
       password: launchArgs.password,
+      bridgeToken,
       onLog: (line) => logLine(`[obs] ${line}`),
     });
     await obsSupervisor.start();
@@ -100,6 +114,7 @@ async function pollLaunchArgs(
     try {
       const res = await fetch(`${BRIDGE_BASE}/obs/launch-args`, {
         signal: AbortSignal.timeout(1_500),
+        headers: { [BRIDGE_TOKEN_HEADER]: bridgeToken },
       });
       if (res.ok) {
         const a = (await res.json()) as { obsDir?: string; port?: number; password?: string };
@@ -131,6 +146,8 @@ function createWindow(): void {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      // Hand the per-launch bridge token to the (sandboxed) preload via process.argv.
+      additionalArguments: [`${BRIDGE_TOKEN_ARG_PREFIX}${bridgeToken}`],
     },
   });
 

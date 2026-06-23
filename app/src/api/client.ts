@@ -10,8 +10,21 @@ function bridgeBase(): string {
   return window.dotarec?.bridgeBase ?? DEFAULT_BRIDGE_BASE;
 }
 
+// The bridge requires a per-launch shared secret (see the core's BridgeAuthFilter).
+// The preload injects it as `bridgeToken`; REST calls send it as a header and the
+// WebSocket handshake carries it as a query param (handshakes can't set headers).
+// Absent outside Electron (plain browser dev), where the core runs auth-disabled.
+const TOKEN_HEADER = 'X-Dotarec-Token';
+
+function authHeaders(): Record<string, string> {
+  const token = window.dotarec?.bridgeToken;
+  return token ? { [TOKEN_HEADER]: token } : {};
+}
+
 function wsUrl(): string {
-  return window.dotarec?.wsUrl ?? DEFAULT_WS_URL;
+  const base = window.dotarec?.wsUrl ?? DEFAULT_WS_URL;
+  const token = window.dotarec?.bridgeToken;
+  return token ? `${base}?token=${encodeURIComponent(token)}` : base;
 }
 
 export interface Health {
@@ -95,7 +108,7 @@ export interface MatchSummary {
 
 async function getJson<T>(path: string): Promise<T> {
   const res = await fetch(`${bridgeBase()}${path}`, {
-    headers: { Accept: 'application/json' },
+    headers: { Accept: 'application/json', ...authHeaders() },
     signal: AbortSignal.timeout(5_000),
   });
   if (!res.ok) {
@@ -110,6 +123,7 @@ async function putJson<TBody, TResult>(path: string, body: TBody): Promise<TResu
     headers: {
       Accept: 'application/json',
       'Content-Type': 'application/json',
+      ...authHeaders(),
     },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(5_000),
@@ -126,6 +140,7 @@ async function patchJson<TBody, TResult>(path: string, body: TBody): Promise<TRe
     headers: {
       Accept: 'application/json',
       'Content-Type': 'application/json',
+      ...authHeaders(),
     },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(5_000),

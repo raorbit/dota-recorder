@@ -23,6 +23,13 @@ spring:
         size: 4
 
 app:
+  # Per-launch shared secret the Electron shell injects (env DOTAREC_BRIDGE_TOKEN).
+  # The renderer echoes it on every REST call and the WebSocket handshake; the
+  # bridge connector (3224) rejects requests without it (see BridgeAuthFilter).
+  # Blank in dev / standalone / tests -> bridge auth is disabled. The GSI
+  # connector is never gated (Dota can't send a token).
+  bridge:
+    token: ${DOTAREC_BRIDGE_TOKEN:}
   # Second Tomcat connector dedicated to Dota GSI POSTs (see GsiConnectorConfig),
   # also bound to 127.0.0.1 only.
   gsi:

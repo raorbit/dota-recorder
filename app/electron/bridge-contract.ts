@@ -6,4 +6,8 @@ export interface DotaRecBridge {
   readonly bridgeBase: string;
   readonly healthUrl: string;
   readonly wsUrl: string;
+  // Per-launch shared secret the renderer must send on every bridge request (REST
+  // header / WS query param). Empty string when running outside Electron (plain
+  // browser dev), in which case the core also runs with auth disabled.
+  readonly bridgeToken: string;
 }
