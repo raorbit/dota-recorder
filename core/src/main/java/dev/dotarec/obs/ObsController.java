@@ -240,10 +240,23 @@ public class ObsController implements ObsRecorder {
         // If we still believe a recording is live, issue a best-effort corrective stop first.
         if (health.isRecording()) {
             log.warn("OBS still flagged as recording at StartRecord; issuing a corrective StopRecord first");
+            StopRecordResponse corrective;
             try {
-                c.stopRecord(REQUEST_TIMEOUT_MS);
+                corrective = c.stopRecord(REQUEST_TIMEOUT_MS);
             } catch (RuntimeException e) {
-                log.warn("Corrective StopRecord before StartRecord failed: {}", e.toString());
+                // Keep health.recording=true so the NEXT match retries this corrective stop instead of
+                // skipping it forever; bail so the FSM stays IDLE rather than issuing a StartRecord OBS
+                // will reject anyway.
+                throw new ObsException("Corrective StopRecord before StartRecord failed", e);
+            }
+            if (corrective == null || !corrective.isSuccessful()) {
+                // The library returns null / unsuccessful on TIMEOUT -- it does NOT throw (see
+                // stopRecording()). OBS may well still be recording, so do NOT clear health.recording:
+                // clearing it would make every later match skip this block and fail silently, exactly
+                // the permanent breakage this guard exists to prevent. Bail and let the next match retry.
+                throw new ObsException(
+                        "Corrective StopRecord failed"
+                                + (corrective == null ? " (no response / timeout)" : ""));
             }
             health.setRecording(false);
         }
