@@ -10,9 +10,11 @@ import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
 
 /**
- * Unit tests for {@link BridgeAuthFilter}: the bridge connector requires the per-launch token, the
- * GSI connector and CORS preflight are exempt, the WebSocket handshake authenticates via query
- * param, and a blank token disables enforcement entirely (dev / standalone / tests).
+ * Unit tests for {@link BridgeAuthFilter}: every bridge endpoint requires the per-launch token, the
+ * GSI endpoint and CORS preflight are exempt, the WebSocket handshake authenticates via query param,
+ * and a blank token disables enforcement (dev / standalone / tests). The exemption is by PATH, not
+ * connector port -- both Tomcat connectors share one servlet context, so a port-based exemption
+ * would leave the whole API open token-free on the GSI port.
  */
 class BridgeAuthFilterTest {
 
@@ -27,58 +29,68 @@ class BridgeAuthFilterTest {
         return resp;
     }
 
-    private static MockHttpServletRequest onBridge(String method, String uri) {
-        MockHttpServletRequest req = new MockHttpServletRequest(method, uri);
-        req.setLocalPort(BRIDGE_PORT);
-        return req;
+    private static MockHttpServletRequest req(String method, String uri, int localPort) {
+        MockHttpServletRequest r = new MockHttpServletRequest(method, uri);
+        r.setLocalPort(localPort);
+        return r;
     }
 
     @Test
     void rejectsBridgeRequestWithoutToken() throws Exception {
-        MockHttpServletResponse resp = run(new BridgeAuthFilter(TOKEN, BRIDGE_PORT), onBridge("GET", "/settings"));
+        MockHttpServletResponse resp =
+                run(new BridgeAuthFilter(TOKEN), req("GET", "/settings", BRIDGE_PORT));
         assertThat(resp.getStatus()).isEqualTo(401);
     }
 
     @Test
     void rejectsBridgeRequestWithWrongToken() throws Exception {
-        MockHttpServletRequest req = onBridge("GET", "/obs/launch-args");
-        req.addHeader(BridgeAuthFilter.TOKEN_HEADER, "not-the-token");
-        assertThat(run(new BridgeAuthFilter(TOKEN, BRIDGE_PORT), req).getStatus()).isEqualTo(401);
+        MockHttpServletRequest r = req("GET", "/obs/launch-args", BRIDGE_PORT);
+        r.addHeader(BridgeAuthFilter.TOKEN_HEADER, "not-the-token");
+        assertThat(run(new BridgeAuthFilter(TOKEN), r).getStatus()).isEqualTo(401);
     }
 
     @Test
     void allowsBridgeRequestWithCorrectHeaderToken() throws Exception {
-        MockHttpServletRequest req = onBridge("GET", "/obs/launch-args");
-        req.addHeader(BridgeAuthFilter.TOKEN_HEADER, TOKEN);
-        assertThat(run(new BridgeAuthFilter(TOKEN, BRIDGE_PORT), req).getStatus()).isEqualTo(200);
+        MockHttpServletRequest r = req("GET", "/obs/launch-args", BRIDGE_PORT);
+        r.addHeader(BridgeAuthFilter.TOKEN_HEADER, TOKEN);
+        assertThat(run(new BridgeAuthFilter(TOKEN), r).getStatus()).isEqualTo(200);
     }
 
     @Test
     void allowsWebSocketHandshakeWithQueryParamToken() throws Exception {
         // Browser WebSocket handshakes can't set headers, so the token rides in the query string.
-        MockHttpServletRequest req = onBridge("GET", "/ws");
-        req.addParameter(BridgeAuthFilter.TOKEN_QUERY_PARAM, TOKEN);
-        assertThat(run(new BridgeAuthFilter(TOKEN, BRIDGE_PORT), req).getStatus()).isEqualTo(200);
+        MockHttpServletRequest r = req("GET", "/ws", BRIDGE_PORT);
+        r.addParameter(BridgeAuthFilter.TOKEN_QUERY_PARAM, TOKEN);
+        assertThat(run(new BridgeAuthFilter(TOKEN), r).getStatus()).isEqualTo(200);
     }
 
     @Test
-    void neverGatesTheGsiConnector() throws Exception {
-        // Dota posts to 127.0.0.1:3223 and cannot send a token; that connector must stay open.
-        MockHttpServletRequest req = new MockHttpServletRequest("POST", "/gsi");
-        req.setLocalPort(GSI_PORT);
-        assertThat(run(new BridgeAuthFilter(TOKEN, BRIDGE_PORT), req).getStatus()).isEqualTo(200);
+    void neverGatesTheGsiEndpoint() throws Exception {
+        // Dota posts to /gsi and can't send a token; exempt by path, on either connector.
+        assertThat(run(new BridgeAuthFilter(TOKEN), req("POST", "/gsi", GSI_PORT)).getStatus())
+                .isEqualTo(200);
+        assertThat(run(new BridgeAuthFilter(TOKEN), req("POST", "/gsi", BRIDGE_PORT)).getStatus())
+                .isEqualTo(200);
+    }
+
+    @Test
+    void gatesBridgeEndpointsOnTheGsiPortToo() throws Exception {
+        // Regression: both connectors share one servlet context, so /obs/launch-args is reachable on
+        // the GSI port (3223). A port-based exemption would leak the OBS password there token-free.
+        assertThat(run(new BridgeAuthFilter(TOKEN), req("GET", "/obs/launch-args", GSI_PORT)).getStatus())
+                .isEqualTo(401);
     }
 
     @Test
     void letsCorsPreflightThrough() throws Exception {
-        assertThat(run(new BridgeAuthFilter(TOKEN, BRIDGE_PORT), onBridge("OPTIONS", "/settings")).getStatus())
+        assertThat(run(new BridgeAuthFilter(TOKEN), req("OPTIONS", "/settings", BRIDGE_PORT)).getStatus())
                 .isEqualTo(200);
     }
 
     @Test
     void disabledWhenNoTokenConfigured() throws Exception {
         // Blank token (dev / standalone jar / tests): enforcement is off, even with no token sent.
-        assertThat(run(new BridgeAuthFilter("", BRIDGE_PORT), onBridge("GET", "/settings")).getStatus())
+        assertThat(run(new BridgeAuthFilter(""), req("GET", "/settings", BRIDGE_PORT)).getStatus())
                 .isEqualTo(200);
     }
 }

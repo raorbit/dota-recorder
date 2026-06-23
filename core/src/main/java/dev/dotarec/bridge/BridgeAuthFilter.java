@@ -29,8 +29,13 @@ import org.springframework.web.filter.OncePerRequestFilter;
  * <p>Two deliberate exemptions:
  *
  * <ul>
- *   <li>The Dota GSI connector (127.0.0.1:3223) is never token-gated -- Dota can't send a header.
- *       The check is by local port, so only the bridge connector enforces.</li>
+ *   <li>The Dota GSI endpoint ({@code POST /gsi}) is never token-gated -- Dota can't send a header.
+ *       The exemption is by REQUEST PATH, not by connector/port: the GSI connector (3223) shares one
+ *       servlet context with the bridge connector (3224), so every endpoint (incl. /settings and the
+ *       OBS-password-bearing /obs/launch-args) is reachable on BOTH ports. Gating by port would leave
+ *       the whole API open token-free on 3223. /gsi stays open on either port -- that endpoint is
+ *       inherently unauthenticated (any local process can already post frames to Dota's connector),
+ *       so the token protects the data-bearing and state-changing endpoints, not /gsi.</li>
  *   <li>When no token is configured (blank), enforcement is OFF. This keeps the standalone jar,
  *       {@code bootRun}, and tests (which never set the env) working unchanged; Electron always sets
  *       the token, so packaged and dev-with-Electron runs are always protected.</li>
@@ -50,17 +55,16 @@ public class BridgeAuthFilter extends OncePerRequestFilter {
     /** WebSocket-handshake query param the renderer sends the token on (handshakes can't set headers). */
     static final String TOKEN_QUERY_PARAM = "token";
 
+    /** The one endpoint that is never token-gated (Dota can't send a token). Exempt on any port. */
+    static final String GSI_PATH = "/gsi";
+
     private final byte[] expectedToken;
     private final boolean enabled;
-    private final int bridgePort;
 
-    public BridgeAuthFilter(
-            @Value("${app.bridge.token:}") String token,
-            @Value("${server.port:3224}") int bridgePort) {
+    public BridgeAuthFilter(@Value("${app.bridge.token:}") String token) {
         String trimmed = token == null ? "" : token.trim();
         this.enabled = !trimmed.isEmpty();
         this.expectedToken = trimmed.getBytes(StandardCharsets.UTF_8);
-        this.bridgePort = bridgePort;
         if (!enabled) {
             log.warn(
                     "Bridge auth DISABLED (no DOTAREC_BRIDGE_TOKEN set); the local API is unauthenticated");
@@ -79,9 +83,9 @@ public class BridgeAuthFilter extends OncePerRequestFilter {
     }
 
     private boolean mustAuthenticate(HttpServletRequest request) {
-        // Off when unconfigured; never gate the GSI connector; let CORS preflight through.
+        // Off when unconfigured; never gate the GSI endpoint (by path, not port); let preflight through.
         return enabled
-                && request.getLocalPort() == bridgePort
+                && !GSI_PATH.equals(request.getRequestURI())
                 && !HttpMethod.OPTIONS.matches(request.getMethod());
     }
 
