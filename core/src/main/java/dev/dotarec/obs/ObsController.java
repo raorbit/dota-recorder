@@ -66,6 +66,14 @@ public class ObsController implements ObsRecorder {
      */
     private volatile CountDownLatch readyLatch;
 
+    /**
+     * Set true only by {@code onReady}, so {@link #ensureConnected()} can tell a real identified
+     * connection apart from a failure callback that merely released {@link #readyLatch}. Without it,
+     * a down OBS would fall through to {@code verifyProtocol()} and either block on a dead socket for
+     * the request timeout or misreport the outage as an "old obs-websocket". Reset at each connect.
+     */
+    private volatile boolean connectionReady;
+
     public ObsController(SettingsStore settings, ObsHealth health, ObsEvents events) {
         this.settings = settings;
         this.health = health;
@@ -81,6 +89,7 @@ public class ObsController implements ObsRecorder {
         SettingsStore.Settings s = settings.get();
         CountDownLatch latch = new CountDownLatch(1);
         this.readyLatch = latch;
+        this.connectionReady = false;
 
         OBSRemoteController c =
                 OBSRemoteController.builder()
@@ -99,7 +108,12 @@ public class ObsController implements ObsRecorder {
                         // Release the latch on success AND on every failure path so a down OBS does
                         // not strand ensureConnected() for the full timeout. Counting down an
                         // already-zero latch (e.g. an error after a healthy onReady) is a no-op.
-                        .onReady(latch::countDown)
+                        // Only onReady sets connectionReady, so a failure-path release is told apart.
+                        .onReady(
+                                () -> {
+                                    connectionReady = true;
+                                    latch.countDown();
+                                })
                         .onDisconnect(
                                 () -> {
                                     onConnectionLost();
@@ -135,13 +149,15 @@ public class ObsController implements ObsRecorder {
         try {
             connect();
             CountDownLatch latch = this.readyLatch;
-            boolean ready =
+            boolean signaled =
                     latch != null
                             && latch.await(CONNECT_TIMEOUT_SECONDS + 2, TimeUnit.SECONDS);
-            if (!ready) {
-                // OBS not running / wrong host:port / wrong password -> degrade, do not crash.
+            if (!signaled || !connectionReady) {
+                // Either the connect timed out, or a disconnect/close/error woke us early. Either way
+                // OBS is not identified -> degrade WITHOUT calling verifyProtocol (which would block on
+                // a dead socket or misreport the outage as an old-protocol handshake). Do not crash.
                 log.warn(
-                        "OBS not reachable at {}:{} within timeout; staying disconnected",
+                        "OBS not reachable at {}:{}; staying disconnected",
                         settings.get().obsHost,
                         settings.get().obsPort);
                 disconnectQuietly();
