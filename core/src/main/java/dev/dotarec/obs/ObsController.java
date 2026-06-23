@@ -211,6 +211,19 @@ public class ObsController implements ObsRecorder {
         // stale value), inflating durationS and every marker video_offset_s by the inter-match gap.
         events.reset();
         OBSRemoteController c = requireController();
+        // A previous StopRecord may have timed out while OBS kept recording: its OUTPUT_STOPPED never
+        // arrived, so health.recording is still true and OBS would reject this StartRecord (an output
+        // is already active), silently breaking this and every future match until the app restarts.
+        // If we still believe a recording is live, issue a best-effort corrective stop first.
+        if (health.isRecording()) {
+            log.warn("OBS still flagged as recording at StartRecord; issuing a corrective StopRecord first");
+            try {
+                c.stopRecord(REQUEST_TIMEOUT_MS);
+            } catch (RuntimeException e) {
+                log.warn("Corrective StopRecord before StartRecord failed: {}", e.toString());
+            }
+            health.setRecording(false);
+        }
         var resp = c.startRecord(REQUEST_TIMEOUT_MS);
         if (resp == null || !resp.isSuccessful()) {
             throw new ObsException(
