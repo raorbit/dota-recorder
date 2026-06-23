@@ -12,6 +12,8 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import * as assignJob from './job-object';
 import {
+  BRIDGE_TOKEN_ENV,
+  BRIDGE_TOKEN_HEADER,
   HEALTH_URL,
   bundledJavawPath,
   obsDir,
@@ -23,6 +25,8 @@ import {
 export interface SupervisorOptions {
   /** Total time to wait for /health before giving up. */
   readonly healthTimeoutMs?: number;
+  /** Per-launch bridge token: injected into the core's env and sent on the health poll. */
+  readonly bridgeToken?: string;
   /** Called with each line of core stdout/stderr (for the log file later). */
   readonly onLog?: (line: string) => void;
 }
@@ -31,10 +35,12 @@ export class JvmSupervisor {
   private child: ChildProcess | null = null;
   private stopping = false;
   private readonly healthTimeoutMs: number;
+  private readonly bridgeToken: string | undefined;
   private readonly onLog: (line: string) => void;
 
   constructor(opts: SupervisorOptions = {}) {
     this.healthTimeoutMs = opts.healthTimeoutMs ?? 30_000;
+    this.bridgeToken = opts.bridgeToken;
     this.onLog = opts.onLog ?? ((line) => console.log(`[core] ${line}`));
   }
 
@@ -65,6 +71,11 @@ export class JvmSupervisor {
     this.child = spawn(javaw, jvmArgs, {
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
+      // Hand the core its bridge token out-of-band (env, not argv) so it can enforce
+      // the shared secret on the loopback API. Absent token -> core runs auth-disabled.
+      env: this.bridgeToken
+        ? { ...process.env, [BRIDGE_TOKEN_ENV]: this.bridgeToken }
+        : process.env,
     });
 
     if (this.child.pid !== undefined) {
@@ -139,7 +150,10 @@ export class JvmSupervisor {
         throw new Error('Supervisor stopped before core became healthy.');
       }
       try {
-        const res = await fetch(HEALTH_URL, { signal: AbortSignal.timeout(1_500) });
+        const res = await fetch(HEALTH_URL, {
+          signal: AbortSignal.timeout(1_500),
+          ...(this.bridgeToken ? { headers: { [BRIDGE_TOKEN_HEADER]: this.bridgeToken } } : {}),
+        });
         if (res.ok) {
           const body = (await res.json()) as { status?: string };
           if (body.status === 'ok') return;

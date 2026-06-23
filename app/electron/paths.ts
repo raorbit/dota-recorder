@@ -17,6 +17,17 @@ export const BRIDGE_BASE = `http://${BRIDGE_HOST}:${BRIDGE_PORT}`;
 export const HEALTH_URL = `${BRIDGE_BASE}/health`;
 export const WS_URL = `ws://${BRIDGE_HOST}:${BRIDGE_PORT}/ws`;
 
+// Per-launch shared secret for the bridge connector. The main process generates it,
+// hands it to the core (env DOTAREC_BRIDGE_TOKEN) and to the renderer (preload), and
+// every bridge request must echo it (REST header / WS query param). See the core's
+// BridgeAuthFilter. Loopback binding alone does not stop a web page in the user's
+// browser from reaching 127.0.0.1, so the token is what actually gates access.
+export const BRIDGE_TOKEN_ENV = 'DOTAREC_BRIDGE_TOKEN';
+export const BRIDGE_TOKEN_HEADER = 'X-Dotarec-Token';
+// Prefix of the additionalArguments switch the main process passes to the BrowserWindow
+// so a sandboxed preload can read the token from process.argv.
+export const BRIDGE_TOKEN_ARG_PREFIX = '--dotarec-bridge-token=';
+
 function isPackaged(): boolean {
   return app.isPackaged;
 }

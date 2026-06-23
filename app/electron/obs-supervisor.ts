@@ -16,7 +16,7 @@ import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as assignJob from './job-object';
-import { BRIDGE_BASE } from './paths';
+import { BRIDGE_BASE, BRIDGE_TOKEN_HEADER } from './paths';
 
 export interface ObsSupervisorOptions {
   /** Writable OBS dir (%LOCALAPPDATA%/dota-recorder/obs) — obs64.exe lives under bin/64bit. */
@@ -27,6 +27,8 @@ export interface ObsSupervisorOptions {
   readonly password: string;
   /** Total time to wait for the core to report OBS healthy before giving up. */
   readonly healthTimeoutMs?: number;
+  /** Per-launch bridge token, sent on the /status poll the readiness check makes. */
+  readonly bridgeToken?: string;
   /** Called with each line of OBS stdout/stderr (for the log file). */
   readonly onLog?: (line: string) => void;
 }
@@ -38,6 +40,7 @@ export class ObsSupervisor {
   private readonly port: number;
   private readonly password: string;
   private readonly healthTimeoutMs: number;
+  private readonly bridgeToken: string | undefined;
   private readonly onLog: (line: string) => void;
 
   constructor(opts: ObsSupervisorOptions) {
@@ -45,6 +48,7 @@ export class ObsSupervisor {
     this.port = opts.port;
     this.password = opts.password;
     this.healthTimeoutMs = opts.healthTimeoutMs ?? 30_000;
+    this.bridgeToken = opts.bridgeToken;
     this.onLog = opts.onLog ?? ((line) => console.log(`[obs] ${line}`));
   }
 
@@ -196,7 +200,10 @@ export class ObsSupervisor {
       try {
         // The core auto-connects to OBS on its retry loop; /status reflects that via
         // obs.connected (unlike /health, which is hardcoded ok and never gates on OBS).
-        const res = await fetch(`${BRIDGE_BASE}/status`, { signal: AbortSignal.timeout(1_500) });
+        const res = await fetch(`${BRIDGE_BASE}/status`, {
+          signal: AbortSignal.timeout(1_500),
+          ...(this.bridgeToken ? { headers: { [BRIDGE_TOKEN_HEADER]: this.bridgeToken } } : {}),
+        });
         if (res.ok) {
           const body = (await res.json()) as { obs?: { connected?: boolean } };
           if (body.obs?.connected === true) return;
