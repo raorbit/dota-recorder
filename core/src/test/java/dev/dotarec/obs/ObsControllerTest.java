@@ -100,6 +100,39 @@ class ObsControllerTest {
     }
 
     @Test
+    void startRecording_whenCorrectiveStopRacesANativeStop_proceedsWithTheNewRecording() {
+        ObsHealth health = new ObsHealth();
+        ObsController controller = new ObsController(null, health, new ObsEvents(health));
+
+        OBSRemoteController obs = mock(OBSRemoteController.class);
+        StopRecordResponse stopFailed = mock(StopRecordResponse.class);
+        when(stopFailed.isSuccessful()).thenReturn(false);
+        // Model the benign race: OBS's OUTPUT_STOPPED lands DURING the corrective stop -- the recording
+        // ends natively (flipping the health flag) and the stop itself reports no active output.
+        when(obs.stopRecord(anyLong()))
+                .thenAnswer(
+                        inv -> {
+                            health.setRecording(false);
+                            return stopFailed;
+                        });
+        StartRecordResponse startOk = mock(StartRecordResponse.class);
+        when(startOk.isSuccessful()).thenReturn(true);
+        when(obs.startRecord(anyLong())).thenReturn(startOk);
+        ReflectionTestUtils.setField(controller, "controller", obs);
+
+        health.setConnected(true);
+        health.setRecording(true);
+
+        // Must NOT throw: a failed corrective stop where OBS is no longer recording is a benign race,
+        // not the timeout case, so the new recording proceeds instead of being dropped.
+        controller.startRecording();
+
+        InOrder order = inOrder(obs);
+        order.verify(obs).stopRecord(anyLong());
+        order.verify(obs).startRecord(anyLong());
+    }
+
+    @Test
     void ensureConnected_whenConnectFailsWithoutReadyEvent_failsFastAndSkipsProtocolCheck() {
         ObsHealth health = new ObsHealth();
         SettingsStore settings = mock(SettingsStore.class);

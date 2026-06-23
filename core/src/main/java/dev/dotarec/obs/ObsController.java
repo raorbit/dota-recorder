@@ -272,16 +272,24 @@ public class ObsController implements ObsRecorder {
                 // will reject anyway.
                 throw new ObsException("Corrective StopRecord before StartRecord failed", e);
             }
-            if (corrective == null || !corrective.isSuccessful()) {
+            if (corrective != null && corrective.isSuccessful()) {
+                // Stopped cleanly.
+                health.setRecording(false);
+            } else if (!health.isRecording()) {
+                // The stop "failed", but OBS is no longer recording: its OUTPUT_STOPPED event landed
+                // between our health check and this call (a benign race), so the recording already
+                // ended on its own. Safe to proceed with the new recording.
+                log.info("Corrective StopRecord found no active output; OBS already stopped, proceeding");
+            } else {
+                // null / timeout, or OBS still believes it is recording: do NOT clear health.recording.
                 // The library returns null / unsuccessful on TIMEOUT -- it does NOT throw (see
-                // stopRecording()). OBS may well still be recording, so do NOT clear health.recording:
-                // clearing it would make every later match skip this block and fail silently, exactly
-                // the permanent breakage this guard exists to prevent. Bail and let the next match retry.
+                // stopRecording()). Clearing the flag here would make every later match skip this block
+                // and fail silently, exactly the permanent breakage this guard exists to prevent. Bail
+                // and let the next match retry the corrective stop.
                 throw new ObsException(
                         "Corrective StopRecord failed"
                                 + (corrective == null ? " (no response / timeout)" : ""));
             }
-            health.setRecording(false);
         }
         var resp = c.startRecord(REQUEST_TIMEOUT_MS);
         if (resp == null || !resp.isSuccessful()) {
