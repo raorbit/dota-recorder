@@ -59,7 +59,11 @@ public class ObsController implements ObsRecorder {
     /** The live controller; null when never connected or after a clean disconnect. */
     private volatile OBSRemoteController controller;
 
-    /** Latch that the {@code onReady} lifecycle callback counts down once identified. */
+    /**
+     * Latch {@link #ensureConnected()} waits on. Counted down on {@code onReady} (success) AND on the
+     * disconnect/close/error lifecycle callbacks (failure), so a down or connection-refused OBS frees
+     * the caller promptly instead of blocking it for the full connect timeout.
+     */
     private volatile CountDownLatch readyLatch;
 
     public ObsController(SettingsStore settings, ObsHealth health, ObsEvents events) {
@@ -92,11 +96,30 @@ public class ObsController implements ObsRecorder {
                         .registerEventListener(
                                 RecordStateChangedEvent.class, this::handleRecordStateChanged)
                         .lifecycle()
+                        // Release the latch on success AND on every failure path so a down OBS does
+                        // not strand ensureConnected() for the full timeout. Counting down an
+                        // already-zero latch (e.g. an error after a healthy onReady) is a no-op.
                         .onReady(latch::countDown)
-                        .onDisconnect(this::onConnectionLost)
-                        .onClose(code -> onConnectionLost())
-                        .onControllerError(rt -> onError(rt == null ? null : rt.getThrowable()))
-                        .onCommunicatorError(rt -> onError(rt == null ? null : rt.getThrowable()))
+                        .onDisconnect(
+                                () -> {
+                                    onConnectionLost();
+                                    latch.countDown();
+                                })
+                        .onClose(
+                                code -> {
+                                    onConnectionLost();
+                                    latch.countDown();
+                                })
+                        .onControllerError(
+                                rt -> {
+                                    onError(rt == null ? null : rt.getThrowable());
+                                    latch.countDown();
+                                })
+                        .onCommunicatorError(
+                                rt -> {
+                                    onError(rt == null ? null : rt.getThrowable());
+                                    latch.countDown();
+                                })
                         .and()
                         .build();
         this.controller = c;
