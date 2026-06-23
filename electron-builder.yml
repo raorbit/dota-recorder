@@ -41,10 +41,21 @@ extraResources:
   - from: core/build/jre-image
     to: jre
   # Portable OBS fetched at build time by scripts/fetch-obs.mjs (npm run fetch:obs,
-  # chained into dist). Ships to <resourcesPath>/obs; at first run the app copies it
-  # to a writable per-user dir, auto-configures it, and drives it over obs-websocket.
+  # chained into dist). At first run the core copies it to a writable per-user dir,
+  # auto-configures it, and drives it over obs-websocket — the user installs nothing.
+  #
+  # The packaged layout MUST mirror the dev tree (build-resources/obs/) so paths.ts
+  # resolves it the same way in both modes: keep the binaries under an obs-portable/
+  # subdir, and ship the `.obs-<version>.ok` version marker that fetch-obs writes as a
+  # SIBLING of obs-portable. A flat `to: obs` would drop the subdir AND leave the marker
+  # behind — then obsSourceDir() points one level too deep and obsVersion() always reads
+  # "0", so the packaged build silently skips the first-run copy and never launches OBS.
   - from: build-resources/obs/obs-portable
+    to: obs/obs-portable
+  - from: build-resources/obs
     to: obs
+    filter:
+      - ".obs-*.ok"
 
 # koffi (optional native FFI for the Job Object) must stay outside the asar so its
 # .node binary is loadable; harmless when koffi isn't installed (nothing matches).
