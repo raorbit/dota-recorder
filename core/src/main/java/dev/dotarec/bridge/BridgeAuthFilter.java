@@ -15,16 +15,23 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 /**
- * Requires a per-launch shared secret on the browser-facing bridge connector (127.0.0.1:3224).
+ * Requires a per-launch shared secret on every bridge endpoint except the Dota GSI ingest.
  *
  * <p>The bridge has no other authentication, and binding to loopback does NOT stop a web page open
  * in the user's own browser from issuing cross-origin fetch/WebSocket to 127.0.0.1 -- the request
- * originates from the user's own machine. Electron generates a random token each launch, passes it
- * to the core (env {@code DOTAREC_BRIDGE_TOKEN}) and to the renderer (preload), and the renderer
- * echoes it on every REST call (the {@code X-Dotarec-Token} header) and on the WebSocket handshake
- * (a {@code ?token=} query param, since handshakes can't set headers). A caller without the token
- * gets 401, so a malicious page can neither read the OBS password from {@code /obs/launch-args} nor
- * mutate settings -- and neither can any other local process.
+ * originates from the user's own machine. That browser-origin vector is the threat this guards:
+ * Electron generates a random token each launch, passes it to the core (env
+ * {@code DOTAREC_BRIDGE_TOKEN}) and to the renderer (preload), and the renderer echoes it on every
+ * REST call (the {@code X-Dotarec-Token} header) and on the WebSocket handshake (a {@code ?token=}
+ * query param, since handshakes can't set headers). A page without the token gets 401, so it can
+ * neither read the OBS password from {@code /obs/launch-args} nor mutate settings.
+ *
+ * <p>Scope -- this does NOT defend against a hostile same-user process. The token is visible in the
+ * renderer's command line and in the core's environment, both readable by other processes of the
+ * same user; and such a process can in any case read the SQLite DB and OBS config on disk directly
+ * and post frames to the unauthenticated GSI connector. Same-user isolation is not something a local
+ * sidecar can meaningfully provide -- the token raises the bar against remote / in-browser content,
+ * not against code already running as the user.
  *
  * <p>Two deliberate exemptions:
  *
