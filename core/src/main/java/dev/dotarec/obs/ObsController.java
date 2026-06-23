@@ -203,6 +203,13 @@ public class ObsController implements ObsRecorder {
 
     @Override
     public String startRecording() {
+        // Clear the previous recording's confirmed-start anchor BEFORE issuing StartRecord. The FSM
+        // reads recordConfirmedAt() the instant this returns, but THIS match's OUTPUT_STARTED lands
+        // asynchronously a moment later -- and events.reset() otherwise only runs on (re)connect, not
+        // between matches on a live connection. Without this, the 2nd+ match per connection would
+        // anchor on the PRIOR match's start instant (the null-fallback never engages on a non-null
+        // stale value), inflating durationS and every marker video_offset_s by the inter-match gap.
+        events.reset();
         OBSRemoteController c = requireController();
         var resp = c.startRecord(REQUEST_TIMEOUT_MS);
         if (resp == null || !resp.isSuccessful()) {
