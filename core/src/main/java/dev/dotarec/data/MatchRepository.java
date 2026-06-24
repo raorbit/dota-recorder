@@ -86,6 +86,22 @@ public class MatchRepository {
     }
 
     /**
+     * True if a {@code matches} row already carries this Dota match id (which is UNIQUE in the
+     * schema). Reads on a caller-supplied connection so crash recovery can check within its own
+     * transaction: a stranded journal row whose match was already finalized by a later re-record
+     * must be dropped, not re-inserted (which would hit the UNIQUE constraint and replay every boot).
+     */
+    public boolean existsByDotaMatchId(Connection conn, long dotaMatchId) throws SQLException {
+        String sql = "SELECT 1 FROM matches WHERE dota_match_id = ? LIMIT 1";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, dotaMatchId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next();
+            }
+        }
+    }
+
+    /**
      * Filtered, newest-first match list.
      *
      * <p>Filters are ANDed and all optional:

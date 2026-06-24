@@ -20,17 +20,8 @@ import {
   type Status,
   type StatusSnapshot,
 } from '../api/client';
-
-// The seven library buckets the sidebar lists. `unsorted` is the holding pen for
-// recorded-but-not-yet-enriched matches: a row NEVER defaults into `ranked`.
-export type Bucket =
-  | 'ranked'
-  | 'unranked'
-  | 'turbo'
-  | 'abilityDraft'
-  | 'manual'
-  | 'clips'
-  | 'unsorted';
+import type { Bucket } from './buckets';
+export type { Bucket } from './buckets';
 
 export type ResultFilter = 'all' | 'wins' | 'losses';
 
@@ -119,7 +110,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     // Drop a stale selection if the selected match is no longer in the list.
     const { selectedMatchId } = get();
     const stillPresent =
-      selectedMatchId !== null && matches.some((m) => m.matchId === selectedMatchId);
+      selectedMatchId !== null && matches.some((m) => m.id === selectedMatchId);
 
     set({
       matches,
@@ -183,9 +174,20 @@ export function startLibrary(): () => void {
   // (match.recorded / match.enriched / match.enrichFailed) via onEvent. Any of
   // them re-loads the list + counts so an enriched row jumps Unsorted -> its
   // real bucket and the sidebar badges refresh together.
-  const off = subscribeToMatchEvents(socket, () => {
-    void useLibraryStore.getState().load();
-  });
+  //
+  // Coalesce bursts: a backlog enriching can fire several match.* frames in quick
+  // succession. The store's loadToken already prevents stale results from clobbering,
+  // but without coalescing each frame still issues its own fetch pair. Collapse a burst
+  // into a single reload fired shortly after the first frame.
+  let reloadTimer: ReturnType<typeof setTimeout> | null = null;
+  const scheduleReload = (): void => {
+    if (reloadTimer !== null) return;
+    reloadTimer = setTimeout(() => {
+      reloadTimer = null;
+      void useLibraryStore.getState().load();
+    }, 200);
+  };
+  const off = subscribeToMatchEvents(socket, scheduleReload);
 
   socket.connect();
 
@@ -193,6 +195,7 @@ export function startLibrary(): () => void {
     offStatus();
     offConn();
     off();
+    if (reloadTimer !== null) clearTimeout(reloadTimer);
     socket.close();
   };
 }

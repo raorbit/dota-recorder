@@ -32,7 +32,7 @@ export function App(): React.JSX.Element {
   const selectedMatch =
     selectedMatchId === null
       ? null
-      : (matches.find((m) => m.matchId === selectedMatchId) ?? null);
+      : (matches.find((m) => m.id === selectedMatchId) ?? null);
 
   const openSettings = (tab: SettingsTab): void => {
     setSettingsTab(tab);
