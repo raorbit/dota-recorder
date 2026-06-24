@@ -41,6 +41,7 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
   // auto-probed and written back by the core, so it is shown read-only here.
   const [resolution, setResolution] = useState('');
   const [videoDir, setVideoDir] = useState('');
+  const [accountId, setAccountId] = useState('');
 
   const [saveState, setSaveState] = useState<SaveState>('idle');
   const [error, setError] = useState<string | null>(null);
@@ -54,6 +55,7 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
         setSettings(s);
         setResolution(s.resolution);
         setVideoDir(s.videoDir);
+        setAccountId(s.accountId !== null ? String(s.accountId) : '');
         setLoadState('ready');
       } catch {
         if (cancelled) return;
@@ -69,9 +71,14 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
     setSaveState('saving');
     setError(null);
 
+    const trimmedAccount = accountId.trim();
     const patch: SettingsPatch = {
       resolution: resolution.trim(),
       videoDir: videoDir.trim(),
+      // null means "leave unchanged" on the wire, so a blanked field clears via an explicit flag.
+      ...(trimmedAccount === ''
+        ? { clearAccountId: true }
+        : { accountId: Number(trimmedAccount) }),
     };
 
     try {
@@ -79,6 +86,7 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
       setSettings(updated);
       setResolution(updated.resolution);
       setVideoDir(updated.videoDir);
+      setAccountId(updated.accountId !== null ? String(updated.accountId) : '');
       setSaveState('saved');
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to save settings.');
@@ -162,6 +170,24 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
               spellCheck={false}
               placeholder="C:\Users\you\Videos\dota-recorder"
               onChange={(e) => setVideoDir(e.target.value)}
+            />
+          </div>
+
+          <div className="rec-field">
+            <label className="rec-label" htmlFor="rec-account">
+              Account ID
+              <span className="rec-derived">captured from GSI</span>
+            </label>
+            <input
+              id="rec-account"
+              className="rec-input"
+              type="text"
+              inputMode="numeric"
+              value={accountId}
+              autoComplete="off"
+              spellCheck={false}
+              placeholder="96828122"
+              onChange={(e) => setAccountId(e.target.value.replace(/\D/g, ''))}
             />
           </div>
 

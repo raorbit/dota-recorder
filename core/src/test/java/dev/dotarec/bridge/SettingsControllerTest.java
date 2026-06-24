@@ -42,28 +42,31 @@ class SettingsControllerTest {
         assertThat(json.has("obsHost")).isFalse();
         assertThat(json.has("obsPort")).isFalse();
         assertThat(json.has("obsPasswordSet")).isFalse();
-        // The four user-facing fields are still present.
+        // The user-facing fields are still present.
         assertThat(json.fieldNames())
                 .toIterable()
-                .containsExactlyInAnyOrder("resolution", "encoder", "retentionCapGb", "videoDir");
+                .containsExactlyInAnyOrder(
+                        "resolution", "encoder", "retentionCapGb", "videoDir", "accountId");
     }
 
     @Test
     void putSettings_roundTripsUserFacingFields() {
         SettingsView updated =
                 controller.putSettings(
-                        new SettingsPatch("1280x720", "x264", 80, "D:/clips"));
+                        new SettingsPatch("1280x720", "x264", 80, "D:/clips", 96828122L, null));
 
         assertThat(updated.resolution()).isEqualTo("1280x720");
         assertThat(updated.encoder()).isEqualTo("x264");
         assertThat(updated.retentionCapGb()).isEqualTo(80);
         assertThat(updated.videoDir()).isEqualTo("D:/clips");
+        assertThat(updated.accountId()).isEqualTo(96828122L);
 
         // Persisted to the store, not just echoed.
         assertThat(store.get().resolution).isEqualTo("1280x720");
         assertThat(store.get().encoder).isEqualTo("x264");
         assertThat(store.get().retentionCapGb).isEqualTo(80);
         assertThat(store.get().videoDir).isEqualTo("D:/clips");
+        assertThat(store.get().accountId).isEqualTo(96828122L);
     }
 
     @Test
@@ -77,11 +80,33 @@ class SettingsControllerTest {
                 });
 
         // PUT an unrelated, user-facing field only.
-        controller.putSettings(new SettingsPatch("1280x720", null, null, null));
+        controller.putSettings(new SettingsPatch("1280x720", null, null, null, null, null));
 
         // Regression: the carry-forward must not wipe the OBS secret/port back to defaults.
         assertThat(store.get().obsPassword).isEqualTo("abc1234567890def");
         assertThat(store.get().obsPort).isEqualTo(4466);
         assertThat(store.get().resolution).isEqualTo("1280x720");
+    }
+
+    @Test
+    void putSettings_clearsAccountIdWhenFlagged() {
+        store.update(s -> { s.accountId = 96828122L; return s; });
+
+        // A blanked Account ID field sends clearAccountId=true with no accountId value.
+        SettingsView updated =
+                controller.putSettings(new SettingsPatch(null, null, null, null, null, true));
+
+        assertThat(updated.accountId()).isNull();
+        assertThat(store.get().accountId).isNull();
+    }
+
+    @Test
+    void putSettings_nullAccountIdLeavesItUnchanged() {
+        store.update(s -> { s.accountId = 96828122L; return s; });
+
+        // Without the clear flag, a null accountId means "leave unchanged".
+        controller.putSettings(new SettingsPatch("1280x720", null, null, null, null, null));
+
+        assertThat(store.get().accountId).isEqualTo(96828122L);
     }
 }
