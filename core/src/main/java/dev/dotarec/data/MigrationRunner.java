@@ -4,6 +4,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
+import org.springframework.core.annotation.Order;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Component;
 
@@ -37,18 +38,21 @@ import java.util.concurrent.atomic.AtomicInteger;
  * stays the source of truth for DDL. TODO: add V2+ scripts to {@link #SCRIPTS} as the schema grows.
  */
 @Component
+@Order(0)
 public class MigrationRunner implements ApplicationRunner {
 
     private static final Logger log = LoggerFactory.getLogger(MigrationRunner.class);
 
-    private static final int LATEST_VERSION = 2;
+    public static final int LATEST_VERSION = 3;
     private static final String[] SCRIPTS = {
         "db/migration/V1__init.sql",
         "db/migration/V2__enrich_retry.sql",
+        "db/migration/V3__recording_journal.sql",
     };
 
     private final DataSource dataSource;
     private final AtomicInteger currentVersion = new AtomicInteger(0);
+    private volatile boolean ready;
 
     public MigrationRunner(DataSource dataSource) {
         this.dataSource = dataSource;
@@ -61,6 +65,7 @@ public class MigrationRunner implements ApplicationRunner {
             currentVersion.set(version);
 
             if (version >= LATEST_VERSION) {
+                ready = true;
                 log.info("Schema up to date (user_version={})", version);
                 return;
             }
@@ -71,6 +76,7 @@ public class MigrationRunner implements ApplicationRunner {
                 applyScript(conn, SCRIPTS[next - 1], next);
                 currentVersion.set(next);
             }
+            ready = true;
             log.info("Migration complete (user_version={})", currentVersion.get());
         }
     }
@@ -78,6 +84,11 @@ public class MigrationRunner implements ApplicationRunner {
     /** Latest applied schema version; surfaced via /health. */
     public int currentSchemaVersion() {
         return currentVersion.get();
+    }
+
+    /** True once startup migrations have completed successfully. */
+    public boolean isReady() {
+        return ready && currentVersion.get() >= LATEST_VERSION;
     }
 
     private int readUserVersion(Connection conn) throws SQLException {
@@ -101,13 +112,31 @@ public class MigrationRunner implements ApplicationRunner {
             if (!Files.exists(db) || Files.size(db) == 0) {
                 return; // fresh DB: nothing worth backing up
             }
+            checkpointWal(conn);
             String stamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
             Path bak = db.resolveSibling(db.getFileName() + ".v" + fromVersion + "." + stamp + ".bak");
             Files.copy(db, bak, StandardCopyOption.COPY_ATTRIBUTES);
+            copySidecarIfPresent(db, bak, "-wal");
+            copySidecarIfPresent(db, bak, "-shm");
             log.info("Backed up DB before migration: {}", bak.getFileName());
-        } catch (IOException e) {
+        } catch (IOException | SQLException e) {
             throw new IllegalStateException("Pre-migration backup failed for " + db, e);
         }
+    }
+
+    private void checkpointWal(Connection conn) throws SQLException {
+        try (Statement st = conn.createStatement()) {
+            st.execute("PRAGMA wal_checkpoint(TRUNCATE)");
+        }
+    }
+
+    private void copySidecarIfPresent(Path db, Path bak, String suffix) throws IOException {
+        Path sidecar = db.resolveSibling(db.getFileName() + suffix);
+        if (!Files.exists(sidecar) || Files.size(sidecar) == 0) {
+            return;
+        }
+        Path sidecarBak = bak.resolveSibling(bak.getFileName() + suffix);
+        Files.copy(sidecar, sidecarBak, StandardCopyOption.COPY_ATTRIBUTES);
     }
 
     private String jdbcUrl(Connection conn) {

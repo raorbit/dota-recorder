@@ -13,6 +13,7 @@ import dev.dotarec.data.MatchRepository;
 import dev.dotarec.data.MatchSummary;
 import dev.dotarec.data.PauseRepository;
 import dev.dotarec.data.PauseSpan;
+import dev.dotarec.data.RecordingSessionRepository;
 import dev.dotarec.data.TestDb;
 import dev.dotarec.obs.ObsException;
 import dev.dotarec.obs.ObsRecorder;
@@ -38,6 +39,7 @@ class MatchFsmPauseTest {
     static final class FakeObs implements ObsRecorder {
         boolean connected = true;
         boolean stopFails = false;
+        boolean recording;
         Instant confirmedAt;
         int stopCalls;
         String savedPath = "C:\\videos\\match.mkv";
@@ -51,6 +53,7 @@ class MatchFsmPauseTest {
                 throw new ObsException("OBS is not connected");
             }
             confirmedAt = Instant.now();
+            recording = true;
             return confirmedAt.toString();
         }
 
@@ -59,8 +62,11 @@ class MatchFsmPauseTest {
             if (stopFails) {
                 throw new ObsException("StopRecord rejected");
             }
+            recording = false;
             return savedPath;
         }
+
+        @Override public boolean isRecording() { return recording; }
 
         @Override public Instant recordConfirmedAt() { return confirmedAt; }
     }
@@ -76,6 +82,7 @@ class MatchFsmPauseTest {
     private MatchRepository matches;
     private MarkerRepository markers;
     private PauseRepository pauses;
+    private RecordingSessionRepository journal;
     private EventPublisher events;
     private MatchFsm fsm;
 
@@ -85,9 +92,11 @@ class MatchFsmPauseTest {
         matches = new MatchRepository(ds);
         markers = new MarkerRepository(ds);
         pauses = new PauseRepository(ds);
+        journal = new RecordingSessionRepository(ds);
         events = mock(EventPublisher.class);
         obs = new FakeObs();
-        fsm = new MatchFsm(obs, new FakeThumbs(), new EventTagger(), matches, markers, pauses, events, ds);
+        fsm = new MatchFsm(
+                obs, new FakeThumbs(), new EventTagger(), matches, markers, pauses, journal, events, ds);
     }
 
     @Test
@@ -200,7 +209,15 @@ class MatchFsmPauseTest {
         when(throwingPauses.insert(any(), anyLong(), anyLong(), any()))
                 .thenThrow(new IllegalStateException("pause write failed"));
         MatchFsm fsmWithBadPauses = new MatchFsm(
-                obs, new FakeThumbs(), new EventTagger(), matches, markers, throwingPauses, events, ds);
+                obs,
+                new FakeThumbs(),
+                new EventTagger(),
+                matches,
+                markers,
+                throwingPauses,
+                journal,
+                events,
+                ds);
 
         // Open a pause so finalize has a span to persist -- which then throws and triggers rollback.
         fsmWithBadPauses.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")

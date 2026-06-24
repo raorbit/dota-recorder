@@ -8,6 +8,7 @@ import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.assertj.core.data.Offset.offset;
 
 import dev.dotarec.bridge.EventPublisher;
 import dev.dotarec.data.MarkerRepository;
@@ -15,12 +16,14 @@ import dev.dotarec.data.MarkerRow;
 import dev.dotarec.data.MatchRepository;
 import dev.dotarec.data.MatchSummary;
 import dev.dotarec.data.PauseRepository;
+import dev.dotarec.data.RecordingSessionRepository;
 import dev.dotarec.data.TestDb;
 import dev.dotarec.gsi.GsiFrame;
 import dev.dotarec.obs.ObsException;
 import dev.dotarec.obs.ObsRecorder;
 import dev.dotarec.obs.ThumbnailCapturer;
 import dev.dotarec.tagger.EventTagger;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
@@ -44,7 +47,10 @@ class MatchFsmTest {
         boolean connected = true;
         boolean ready = true;
         boolean stopThrowsRuntime = false;
+        int stopFailuresRemaining;
+        boolean recording;
         Instant confirmedAt;
+        Instant nextConfirmedAt;
         int startCalls;
         int stopCalls;
         long thenStopCalledAt = -1;
@@ -59,7 +65,8 @@ class MatchFsmTest {
                 throw new ObsException("OBS is not connected");
             }
             startCalls++;
-            confirmedAt = Instant.now();
+            confirmedAt = nextConfirmedAt != null ? nextConfirmedAt : Instant.now();
+            recording = true;
             return confirmedAt.toString();
         }
 
@@ -72,9 +79,16 @@ class MatchFsmTest {
                 // A non-ObsException library failure (socket reset, internal NPE/ISE, etc.).
                 throw new IllegalStateException("obs-websocket library failure");
             }
+            if (stopFailuresRemaining > 0) {
+                stopFailuresRemaining--;
+                throw new ObsException("transient StopRecord failure");
+            }
+            recording = false;
             thenStopCalledAt = System.nanoTime();
             return savedPath;
         }
+
+        @Override public boolean isRecording() { return recording; }
 
         @Override public Instant recordConfirmedAt() { return confirmedAt; }
     }
@@ -96,19 +110,23 @@ class MatchFsmTest {
     private MatchRepository matches;
     private MarkerRepository markers;
     private PauseRepository pauses;
+    private RecordingSessionRepository journal;
     private EventPublisher events;
     private MatchFsm fsm;
+    private Path tempDir;
 
     @BeforeEach
     void setUp(@TempDir Path dir) throws Exception {
+        tempDir = dir;
         ds = TestDb.migrated(dir);
         matches = new MatchRepository(ds);
         markers = new MarkerRepository(ds);
         pauses = new PauseRepository(ds);
+        journal = new RecordingSessionRepository(ds);
         events = mock(EventPublisher.class);
         obs = new FakeObs();
         thumbs = new FakeThumbs();
-        fsm = new MatchFsm(obs, thumbs, new EventTagger(), matches, markers, pauses, events, ds);
+        fsm = new MatchFsm(obs, thumbs, new EventTagger(), matches, markers, pauses, journal, events, ds);
     }
 
     @Test
@@ -140,6 +158,57 @@ class MatchFsmTest {
     }
 
     @Test
+    void armStateWhileRecording_finalizesOldRecordingAndStartsNewOne() {
+        fsm.onFrame(frame().matchId(111L)
+                .state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")
+                .activity("playing")
+                .hero("npc_dota_hero_lina")
+                .build());
+        assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
+
+        fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_HERO_SELECTION").noHero().activity(null).build());
+
+        assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
+        assertThat(obs.stopCalls).isEqualTo(1);
+        assertThat(obs.startCalls).isEqualTo(2);
+        assertThat(matches.findAll()).singleElement()
+                .satisfies(row -> {
+                    assertThat(row.dotaMatchId()).isEqualTo(111L);
+                    assertThat(row.hero()).isEqualTo("npc_dota_hero_lina");
+                });
+        assertThat(fsm.currentSession()).isNotNull();
+        assertThat(fsm.currentSession().getMatchId()).isZero();
+    }
+
+    @Test
+    void differentRealMatchIdWhileRecording_finalizesOldRecordingAndRedispatchesFrame() {
+        fsm.onFrame(frame().matchId(111L)
+                .state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")
+                .activity("playing")
+                .hero("npc_dota_hero_lina")
+                .build());
+        assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
+
+        fsm.onFrame(frame().matchId(222L)
+                .state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")
+                .activity("playing")
+                .hero("npc_dota_hero_rubick")
+                .build());
+
+        assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
+        assertThat(obs.stopCalls).isEqualTo(1);
+        assertThat(obs.startCalls).isEqualTo(2);
+        assertThat(matches.findAll()).singleElement()
+                .satisfies(row -> {
+                    assertThat(row.dotaMatchId()).isEqualTo(111L);
+                    assertThat(row.hero()).isEqualTo("npc_dota_hero_lina");
+                });
+        assertThat(fsm.currentSession()).isNotNull();
+        assertThat(fsm.currentSession().getMatchId()).isEqualTo(222L);
+        assertThat(fsm.currentSession().getHero()).isEqualTo("npc_dota_hero_rubick");
+    }
+
+    @Test
     void unknownState_isANoOp() {
         fsm.onFrame(frame().state("UNKNOWN").build());
         fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_SOME_FUTURE_STATE").build());
@@ -166,6 +235,22 @@ class MatchFsmTest {
 
         // OBS comes back; the next frame starts cleanly.
         obs.connected = true;
+        fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
+        assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
+        assertThat(obs.startCalls).isEqualTo(1);
+    }
+
+    @Test
+    void obsConnectedButNotReady_staysIdle_andRetriesWhenReady() {
+        // OBS connected but no active scene / muted audio: arming would record a black/silent file, so
+        // the FSM must stay IDLE and retry rather than capture nothing against a green GSI card.
+        obs.ready = false;
+        fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
+        assertThat(fsm.getState()).isEqualTo(MatchState.IDLE);
+        assertThat(obs.startCalls).isZero();
+
+        // Scene/audio become ready; the next frame starts cleanly.
+        obs.ready = true;
         fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
         assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
         assertThat(obs.startCalls).isEqualTo(1);
@@ -215,9 +300,116 @@ class MatchFsmTest {
     }
 
     @Test
+    void recordingJournalTracksSessionEventsAndDeletesOnSuccessfulFinalize() {
+        fsm.onFrame(frame().wall(1_000L)
+                .state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")
+                .activity("playing")
+                .hero("npc_dota_hero_rubick")
+                .kills(0)
+                .deaths(0)
+                .assists(0)
+                .build());
+
+        String sessionId = fsm.currentSession().getSurrogateId();
+        assertThat(journal.findUnfinished())
+                .singleElement()
+                .satisfies(
+                        row -> {
+                            assertThat(row.sessionId()).isEqualTo(sessionId);
+                            assertThat(row.state()).isEqualTo("recording");
+                            assertThat(row.hero()).isEqualTo("npc_dota_hero_rubick");
+                            assertThat(row.lastFrameWallMs()).isEqualTo(1_000L);
+                        });
+
+        fsm.onFrame(frame().wall(2_000L)
+                .state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")
+                .activity("playing")
+                .hero("npc_dota_hero_rubick")
+                .kills(1)
+                .deaths(0)
+                .assists(0)
+                .paused(true)
+                .build());
+        fsm.onFrame(frame().wall(3_000L)
+                .state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")
+                .activity("playing")
+                .hero("npc_dota_hero_rubick")
+                .kills(1)
+                .deaths(0)
+                .assists(0)
+                .paused(false)
+                .build());
+
+        assertThat(journal.findEvents(sessionId))
+                .extracting(RecordingSessionRepository.RecordingEventRow::type)
+                .containsExactly("marker", "pause_open", "pause_close");
+
+        fsm.onFrame(frame().wall(4_000L).state("DOTA_GAMERULES_STATE_POST_GAME").noHero().build());
+
+        assertThat(matches.findAll()).hasSize(1);
+        assertThat(journal.findUnfinished()).isEmpty();
+        assertThat(journal.findEvents(sessionId)).isEmpty();
+    }
+
+    @Test
+    void persistedAnchorAndMarkerOffsetsUseObsConfirmedStart_notFirstGsiWall() {
+        long confirmedMs = System.currentTimeMillis() - 10_000L;
+        obs.nextConfirmedAt = Instant.ofEpochMilli(confirmedMs);
+
+        // Deliberately make the first GSI frame much earlier than OBS's confirmed start. If the FSM
+        // regresses to the frame wall as its anchor, the marker offset below would be 23.5s instead
+        // of the correct 3.5s.
+        fsm.onFrame(frame().wall(confirmedMs - 20_000L)
+                .state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")
+                .activity("playing")
+                .hero("npc_dota_hero_rubick")
+                .kills(0)
+                .deaths(0)
+                .assists(0)
+                .build());
+
+        fsm.onFrame(frame().wall(confirmedMs + 3_500L)
+                .state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")
+                .activity("playing")
+                .hero("npc_dota_hero_rubick")
+                .kills(1)
+                .deaths(0)
+                .assists(0)
+                .build());
+        fsm.onFrame(frame().wall(confirmedMs + 8_000L)
+                .state("DOTA_GAMERULES_STATE_POST_GAME")
+                .noHero()
+                .build());
+
+        MatchSummary row = matches.findAll().get(0);
+        assertThat(row.recordStartedWallMs()).isEqualTo(confirmedMs);
+        assertThat(markers.findByMatchId(row.id()))
+                .singleElement()
+                .satisfies(
+                        marker -> {
+                            assertThat(marker.type()).isEqualTo("kill");
+                            assertThat(marker.videoOffsetS()).isCloseTo(3.5, offset(0.001));
+                        });
+    }
+
+    @Test
+    void finalizePersistsRealVideoFileSizeForRetention() throws Exception {
+        Path video = tempDir.resolve("sized-video.mkv");
+        Files.writeString(video, "pretend obs wrote these bytes");
+        obs.savedPath = video.toString();
+
+        fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
+        fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_POST_GAME").noHero().build());
+
+        MatchSummary row = matches.findAll().get(0);
+        assertThat(row.videoPath()).isEqualTo(video.toString());
+        assertThat(row.fileSizeBytes()).isEqualTo(Files.size(video));
+    }
+
+    @Test
     void thumbnailFailure_doesNotLoseTheRecording() {
         ThumbnailCapturer failing = id -> { throw new ObsException("no scene"); };
-        fsm = new MatchFsm(obs, failing, new EventTagger(), matches, markers, pauses, events, ds);
+        fsm = new MatchFsm(obs, failing, new EventTagger(), matches, markers, pauses, journal, events, ds);
 
         fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
         fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_POST_GAME").noHero().build());
@@ -251,7 +443,7 @@ class MatchFsmTest {
         MatchRepository throwing = mock(MatchRepository.class);
         when(throwing.insert(any(java.sql.Connection.class), any(MatchRepository.NewMatch.class)))
                 .thenThrow(new IllegalStateException("disk full"));
-        fsm = new MatchFsm(obs, thumbs, new EventTagger(), throwing, markers, pauses, events, ds);
+        fsm = new MatchFsm(obs, thumbs, new EventTagger(), throwing, markers, pauses, journal, events, ds);
 
         fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
         assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
@@ -268,6 +460,27 @@ class MatchFsmTest {
     }
 
     @Test
+    void persistFailureDuringFinalize_keepsJournalForRecovery() throws Exception {
+        MatchRepository throwing = mock(MatchRepository.class);
+        when(throwing.insert(any(java.sql.Connection.class), any(MatchRepository.NewMatch.class)))
+                .thenThrow(new IllegalStateException("disk full"));
+        fsm = new MatchFsm(obs, thumbs, new EventTagger(), throwing, markers, pauses, journal, events, ds);
+
+        fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
+        String sessionId = fsm.currentSession().getSurrogateId();
+        fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_POST_GAME").noHero().build());
+
+        assertThat(matches.findAll()).isEmpty();
+        assertThat(journal.findUnfinished())
+                .singleElement()
+                .satisfies(
+                        row -> {
+                            assertThat(row.sessionId()).isEqualTo(sessionId);
+                            assertThat(row.state()).isEqualTo("stopping");
+                        });
+    }
+
+    @Test
     void nonObsExceptionFromStopRecording_stillPersistsRowAndResetsIdle() {
         // A stop failure that isn't a typed ObsException (a socket reset / library RuntimeException)
         // must still fall through to persist the row with a null video path, not abort finalize and
@@ -275,6 +488,36 @@ class MatchFsmTest {
         obs.stopThrowsRuntime = true;
 
         fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
+        fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_POST_GAME").noHero().build());
+
+        assertThat(fsm.getState()).isEqualTo(MatchState.IDLE);
+        assertThat(obs.stopCalls).isEqualTo(2);
+        List<MatchSummary> rows = matches.findAll();
+        assertThat(rows).hasSize(1);
+        assertThat(rows.get(0).videoPath()).isNull();
+    }
+
+    @Test
+    void stopRecordTransientFailure_retriesOnceAndPersistsVideoPath() {
+        obs.stopFailuresRemaining = 1;
+
+        fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
+        fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_POST_GAME").noHero().build());
+
+        assertThat(fsm.getState()).isEqualTo(MatchState.IDLE);
+        assertThat(obs.stopCalls).isEqualTo(2);
+        List<MatchSummary> rows = matches.findAll();
+        assertThat(rows).hasSize(1);
+        assertThat(rows.get(0).videoPath()).isEqualTo("C:\\videos\\match.mkv");
+        assertThat(obs.isRecording()).isFalse();
+    }
+
+    @Test
+    void stopRecordFailureWithoutActiveRecording_doesNotRetry() {
+        obs.stopFailuresRemaining = 1;
+
+        fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
+        obs.recording = false;
         fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_POST_GAME").noHero().build());
 
         assertThat(fsm.getState()).isEqualTo(MatchState.IDLE);
