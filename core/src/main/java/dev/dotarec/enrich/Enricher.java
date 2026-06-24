@@ -84,6 +84,16 @@ public class Enricher {
                 return;
             }
 
+            // Without an account id we can attribute nothing and OpenDota's parse state is
+            // irrelevant -- hold in pending WITHOUT consuming an attempt or hitting the API, so a
+            // match recorded before the user configures their id doesn't burn through its retries.
+            // (fullEnrich keeps the same guard for the narrow clear-mid-flight race.)
+            if (settings.get().accountId == null) {
+                warnNullAccountOnce();
+                holdPending(matchRowId);
+                return;
+            }
+
             FetchResult result = matchSource.fetch(dotaMatchId);
             int attempts = matches.enrichAttempts(matchRowId);
 
@@ -105,14 +115,10 @@ public class Enricher {
     private void fullEnrich(long matchRowId, long dotaMatchId, OpenDotaMatch match, int attempts) {
         Long accountId = settings.get().accountId;
         if (accountId == null) {
-            // Config gap (first run before the user set their account id): HOLD in pending rather
-            // than fail, so enrichment resumes once configured. Warn once.
-            if (!warnedNullAccount) {
-                warnedNullAccount = true;
-                log.warn("accountId is not set in settings -- holding matches in 'pending' until "
-                        + "configured; enrichment cannot attribute result/stats without it.");
-            }
-            retryOrFail(matchRowId, attempts);
+            // Defensive: enrich() already holds when accountId is unset, but it can be cleared
+            // between that check and here. Hold in pending rather than fail or consume attempts.
+            warnNullAccountOnce();
+            holdPending(matchRowId);
             return;
         }
 
@@ -165,6 +171,19 @@ public class Enricher {
             return;
         }
         matches.applyRetry(matchRowId, "pending", 1, backoffNextAfterMs(nextAttempts));
+    }
+
+    private void holdPending(long matchRowId) {
+        matches.applyRetry(matchRowId, "pending", 0, backoffNextAfterMs(0));
+    }
+
+    /** Warns once (latched) that enrichment is parked because no account id is configured. */
+    private void warnNullAccountOnce() {
+        if (!warnedNullAccount) {
+            warnedNullAccount = true;
+            log.warn("accountId is not set in settings -- holding matches in 'pending' until "
+                    + "configured; enrichment cannot attribute result/stats without it.");
+        }
     }
 
     private void failPermanently(long matchRowId) {
