@@ -96,4 +96,17 @@ class GsiPayloadTest {
         // A future client returning something non-numeric must not crash the feed.
         assertThat(GsiPayload.parseMatchId("not-a-number")).isZero();
     }
+
+    @Test
+    void parseAccountId_handlesNumericBlankAbsentAndNonNumeric() throws Exception {
+        GsiPayload payload =
+                MAPPER.readValue("{\"player\":{\"accountid\":\" 96828122 \"}}", GsiPayload.class);
+        assertThat(payload.parseAccountId()).isEqualTo(96828122L);
+
+        assertThat(MAPPER.readValue("{\"player\":{\"accountid\":\"\"}}", GsiPayload.class)
+                .parseAccountId()).isNull();
+        assertThat(MAPPER.readValue("{\"player\":{\"accountid\":\"nope\"}}", GsiPayload.class)
+                .parseAccountId()).isNull();
+        assertThat(MAPPER.readValue("{}", GsiPayload.class).parseAccountId()).isNull();
+    }
 }

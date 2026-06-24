@@ -27,6 +27,24 @@ public class GsiPayload {
     public Map map;
     public Player player;
     public Hero hero;
+    public Auth auth;
+
+    /** The shared secret Dota echoes from the cfg's {@code auth { token }} block, or null if absent. */
+    public String authToken() {
+        return auth != null ? auth.token : null;
+    }
+
+    /** The player's 32-bit Dota account id, or null when absent/blank/unparseable. */
+    public Long parseAccountId() {
+        if (player == null || player.accountid == null || player.accountid.isBlank()) {
+            return null;
+        }
+        try {
+            return Long.parseLong(player.accountid.trim());
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
 
     /**
      * Flattens this wire payload into the normalized {@link GsiFrame} the FSM/tagger consume.
@@ -141,5 +159,10 @@ public class GsiPayload {
         public int health;
         @JsonProperty("max_health")
         public int maxHealth;
+    }
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class Auth {
+        public String token;
     }
 }
