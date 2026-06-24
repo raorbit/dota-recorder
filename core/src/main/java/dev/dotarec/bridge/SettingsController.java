@@ -56,6 +56,13 @@ public class SettingsController {
                     if (patch.videoDir() != null) {
                         current.videoDir = patch.videoDir();
                     }
+                    // accountId also uses null = "leave unchanged", so clearing it needs an explicit
+                    // flag (a blanked Account ID field in the UI sends clearAccountId=true).
+                    if (Boolean.TRUE.equals(patch.clearAccountId())) {
+                        current.accountId = null;
+                    } else if (patch.accountId() != null) {
+                        current.accountId = patch.accountId();
+                    }
                     return current;
                 });
         return SettingsView.of(store.get());
@@ -67,17 +74,25 @@ public class SettingsController {
      */
     @JsonInclude(JsonInclude.Include.ALWAYS)
     public record SettingsView(
-            String resolution, String encoder, int retentionCapGb, String videoDir) {
+            String resolution, String encoder, int retentionCapGb, String videoDir, Long accountId) {
 
         static SettingsView of(Settings s) {
-            return new SettingsView(s.resolution, s.encoder, s.retentionCapGb, s.videoDir);
+            return new SettingsView(
+                    s.resolution, s.encoder, s.retentionCapGb, s.videoDir, s.accountId);
         }
     }
 
     /**
      * Partial update body. Every field is nullable; null means "leave unchanged". Wrapper types
      * (not {@code int}) so an omitted {@code retentionCapGb} is distinguishable from an explicit 0.
+     * {@code clearAccountId=true} is the explicit "set accountId to null" signal, since a null
+     * {@code accountId} (like every other field) means "leave unchanged".
      */
     public record SettingsPatch(
-            String resolution, String encoder, Integer retentionCapGb, String videoDir) {}
+            String resolution,
+            String encoder,
+            Integer retentionCapGb,
+            String videoDir,
+            Long accountId,
+            Boolean clearAccountId) {}
 }
