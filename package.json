@@ -10,8 +10,9 @@
     "dev:electron": "npm --prefix app run build:electron && cross-env NODE_ENV=development DOTAREC_DEV=1 electron app",
     "build:app": "npm --prefix app run build",
     "build:electron": "npm --prefix app run build:electron",
+    "build:core": "node scripts/build-core.mjs",
     "typecheck": "npm --prefix app run typecheck",
-    "build:all": "npm run build:app && npm run build:electron",
+    "build:all": "npm run build:core && npm run build:app && npm run build:electron",
     "fetch:obs": "node scripts/fetch-obs.mjs",
     "dist": "npm run fetch:obs && npm run build:all && electron-builder --win nsis --x64"
   },
