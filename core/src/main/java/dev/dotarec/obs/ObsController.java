@@ -52,6 +52,14 @@ public class ObsController implements ObsRecorder {
     /** How long to wait for the websocket to become identified/ready after connect(). */
     private static final int CONNECT_TIMEOUT_SECONDS = 3;
 
+    /**
+     * How long to wait for OBS to confirm {@code OUTPUT_STARTED} after it accepts StartRecord, before
+     * treating the start as failed (a phantom/black recording). Comfortably above OBS's
+     * STARTING-&gt;STARTED encoder warm-up latency, yet bounded so a wedged OBS cannot hang the FSM
+     * thread indefinitely.
+     */
+    private static final long START_CONFIRM_TIMEOUT_MS = 8_000L;
+
     private final SettingsStore settings;
     private final ObsHealth health;
     private final ObsEvents events;
@@ -248,6 +256,11 @@ public class ObsController implements ObsRecorder {
     }
 
     @Override
+    public boolean isRecording() {
+        return health.isRecording();
+    }
+
+    @Override
     public String startRecording() {
         // Clear the previous recording's confirmed-start anchor BEFORE issuing StartRecord. The FSM
         // reads recordConfirmedAt() the instant this returns, but THIS match's OUTPUT_STARTED lands
@@ -257,6 +270,10 @@ public class ObsController implements ObsRecorder {
         // stale value), inflating durationS and every marker video_offset_s by the inter-match gap.
         events.reset();
         OBSRemoteController c = requireController();
+        // Re-arm the OUTPUT_STARTED confirmation latch before the request so we wait on THIS
+        // recording's confirmation, and a back-to-back recording can never anchor on the prior
+        // match's instant.
+        events.clearRecordConfirmation();
         // A previous StopRecord may have timed out while OBS kept recording: its OUTPUT_STOPPED never
         // arrived, so health.recording is still true and OBS would reject this StartRecord (an output
         // is already active), silently breaking this and every future match until the app restarts.
@@ -297,11 +314,40 @@ public class ObsController implements ObsRecorder {
                     "OBS StartRecord failed"
                             + (resp == null ? " (no response / timeout)" : ""));
         }
-        // recording=true and recordConfirmedAt are set by the OUTPUT_STARTED event on the socket
-        // thread, not here -- StartRecord returning success only means OBS accepted the request,
-        // not that frames are flowing. The FSM should treat OUTPUT_STARTED as the real anchor.
-        log.info("OBS StartRecord accepted");
-        return events.recordConfirmedAt() == null ? null : events.recordConfirmedAt().toString();
+        // StartRecord success only means OBS ACCEPTED the request; frames are real only at
+        // OUTPUT_STARTED (set on the socket thread). Block for that confirmation so the FSM never
+        // anchors or records a phantom (black/silent) file.
+        Instant confirmed = events.awaitRecordConfirmed(START_CONFIRM_TIMEOUT_MS);
+        if (confirmed == null) {
+            log.warn(
+                    "OBS accepted StartRecord but did not confirm OUTPUT_STARTED within {}ms; stopping",
+                    START_CONFIRM_TIMEOUT_MS);
+            stopQuietly();
+            throw new ObsException(
+                    "OBS did not confirm recording started (OUTPUT_STARTED) within "
+                            + START_CONFIRM_TIMEOUT_MS
+                            + "ms");
+        }
+        log.info("OBS recording confirmed started");
+        return confirmed.toString();
+    }
+
+    /**
+     * Best-effort StopRecord that swallows any failure. Used to clean up after OBS accepted a
+     * StartRecord but never confirmed OUTPUT_STARTED, so we don't leave it recording a phantom file
+     * once we've given up waiting on it.
+     */
+    private void stopQuietly() {
+        OBSRemoteController c = this.controller;
+        if (c == null) {
+            return;
+        }
+        try {
+            c.stopRecord(REQUEST_TIMEOUT_MS);
+        } catch (Exception e) {
+            log.debug("Ignoring error stopping unconfirmed recording: {}", e.toString());
+        }
+        health.setRecording(false);
     }
 
     @Override

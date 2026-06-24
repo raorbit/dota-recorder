@@ -86,4 +86,61 @@ class ObsEventsTest {
         assertThat(events.recordConfirmedAt()).isNull();
         assertThat(events.lastStoppedOutputPath()).isNull();
     }
+
+    @Test
+    void awaitRecordConfirmed_returnsInstant_whenStartedArrives() {
+        events.clearRecordConfirmation();
+        Instant before = Instant.now();
+
+        events.onRecordStateChanged(ObsEvents.OUTPUT_STARTED, null);
+        Instant confirmed = events.awaitRecordConfirmed(1_000);
+
+        assertThat(confirmed).isNotNull().isAfterOrEqualTo(before);
+        assertThat(confirmed).isEqualTo(events.recordConfirmedAt());
+    }
+
+    @Test
+    void awaitRecordConfirmed_returnsNull_whenStartedNeverArrives() {
+        events.clearRecordConfirmation();
+
+        // No OUTPUT_STARTED before the (short) timeout: the caller must learn the start was not
+        // confirmed so it can abort the phantom/black recording.
+        assertThat(events.awaitRecordConfirmed(50)).isNull();
+    }
+
+    @Test
+    void clearRecordConfirmation_reArmsForASecondBackToBackRecording() {
+        // First recording confirms.
+        events.clearRecordConfirmation();
+        events.onRecordStateChanged(ObsEvents.OUTPUT_STARTED, null);
+        Instant first = events.awaitRecordConfirmed(1_000);
+        assertThat(first).isNotNull();
+
+        // Arming the next recording drops the prior instant, so a back-to-back start cannot read the
+        // first match's confirmation -- the cross-match anchor-leak regression this whole change fixes.
+        events.clearRecordConfirmation();
+        assertThat(events.recordConfirmedAt()).as("clear drops the prior confirmed instant").isNull();
+
+        events.onRecordStateChanged(ObsEvents.OUTPUT_STARTED, null);
+        Instant second = events.awaitRecordConfirmed(1_000);
+        assertThat(second).isNotNull().isAfterOrEqualTo(first);
+    }
+
+    @Test
+    void awaitRecordConfirmed_withNoLatchArmed_returnsCurrentInstantWithoutBlocking() {
+        // No clearRecordConfirmation(): await must not block on a missing latch -- it returns whatever
+        // is currently known immediately (a long timeout here would hang the test if it did block).
+        events.onRecordStateChanged(ObsEvents.OUTPUT_STARTED, null);
+        assertThat(events.awaitRecordConfirmed(60_000)).isEqualTo(events.recordConfirmedAt());
+    }
+
+    @Test
+    void reset_clearsLatchSoAwaitDoesNotBlock() {
+        events.clearRecordConfirmation();
+        events.reset();
+
+        // reset() drops the armed latch; a subsequent await returns immediately (null) rather than
+        // hanging the full timeout on a recording that will never be confirmed.
+        assertThat(events.awaitRecordConfirmed(60_000)).isNull();
+    }
 }

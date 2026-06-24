@@ -1,6 +1,8 @@
 package dev.dotarec.obs;
 
 import java.time.Instant;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -41,6 +43,15 @@ public class ObsEvents {
     /** Output path captured from the most recent STOPPED event (fallback path source). */
     private final AtomicReference<String> lastStoppedOutputPath = new AtomicReference<>();
 
+    /**
+     * Re-armable latch counted down on the next OUTPUT_STARTED. {@link #clearRecordConfirmation()}
+     * installs a fresh one immediately before a StartRecord so {@link #awaitRecordConfirmed(long)}
+     * blocks on THIS recording's confirmation, never a stale one — this is what stops a back-to-back
+     * recording from anchoring on the previous match's confirmed instant. {@code volatile}: armed on
+     * the FSM thread, counted down on the socket thread.
+     */
+    private volatile CountDownLatch confirmLatch;
+
     public ObsEvents(ObsHealth health) {
         this.health = health;
     }
@@ -59,9 +70,14 @@ public class ObsEvents {
         switch (outputState) {
             case OUTPUT_STARTED -> {
                 // Capture the confirmed instant FIRST, then publish recording=true so a reader that
-                // sees recording can always read back a non-null start instant.
+                // sees recording can always read back a non-null start instant, then release any
+                // awaitRecordConfirmed() waiter LAST so it observes both.
                 recordConfirmedAt.set(Instant.now());
                 health.setRecording(true);
+                CountDownLatch latch = confirmLatch;
+                if (latch != null) {
+                    latch.countDown();
+                }
                 log.info("OBS recording confirmed started (OUTPUT_STARTED)");
             }
             case OUTPUT_STOPPED -> {
@@ -90,6 +106,38 @@ public class ObsEvents {
     }
 
     /**
+     * Arms a fresh confirmation latch and clears the prior confirmed instant. Call IMMEDIATELY before
+     * issuing StartRecord so {@link #awaitRecordConfirmed(long)} waits for the new recording's
+     * OUTPUT_STARTED — without this a back-to-back recording could read the previous match's instant
+     * (still non-null until the next reset) and anchor every marker to the wrong start.
+     */
+    public void clearRecordConfirmation() {
+        recordConfirmedAt.set(null);
+        confirmLatch = new CountDownLatch(1);
+    }
+
+    /**
+     * Blocks up to {@code timeoutMs} for the OUTPUT_STARTED that confirms the in-flight recording and
+     * returns its confirmed wall instant, or {@code null} if it does not arrive in time — a phantom /
+     * black recording the caller should abort. If no latch is armed (no {@link #clearRecordConfirmation()}
+     * preceded this), returns whatever instant is currently known without blocking.
+     */
+    public Instant awaitRecordConfirmed(long timeoutMs) {
+        CountDownLatch latch = confirmLatch;
+        if (latch == null) {
+            return recordConfirmedAt.get();
+        }
+        try {
+            if (latch.await(timeoutMs, TimeUnit.MILLISECONDS)) {
+                return recordConfirmedAt.get();
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        return null;
+    }
+
+    /**
      * Output path seen on the last STOPPED event, or {@code null}. This is a fallback only -- the
      * primary path comes from the synchronous StopRecord response.
      */
@@ -101,5 +149,6 @@ public class ObsEvents {
     public void reset() {
         recordConfirmedAt.set(null);
         lastStoppedOutputPath.set(null);
+        confirmLatch = null;
     }
 }

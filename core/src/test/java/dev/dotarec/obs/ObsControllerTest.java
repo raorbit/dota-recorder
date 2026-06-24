@@ -76,7 +76,8 @@ class ObsControllerTest {
     @Test
     void startRecording_whenCorrectiveStopSucceeds_clearsFlagThenStarts() {
         ObsHealth health = new ObsHealth();
-        ObsController controller = new ObsController(null, health, new ObsEvents(health));
+        ObsEvents events = new ObsEvents(health);
+        ObsController controller = new ObsController(null, health, events);
 
         OBSRemoteController obs = mock(OBSRemoteController.class);
         StopRecordResponse stopOk = mock(StopRecordResponse.class);
@@ -84,7 +85,14 @@ class ObsControllerTest {
         when(obs.stopRecord(anyLong())).thenReturn(stopOk);
         StartRecordResponse startOk = mock(StartRecordResponse.class);
         when(startOk.isSuccessful()).thenReturn(true);
-        when(obs.startRecord(anyLong())).thenReturn(startOk);
+        // OBS confirms OUTPUT_STARTED on its socket thread right after accepting StartRecord; model
+        // that synchronously so the start-confirmation gate (awaitRecordConfirmed) is satisfied.
+        when(obs.startRecord(anyLong()))
+                .thenAnswer(
+                        inv -> {
+                            events.onRecordStateChanged("OBS_WEBSOCKET_OUTPUT_STARTED", null);
+                            return startOk;
+                        });
         ReflectionTestUtils.setField(controller, "controller", obs);
 
         health.setConnected(true);
@@ -92,17 +100,18 @@ class ObsControllerTest {
 
         controller.startRecording();
 
-        // Corrective stop runs BEFORE the real start, and the flag is cleared only on its success.
+        // Corrective stop runs BEFORE the real start; OUTPUT_STARTED then confirms the new recording.
         InOrder order = inOrder(obs);
         order.verify(obs).stopRecord(anyLong());
         order.verify(obs).startRecord(anyLong());
-        assertThat(health.isRecording()).isFalse();
+        assertThat(health.isRecording()).isTrue();
     }
 
     @Test
     void startRecording_whenCorrectiveStopRacesANativeStop_proceedsWithTheNewRecording() {
         ObsHealth health = new ObsHealth();
-        ObsController controller = new ObsController(null, health, new ObsEvents(health));
+        ObsEvents events = new ObsEvents(health);
+        ObsController controller = new ObsController(null, health, events);
 
         OBSRemoteController obs = mock(OBSRemoteController.class);
         StopRecordResponse stopFailed = mock(StopRecordResponse.class);
@@ -117,7 +126,13 @@ class ObsControllerTest {
                         });
         StartRecordResponse startOk = mock(StartRecordResponse.class);
         when(startOk.isSuccessful()).thenReturn(true);
-        when(obs.startRecord(anyLong())).thenReturn(startOk);
+        // Confirm OUTPUT_STARTED synchronously so the start-confirmation gate is satisfied.
+        when(obs.startRecord(anyLong()))
+                .thenAnswer(
+                        inv -> {
+                            events.onRecordStateChanged("OBS_WEBSOCKET_OUTPUT_STARTED", null);
+                            return startOk;
+                        });
         ReflectionTestUtils.setField(controller, "controller", obs);
 
         health.setConnected(true);
