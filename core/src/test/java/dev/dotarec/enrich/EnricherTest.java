@@ -178,7 +178,20 @@ class EnricherTest {
 
         // No account configured -> hold in pending (resumes once set), do NOT fail.
         assertThat(repo.findById(id).orElseThrow().enrichmentState()).isEqualTo("pending");
-        assertThat(repo.enrichAttempts(id)).isEqualTo(1);
+        assertThat(repo.enrichAttempts(id)).isZero();
+        assertThat(events.types()).isEmpty();
+    }
+
+    @Test
+    void nullAccountIdDoesNotConsumeAttemptsOrFailAtCap() throws Exception {
+        settings.update(s -> { s.accountId = null; return s; });
+        long id = insertPendingWithAttempts(912L, Enricher.MAX_ATTEMPTS - 1);
+
+        enricher(FetchResult.ready(parse("opendota/match_response.json"))).enrich(id, 912L);
+
+        MatchSummary row = repo.findById(id).orElseThrow();
+        assertThat(row.enrichmentState()).isEqualTo("pending");
+        assertThat(repo.enrichAttempts(id)).isEqualTo(Enricher.MAX_ATTEMPTS - 1);
         assertThat(events.types()).isEmpty();
     }
 
