@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { MatchSummary, Marker, PauseSpan } from '../api/client';
 import { fetchMarkers, fetchMatch, fetchPauses, fetchVideo } from '../api/client';
+import { bucketLabelOf } from '../store/buckets';
 import './video-player.css';
 
 interface VideoPlayerProps {
@@ -61,7 +62,7 @@ export function VideoPlayer({ match }: VideoPlayerProps): React.JSX.Element {
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [progress, setProgress] = useState(0); // playhead %, driven by timeupdate
 
-  const matchId = match?.matchId ?? null;
+  const matchId = match?.id ?? null;
 
   // Self-contained per-selection fetch: markers + detail (for durationS) + video
   // (file:// url) in parallel via allSettled, so a 404 on /video (pruned/seeded,
@@ -105,7 +106,7 @@ export function VideoPlayer({ match }: VideoPlayerProps): React.JSX.Element {
   }, [matchId]);
 
   const caption = match
-    ? `${match.hero || 'Unknown hero'} · ${match.category}`
+    ? `${match.hero || 'Unknown hero'} · ${bucketLabelOf(match)}`
     : 'Storm Spirit · Mid · 38:12';
 
   // Seek the <video> to a marker's video offset. Harmless no-op on an empty /

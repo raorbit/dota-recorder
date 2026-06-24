@@ -88,22 +88,45 @@ export interface Settings {
   readonly encoder: string;
   readonly retentionCapGb: number;
   readonly videoDir: string;
+  readonly accountId: number | null;
 }
 
 // A partial update to Settings. Every field is optional so the renderer can PATCH
-// just what changed; the core carries forward any field the patch omits.
-export type SettingsPatch = Partial<Settings>;
+// just what changed; the core carries forward any field the patch omits. Because a
+// null/omitted field means "leave unchanged", clearing accountId needs an explicit flag.
+export type SettingsPatch = Partial<Settings> & {
+  readonly clearAccountId?: boolean;
+};
 
-// Mirrors the matches table; populated in a later step.
+// Full row as the core's dev.dotarec.data.MatchSummary record serializes it.
+// Nullable columns are `| null` to mirror SQLite NULLs. The list endpoint returns
+// this contract; identity is the numeric `id`.
 export interface MatchSummary {
-  readonly matchId: number;
-  readonly category: string;
-  readonly hero: string;
-  readonly result: 'win' | 'loss' | string;
-  readonly kills: number;
-  readonly deaths: number;
-  readonly assists: number;
-  readonly playedAt: string;
+  readonly id: number;
+  readonly dotaMatchId: number | null;
+  readonly recordKind: string;
+  readonly enrichmentState: string;
+  readonly hero: string | null;
+  readonly kills: number | null;
+  readonly deaths: number | null;
+  readonly assists: number | null;
+  readonly gpm: number | null;
+  readonly xpm: number | null;
+  readonly netWorth: number | null;
+  readonly lastHits: number | null;
+  readonly result: string | null;
+  readonly lobbyType: number | null;
+  readonly gameMode: number | null;
+  readonly rankTier: number | null;
+  readonly mmrDelta: number | null;
+  readonly durationS: number | null;
+  readonly playedAt: number | null;
+  readonly videoPath: string | null;
+  readonly thumbPath: string | null;
+  readonly fileSizeBytes: number | null;
+  readonly starred: boolean;
+  readonly createdAt: number;
+  readonly recordStartedWallMs: number | null;
 }
 
 async function getJson<T>(path: string): Promise<T> {
@@ -151,6 +174,20 @@ async function patchJson<TBody, TResult>(path: string, body: TBody): Promise<TRe
   return (await res.json()) as TResult;
 }
 
+// Bodyless POST returning JSON. Setup actions (registry walk + cfg write) can run a
+// touch longer than a plain read, so they get a wider timeout.
+async function postJson<TResult>(path: string): Promise<TResult> {
+  const res = await fetch(`${bridgeBase()}${path}`, {
+    method: 'POST',
+    headers: { Accept: 'application/json', ...authHeaders() },
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!res.ok) {
+    throw new Error(`POST ${path} failed: ${res.status} ${res.statusText}`);
+  }
+  return (await res.json()) as TResult;
+}
+
 export function fetchHealth(): Promise<Health> {
   return getJson<Health>('/health');
 }
@@ -170,6 +207,36 @@ export function fetchSettings(): Promise<Settings> {
 // Settings the core now holds (the OBS connection is app-managed and off-surface).
 export function updateSettings(patch: SettingsPatch): Promise<Settings> {
   return putJson<SettingsPatch, Settings>('/settings', patch);
+}
+
+// POST /setup/gsi/install — whether the cfg was auto-written, and the path it went
+// to. installed=false (null paths) means Dota could not be found.
+export interface GsiInstallResult {
+  readonly installed: boolean;
+  readonly dotaDir: string | null;
+  readonly cfgPath: string | null;
+}
+
+// POST /setup/gsi/install-manual — the cfg body to drop in by hand when auto-install
+// can't find Dota. `targetDir` is the gamestate_integration folder when known, else null.
+export interface GsiManualInstructions {
+  readonly cfgFileName: string;
+  readonly cfgBody: string;
+  readonly targetDir: string | null;
+}
+
+// The Steam launch option that activates GSI cfg loading (a constant, shown without a round-trip).
+export const GSI_LAUNCH_OPTION = '-gamestateintegration';
+
+// Auto-installs the GSI cfg into the discovered Dota tree (mints the auth token on
+// first run). installed=false means Dota wasn't found — fall back to manual.
+export function installGsi(): Promise<GsiInstallResult> {
+  return postJson<GsiInstallResult>('/setup/gsi/install');
+}
+
+// Fetches the cfg body + target path for a manual install.
+export function fetchGsiManualInstructions(): Promise<GsiManualInstructions> {
+  return postJson<GsiManualInstructions>('/setup/gsi/install-manual');
 }
 
 export function fetchMatches(): Promise<MatchSummary[]> {
