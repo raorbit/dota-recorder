@@ -156,6 +156,17 @@ function createWindow(): void {
     mainWindow = null;
   });
 
+  // Lock the window to its own bundled content: deny popups and block any navigation away from the
+  // expected origin, so an injected/accidental external page can never inherit the bridge token.
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    const allowedPrefix = isDev ? DEV_SERVER_URL : 'file://';
+    if (!url.startsWith(allowedPrefix)) {
+      event.preventDefault();
+      logLine(`blocked navigation to ${url}`);
+    }
+  });
+
   if (isDev) {
     void mainWindow.loadURL(DEV_SERVER_URL);
   } else {

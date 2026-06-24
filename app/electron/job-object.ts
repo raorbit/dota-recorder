@@ -7,8 +7,8 @@
 // so `npm install` without native build tooling still works: when koffi is
 // absent, assign() is a no-op and the supervisor falls back to taskkill /T /F.
 //
-// TODO(plan Step 1+): wire koffi as an optionalDependency once the supervisor is
-// hardened; see [process supervision] in the architecture notes.
+// `koffi` is declared as an optionalDependency; packaged Windows builds should
+// load it, while dev installs can still limp along with the taskkill fallback.
 
 type AssignFn = (pid: number) => void;
 
