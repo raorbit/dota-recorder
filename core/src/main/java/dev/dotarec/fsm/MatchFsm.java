@@ -5,6 +5,10 @@ import dev.dotarec.data.MarkerRepository;
 import dev.dotarec.data.MatchRepository;
 import dev.dotarec.data.MatchRepository.NewMatch;
 import dev.dotarec.data.PauseRepository;
+import dev.dotarec.data.RecordingSessionRepository;
+import dev.dotarec.data.RecordingSessionRepository.RecordingEvent;
+import dev.dotarec.data.RecordingSessionRepository.RecordingSessionRow;
+import dev.dotarec.data.RecordingSessionRepository.Snapshot;
 import dev.dotarec.fsm.RecordingSession.PauseSpanBuffer;
 import dev.dotarec.gsi.GsiFrame;
 import dev.dotarec.obs.ObsException;
@@ -13,6 +17,7 @@ import dev.dotarec.obs.ThumbnailCapturer;
 import dev.dotarec.tagger.EventTagger;
 import dev.dotarec.tagger.PendingMarker;
 import java.nio.file.Path;
+import java.nio.file.Files;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.time.Instant;
@@ -74,6 +79,7 @@ public class MatchFsm {
     private final MatchRepository matches;
     private final MarkerRepository markers;
     private final PauseRepository pauses;
+    private final RecordingSessionRepository journal;
     private final EventPublisher events;
     private final DataSource dataSource;
 
@@ -87,6 +93,7 @@ public class MatchFsm {
             MatchRepository matches,
             MarkerRepository markers,
             PauseRepository pauses,
+            RecordingSessionRepository journal,
             EventPublisher events,
             DataSource dataSource) {
         this.obs = obs;
@@ -95,6 +102,7 @@ public class MatchFsm {
         this.matches = matches;
         this.markers = markers;
         this.pauses = pauses;
+        this.journal = journal;
         this.events = events;
         this.dataSource = dataSource;
     }
@@ -129,6 +137,15 @@ public class MatchFsm {
             case RECORDING -> {
                 if (POST_GAME.equals(gs)) {
                     finalizeRecording();
+                } else if (shouldRollToNewRecording(frame)) {
+                    log.info(
+                            "Detected new match while recording (state={}, match_id={}); finalizing current recording first",
+                            frame.gameState(),
+                            frame.matchId());
+                    finalizeRecording();
+                    if (state == MatchState.IDLE) {
+                        onFrame(frame);
+                    }
                 } else {
                     tagAndObserve(frame);
                 }
@@ -160,24 +177,48 @@ public class MatchFsm {
         return "playing".equals(frame.activity());
     }
 
+    private boolean shouldRollToNewRecording(GsiFrame frame) {
+        RecordingSession s = this.session;
+        if (s == null) {
+            return false;
+        }
+        if (isArmState(frame.gameState())) {
+            return true;
+        }
+        long currentMatchId = s.getMatchId();
+        long nextMatchId = frame.matchId();
+        return currentMatchId != 0L && nextMatchId != 0L && nextMatchId != currentMatchId;
+    }
+
     private void startRecording(GsiFrame frame) {
         if (!obs.ensureConnected()) {
             // OBS down: stay IDLE and retry on the next frame. Never throw on the GSI thread.
             log.warn("Cannot start recording: OBS not connected; will retry on next frame");
             return;
         }
+        // Readiness gate: OBS connected but with no active program scene or a muted/absent
+        // desktop-audio input would capture a black/silent file against a green GSI card. Stay IDLE
+        // and retry rather than record nothing -- we armed early (HERO_SELECTION), so there is slack.
+        if (!obs.isReady()) {
+            log.warn(
+                    "OBS connected but not ready to record (no active scene or muted/absent audio);"
+                            + " staying IDLE, will retry on next frame");
+            return;
+        }
         try {
+            // startRecording() blocks until OBS confirms OUTPUT_STARTED (or throws on timeout/reject),
+            // so reaching the next line means a real recording is rolling.
             obs.startRecording();
         } catch (ObsException e) {
-            log.warn("StartRecord rejected by OBS: {}; staying IDLE", e.getMessage());
+            log.warn("Recording not confirmed by OBS: {}; staying IDLE", e.getMessage());
             return;
         }
 
         RecordingSession s = new RecordingSession();
         s.setSurrogateId(UUID.randomUUID().toString());
-        // OUTPUT_STARTED may land microseconds after StartRecord returns; recordConfirmedAt() is the
-        // authoritative anchor. Fall back to "now" if the confirm has not posted yet so offsets are
-        // still sane (the gap is sub-frame at 10Hz).
+        // startRecording() returned only after OUTPUT_STARTED, so recordConfirmedAt() is the fresh,
+        // per-recording anchor. The wall-clock fallback is purely defensive (a seam that doesn't post
+        // an instant); production always has a confirmed instant here.
         Instant confirmed = obs.recordConfirmedAt();
         long anchor = confirmed != null ? confirmed.toEpochMilli() : frame.wallClockMillis();
         s.setRecordConfirmedWallMs(anchor);
@@ -191,6 +232,10 @@ public class MatchFsm {
         // select/strategy) can't open a span before the match is actually rolling.
         if (GAME_IN_PROGRESS.equals(frame.gameState()) && isPlaying(frame) && frame.paused()) {
             s.openPause(frame.wallClockMillis());
+        }
+        openJournal(s, frame);
+        if (GAME_IN_PROGRESS.equals(frame.gameState()) && isPlaying(frame) && frame.paused()) {
+            appendJournalEvent(s, "pause_open", frame.wallClockMillis(), frame.gameClock(), null);
         }
 
         this.session = s;
@@ -208,6 +253,14 @@ public class MatchFsm {
                 tagger.diff(last, frame, s.getRecordConfirmedWallMs(), LIVE_DURATION_CLAMP);
         if (!detected.isEmpty()) {
             s.addMarkers(detected);
+            for (PendingMarker marker : detected) {
+                appendJournalEvent(
+                        s,
+                        "marker",
+                        frame.wallClockMillis(),
+                        marker.gameClock(),
+                        markerPayload(marker));
+            }
         }
         // Pause edge: buffer a span open on false->true, close it on true->false. Persisted at
         // finalize once the matches row (the FK target) exists. A recording that opens mid-pause has
@@ -217,11 +270,14 @@ public class MatchFsm {
         boolean now = frame.paused();
         if (!was && now) {
             s.openPause(frame.wallClockMillis());
+            appendJournalEvent(s, "pause_open", frame.wallClockMillis(), frame.gameClock(), null);
         } else if (was && !now) {
             s.closePause(frame.wallClockMillis());
+            appendJournalEvent(s, "pause_close", frame.wallClockMillis(), frame.gameClock(), null);
         }
         s.observe(frame);
         s.setLastFrame(frame);
+        updateJournalSnapshot(s, "recording", null, null);
     }
 
     private void finalizeRecording() {
@@ -245,25 +301,25 @@ public class MatchFsm {
                     log.warn("Thumbnail capture failed for {}: {}", s.getSurrogateId(), e.toString());
                 }
 
-                videoPath = obs.stopRecording();
+                videoPath = stopRecordingWithRetry();
             } catch (RuntimeException e) {
-                // ANY StopRecord failure -- a typed ObsException, a socket reset, or a library-level
-                // RuntimeException -- must still fall through to persist what we have so markers/stats
-                // survive. Catching only ObsException here would let an unexpected stop failure abort
-                // finalize before the row is written, leaving OBS possibly still recording with no
-                // row and the FSM back IDLE (so the watchdog can't re-cut it).
-                log.warn("StopRecord failed: {}; persisting match row without video path", e.toString());
+                // Defensive: stopRecordingWithRetry already swallows expected stop failures, but a
+                // seam implementation bug must still fall through to persistence.
+                log.warn("StopRecord handling failed unexpectedly: {}; persisting without video path",
+                        e.toString());
             }
 
             long now = System.currentTimeMillis();
             long anchor = s.getRecordConfirmedWallMs();
             // Duration from the confirmed start to stop; clamp to >= 0.
             int durationS = (int) Math.max(0, (now - anchor) / 1000);
+            Long fileSizeBytes = fileSizeOrNull(videoPath);
+            updateJournalSnapshot(s, "stopping", videoPath, thumbPath);
 
             // Persist the match row + its markers + pauses in ONE transaction so a child-write
             // failure can't leave an orphan match row. publishRecorded runs only after commit, so the
             // UI never sees a match that rolled back.
-            long matchRowId = persistFinalized(s, videoPath, thumbPath, durationS, now);
+            long matchRowId = persistFinalized(s, videoPath, thumbPath, fileSizeBytes, durationS, now);
 
             publishRecorded(matchRowId, s, durationS);
 
@@ -292,8 +348,13 @@ public class MatchFsm {
      * match row id.
      */
     private long persistFinalized(
-            RecordingSession s, String videoPath, String thumbPath, int durationS, long now) {
-        NewMatch row = newMatchRow(s, videoPath, thumbPath, durationS, now);
+            RecordingSession s,
+            String videoPath,
+            String thumbPath,
+            Long fileSizeBytes,
+            int durationS,
+            long now) {
+        NewMatch row = newMatchRow(s, videoPath, thumbPath, fileSizeBytes, durationS, now);
         try (Connection conn = dataSource.getConnection()) {
             conn.setAutoCommit(false);
             try {
@@ -310,6 +371,7 @@ public class MatchFsm {
                 for (PauseSpanBuffer span : s.drainPauses(now)) {
                     pauses.insert(conn, matchRowId, span.startWall(), span.endWall());
                 }
+                journal.delete(conn, s.getSurrogateId());
                 conn.commit();
                 return matchRowId;
             } catch (SQLException | RuntimeException e) {
@@ -326,7 +388,12 @@ public class MatchFsm {
     }
 
     private NewMatch newMatchRow(
-            RecordingSession s, String videoPath, String thumbPath, int durationS, long now) {
+            RecordingSession s,
+            String videoPath,
+            String thumbPath,
+            Long fileSizeBytes,
+            int durationS,
+            long now) {
         Long dotaMatchId = s.getMatchId() != 0L ? s.getMatchId() : null;
         return new NewMatch(
                 dotaMatchId,
@@ -351,10 +418,139 @@ public class MatchFsm {
                 now, // played_at (finalize time; enrichment may correct to match start)
                 videoPath,
                 thumbPath,
-                null, // file_size_bytes (retention pass / enrichment fills this)
+                fileSizeBytes,
                 false,
                 now, // created_at
                 s.getRecordStartedWallMs());
+    }
+
+    private Long fileSizeOrNull(String path) {
+        if (path == null || path.isBlank()) {
+            return null;
+        }
+        try {
+            return Files.size(Path.of(path));
+        } catch (Exception e) {
+            log.warn("Could not stat finalized recording {}: {}", path, e.toString());
+            return null;
+        }
+    }
+
+    private String stopRecordingWithRetry() {
+        RuntimeException firstFailure = null;
+        try {
+            String path = obs.stopRecording();
+            warnIfStillRecording();
+            return path;
+        } catch (RuntimeException e) {
+            firstFailure = e;
+            log.warn("StopRecord failed: {}", e.toString());
+        }
+
+        if (!obs.isRecording()) {
+            log.warn("OBS no longer reports recording after failed StopRecord; persisting without video path");
+            return null;
+        }
+
+        try {
+            log.warn("OBS still reports recording after failed StopRecord; retrying once");
+            String path = obs.stopRecording();
+            warnIfStillRecording();
+            return path;
+        } catch (RuntimeException e) {
+            log.warn(
+                    "StopRecord retry failed: {}; first failure was {}; persisting without video path",
+                    e.toString(),
+                    firstFailure.toString());
+            warnIfStillRecording();
+            return null;
+        }
+    }
+
+    private void warnIfStillRecording() {
+        if (obs.isRecording()) {
+            log.warn("OBS still reports recording after finalize stop attempt");
+        }
+    }
+
+    private void openJournal(RecordingSession s, GsiFrame frame) {
+        try {
+            long now = System.currentTimeMillis();
+            journal.open(
+                    new RecordingSessionRow(
+                            s.getSurrogateId(),
+                            s.getSurrogateId(),
+                            "recording",
+                            s.getMatchId() != 0L ? s.getMatchId() : null,
+                            s.getHero(),
+                            s.getRecordConfirmedWallMs(),
+                            s.getRecordStartedWallMs(),
+                            frame.wallClockMillis(),
+                            frame.gameState(),
+                            s.getKills(),
+                            s.getDeaths(),
+                            s.getAssists(),
+                            null,
+                            null,
+                            now,
+                            now));
+        } catch (RuntimeException e) {
+            log.warn("Could not open recording journal for {}: {}", s.getSurrogateId(), e.toString());
+        }
+    }
+
+    private void updateJournalSnapshot(
+            RecordingSession s, String journalState, String videoPath, String thumbPath) {
+        GsiFrame last = s.getLastFrame();
+        try {
+            journal.updateSnapshot(
+                    s.getSurrogateId(),
+                    new Snapshot(
+                            journalState,
+                            s.getMatchId() != 0L ? s.getMatchId() : null,
+                            s.getHero(),
+                            last != null ? last.wallClockMillis() : null,
+                            last != null ? last.gameState() : null,
+                            s.getKills(),
+                            s.getDeaths(),
+                            s.getAssists(),
+                            videoPath,
+                            thumbPath,
+                            System.currentTimeMillis()));
+        } catch (RuntimeException e) {
+            log.warn("Could not update recording journal for {}: {}", s.getSurrogateId(), e.toString());
+        }
+    }
+
+    private void appendJournalEvent(
+            RecordingSession s, String type, long wallMs, Integer gameClock, String payloadJson) {
+        try {
+            journal.appendEvent(
+                    s.getSurrogateId(),
+                    new RecordingEvent(type, wallMs, gameClock, payloadJson, System.currentTimeMillis()));
+        } catch (RuntimeException e) {
+            log.warn(
+                    "Could not append {} event to recording journal for {}: {}",
+                    type,
+                    s.getSurrogateId(),
+                    e.toString());
+        }
+    }
+
+    private String markerPayload(PendingMarker marker) {
+        return "{"
+                + "\"type\":\"" + json(marker.type()) + "\","
+                + "\"videoOffsetS\":" + marker.videoOffsetS() + ","
+                + "\"gameClock\":" + (marker.gameClock() != null ? marker.gameClock() : "null") + ","
+                + "\"label\":" + (marker.label() != null ? "\"" + json(marker.label()) + "\"" : "null") + ","
+                + "\"source\":\"" + json(marker.source()) + "\""
+                + "}";
+    }
+
+    private static String json(String value) {
+        return value == null
+                ? ""
+                : value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n");
     }
 
     private void publishRecorded(long matchRowId, RecordingSession s, int durationS) {
