@@ -72,7 +72,7 @@ public class RetentionSweeper {
      */
     public SweepResult sweep(Long protectedId) {
         long capBytes = capBytes();
-        long total = matches.totalVideoBytes();
+        long total = totalStoredVideoBytes();
         if (total <= capBytes) {
             return SweepResult.empty(total, capBytes);
         }
@@ -88,13 +88,22 @@ public class RetentionSweeper {
             if (protectedId != null && m.id() == protectedId) {
                 continue; // never delete the actively-recording match's file
             }
-            long size = m.fileSizeBytes() != null ? m.fileSizeBytes() : 0L;
-            deleteFileQuietly(m.videoPath());
-            deleteFileQuietly(m.thumbPath());
+            long size = videoSizeBytes(m);
+            boolean videoGone = deleteFileQuietly(m.videoPath());
+            boolean thumbGone = deleteFileQuietly(m.thumbPath());
+            if (!videoGone) {
+                log.warn("Retention sweep left match {} intact because video deletion failed", m.id());
+                continue;
+            }
+            total -= size;
+            if (!thumbGone) {
+                log.warn(
+                        "Retention sweep could not delete thumbnail for match {}; pruning video row anyway",
+                        m.id());
+            }
             matches.nullVideoPath(m.id());
             deletedIds.add(m.id());
             freed += size;
-            total -= size;
         }
 
         if (!deletedIds.isEmpty()) {
@@ -158,19 +167,47 @@ public class RetentionSweeper {
         return Path.of(dir != null && !dir.isBlank() ? dir : ".");
     }
 
-    private void deleteFileQuietly(String path) {
+    private long totalStoredVideoBytes() {
+        long total = 0L;
+        for (MatchSummary m : matches.findAll()) {
+            if (m.videoPath() == null || m.videoPath().isBlank()) {
+                continue;
+            }
+            total += videoSizeBytes(m);
+        }
+        return total;
+    }
+
+    private long videoSizeBytes(MatchSummary m) {
+        String path = m.videoPath();
         if (path == null || path.isBlank()) {
-            return;
+            return 0L;
+        }
+        try {
+            return Files.size(Path.of(path));
+        } catch (IOException | RuntimeException e) {
+            // Prefer real filesystem size, but fall back to the DB snapshot when a transient stat
+            // failure would otherwise hide an over-budget row from pruning.
+            log.warn("Could not stat {} during retention sweep: {}", path, e.toString());
+            return m.fileSizeBytes() != null ? m.fileSizeBytes() : 0L;
+        }
+    }
+
+    private boolean deleteFileQuietly(String path) {
+        if (path == null || path.isBlank()) {
+            return true;
         }
         try {
             boolean removed = Files.deleteIfExists(Path.of(path));
             if (removed) {
                 log.debug("Deleted {}", path);
             }
+            return !Files.exists(Path.of(path));
         } catch (IOException | RuntimeException e) {
-            // A locked/missing file must not abort the sweep; the row is still pruned so the budget
-            // accounting stays correct and we won't retry the same file forever.
+            // A locked/missing file must not abort the sweep. Return false so the row keeps its path
+            // and the next sweep retries instead of forgetting a file that may still be on disk.
             log.warn("Could not delete {} during retention sweep: {}", path, e.toString());
+            return false;
         }
     }
 

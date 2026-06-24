@@ -13,6 +13,7 @@ import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
 
 import javax.sql.DataSource;
+import java.io.RandomAccessFile;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -87,6 +88,40 @@ class RetentionSweeperTest {
     }
 
     @Test
+    void sweepUsesFilesystemSizeWhenDatabaseSizeIsStale() throws Exception {
+        settings.get().retentionCapGb = 1;
+        long gib = 1024L * 1024 * 1024;
+
+        long staleSize = seedWithFiles("stale.mp4", "stale.jpg", 2 * gib, 0L, 1_000L, false);
+
+        RetentionSweeper.SweepResult result = sweeper.sweep(null);
+
+        assertThat(result.deletedIds()).containsExactly(staleSize);
+        assertThat(result.freedBytes()).isEqualTo(2 * gib);
+        assertThat(Files.exists(videoDir.resolve("stale.mp4"))).isFalse();
+        assertThat(matches.findById(staleSize).orElseThrow().videoPath()).isNull();
+    }
+
+    @Test
+    void failedVideoDeleteKeepsRowSoNextSweepCanRetry() {
+        settings.get().retentionCapGb = 1;
+        long gib = 1024L * 1024 * 1024;
+
+        String undeletablePath = "bad\u0000video.mp4";
+        long id = matches.insert(new NewMatch(
+                null, "match", "enriched", "puck",
+                1, 2, 3, 400, 500, 10000, 120,
+                "win", 7, 22, null, null, 1800,
+                1_000L, undeletablePath, null, 2 * gib, false, 1_000L, null));
+
+        RetentionSweeper.SweepResult result = sweeper.sweep(null);
+
+        assertThat(result.deletedIds()).isEmpty();
+        assertThat(result.freedBytes()).isZero();
+        assertThat(matches.findById(id).orElseThrow().videoPath()).isEqualTo(undeletablePath);
+    }
+
+    @Test
     void sweepNeverDeletesStarred() throws Exception {
         settings.get().retentionCapGb = 1;
         long gib = 1024L * 1024 * 1024;
@@ -156,15 +191,26 @@ class RetentionSweeperTest {
     /** Seeds a match with on-disk video + thumbnail files of {@code sizeBytes}, returns the id. */
     private long seedWithFiles(String video, String thumb, long sizeBytes, long playedAt,
                                boolean starred) throws Exception {
+        return seedWithFiles(video, thumb, sizeBytes, sizeBytes, playedAt, starred);
+    }
+
+    private long seedWithFiles(String video, String thumb, long diskSizeBytes, long dbSizeBytes,
+                               long playedAt, boolean starred) throws Exception {
         Path videoPath = videoDir.resolve(video);
         Path thumbPath = videoDir.resolve(thumb);
-        Files.createFile(videoPath);
+        createSparseFile(videoPath, diskSizeBytes);
         Files.createFile(thumbPath);
         return matches.insert(new NewMatch(
                 null, "match", "enriched", "puck",
                 1, 2, 3, 400, 500, 10000, 120,
                 "win", 7, 22, null, null, 1800,
-                playedAt, videoPath.toString(), thumbPath.toString(), sizeBytes, starred, playedAt,
+                playedAt, videoPath.toString(), thumbPath.toString(), dbSizeBytes, starred, playedAt,
                 null));
+    }
+
+    private static void createSparseFile(Path path, long sizeBytes) throws Exception {
+        try (RandomAccessFile file = new RandomAccessFile(path.toFile(), "rw")) {
+            file.setLength(sizeBytes);
+        }
     }
 }
