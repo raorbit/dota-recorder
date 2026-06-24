@@ -19,6 +19,7 @@ class ObsRecorderSeamTest {
         boolean obsRunning = true;
         boolean sceneAndAudioOk = true;
         boolean connected;
+        boolean recording;
         Instant confirmedAt;
         String savedPath = "C:\\videos\\fake.mkv";
 
@@ -44,6 +45,7 @@ class ObsRecorderSeamTest {
                 throw new ObsException("OBS is not connected");
             }
             confirmedAt = Instant.now(); // fake confirms synchronously
+            recording = true;
             return confirmedAt.toString();
         }
 
@@ -52,7 +54,13 @@ class ObsRecorderSeamTest {
             if (!connected) {
                 throw new ObsException("OBS is not connected");
             }
+            recording = false;
             return savedPath;
+        }
+
+        @Override
+        public boolean isRecording() {
+            return recording;
         }
 
         @Override
@@ -71,8 +79,10 @@ class ObsRecorderSeamTest {
         String startedAt = obs.startRecording();
         assertThat(startedAt).isNotNull();
         assertThat(obs.recordConfirmedAt()).isNotNull();
+        assertThat(obs.isRecording()).isTrue();
 
         assertThat(obs.stopRecording()).isEqualTo("C:\\videos\\fake.mkv");
+        assertThat(obs.isRecording()).isFalse();
     }
 
     @Test

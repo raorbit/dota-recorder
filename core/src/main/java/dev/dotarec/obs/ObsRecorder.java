@@ -50,11 +50,21 @@ public interface ObsRecorder {
     boolean isReady();
 
     /**
-     * Sends StartRecord. Returns the confirmed OUTPUT_STARTED instant as an ISO-8601 string if it
-     * has already arrived, else {@code null} (the event may land microseconds later on the socket
-     * thread; read {@link #recordConfirmedAt()} for the authoritative anchor).
+     * Whether OBS currently believes recording is active. This is a health/readback signal, not a
+     * command: the FSM uses it after a failed StopRecord to decide whether one bounded retry is
+     * warranted and to log if OBS may still be recording after finalize.
+     */
+    boolean isRecording();
+
+    /**
+     * Sends StartRecord and BLOCKS until OBS confirms the recording is really rolling (the
+     * OUTPUT_STARTED event), returning that confirmed instant as an ISO-8601 string. On return
+     * {@link #recordConfirmedAt()} is non-null and fresh for THIS recording, so the caller can anchor
+     * marker offsets on it immediately without a stale-value race.
      *
-     * @throws ObsException if OBS is not connected or rejects/times out the request
+     * @throws ObsException if OBS is not connected, rejects/times out the StartRecord request, or
+     *     accepts it but never confirms OUTPUT_STARTED within the start-confirmation timeout (a
+     *     phantom/black recording, which is best-effort stopped before this throws)
      */
     String startRecording();
 
