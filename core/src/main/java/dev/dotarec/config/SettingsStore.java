@@ -48,6 +48,13 @@ public class SettingsStore {
          * anonymous rate limit. Out of scope for B7 unit tests; the live transport uses it in PR5.
          */
         public String opendotaApiKey = "";
+        /**
+         * Shared secret written into the GSI {@code auth { token }} block when the cfg is installed and
+         * validated on every inbound {@code /gsi} frame. Blank until {@code GsiCfgInstaller} mints one
+         * on first install; a blank token means "accept all frames" so a half-configured install never
+         * goes dark (the GSI feed only carries a token once a cfg that has one is written).
+         */
+        public String gsiAuthToken = "";
 
         /** Field-by-field copy (all fields are primitive/immutable) for atomic copy-on-write updates. */
         Settings copy() {
@@ -61,6 +68,7 @@ public class SettingsStore {
             c.videoDir = videoDir;
             c.accountId = accountId;
             c.opendotaApiKey = opendotaApiKey;
+            c.gsiAuthToken = gsiAuthToken;
             return c;
         }
     }

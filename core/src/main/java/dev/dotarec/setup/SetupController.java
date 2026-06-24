@@ -1,19 +1,17 @@
 package dev.dotarec.setup;
 
-import org.springframework.http.ResponseEntity;
+import java.util.Optional;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * Setup endpoints the UI calls to wire up GSI (discover Dota, install the cfg, get launch option).
+ * Setup endpoints the UI calls to wire up GSI: discover the Dota install, auto-install the cfg (or
+ * fetch manual instructions), and surface the {@code -gamestateintegration} launch option.
  *
- * <p>Plan (Setup / Game State Integration settings): guide the user through enabling GSI --
- * discover the Dota install, install the cfg automatically (or provide manual instructions), and
- * show the {@code -gamestateintegration} launch option.
- *
- * <p>TODO(plan): back these with {@code SteamPathDiscovery} + {@code GsiCfgInstaller} and return
- * real result payloads.
+ * <p>Discovery/install never 4xx: a Dota install that can't be found comes back as
+ * {@code found=false} / {@code installed=false} so the UI can branch to the manual flow cleanly,
+ * rather than treating "Dota not installed" as a server error.
  */
 @RestController
 public class SetupController {
@@ -26,22 +24,26 @@ public class SetupController {
         this.gsiCfgInstaller = gsiCfgInstaller;
     }
 
-    /** TODO(plan): run discovery, return the resolved Dota install dir. */
+    /** Discovery outcome: whether a Dota install was located and where. */
+    public record DiscoverResult(boolean found, String dotaDir) {}
+
+    /** Locates the Dota install (registry + libraryfolders walk). */
     @PostMapping("/setup/gsi/discover")
-    public ResponseEntity<Void> discover() {
-        return ResponseEntity.ok().build();
+    public DiscoverResult discover() {
+        Optional<String> dota = steamPathDiscovery.findDotaInstallDir();
+        return new DiscoverResult(dota.isPresent(), dota.orElse(null));
     }
 
-    /** TODO(plan): auto-install the GSI cfg into the discovered Dota tree. */
+    /** Auto-installs the GSI cfg into the discovered Dota tree (mints the auth token on first run). */
     @PostMapping("/setup/gsi/install")
-    public ResponseEntity<Void> install() {
-        return ResponseEntity.ok().build();
+    public GsiCfgInstaller.InstallResult install() {
+        return gsiCfgInstaller.install();
     }
 
-    /** TODO(plan): return manual cfg contents + target path for the user to place by hand. */
+    /** Returns the cfg body + target path so the user can place it by hand when auto-install can't. */
     @PostMapping("/setup/gsi/install-manual")
-    public ResponseEntity<Void> installManual() {
-        return ResponseEntity.ok().build();
+    public GsiCfgInstaller.ManualInstructions installManual() {
+        return gsiCfgInstaller.manualInstructions();
     }
 
     /** Returns the Steam launch option that activates GSI. */
