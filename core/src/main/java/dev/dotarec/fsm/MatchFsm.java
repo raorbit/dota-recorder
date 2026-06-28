@@ -1,6 +1,10 @@
 package dev.dotarec.fsm;
 
 import dev.dotarec.bridge.EventPublisher;
+import dev.dotarec.clip.ClipService;
+import dev.dotarec.clip.RampageDetector;
+import dev.dotarec.clip.RampageDetector.RampageSpan;
+import dev.dotarec.config.SettingsStore;
 import dev.dotarec.data.MarkerRepository;
 import dev.dotarec.data.MatchRepository;
 import dev.dotarec.data.MatchRepository.NewMatch;
@@ -82,6 +86,8 @@ public class MatchFsm {
     private final RecordingSessionRepository journal;
     private final EventPublisher events;
     private final DataSource dataSource;
+    private final ClipService clipService;
+    private final SettingsStore settings;
 
     private volatile MatchState state = MatchState.IDLE;
     private RecordingSession session;
@@ -95,7 +101,9 @@ public class MatchFsm {
             PauseRepository pauses,
             RecordingSessionRepository journal,
             EventPublisher events,
-            DataSource dataSource) {
+            DataSource dataSource,
+            ClipService clipService,
+            SettingsStore settings) {
         this.obs = obs;
         this.thumbnails = thumbnails;
         this.tagger = tagger;
@@ -105,6 +113,8 @@ public class MatchFsm {
         this.journal = journal;
         this.events = events;
         this.dataSource = dataSource;
+        this.clipService = clipService;
+        this.settings = settings;
     }
 
     public MatchState getState() {
@@ -335,6 +345,11 @@ public class MatchFsm {
 
             publishRecorded(matchRowId, s, durationS);
 
+            // Auto-clip rampages off the just-persisted markers. Fully guarded: createAuto dispatches
+            // @Async so this stays cheap on the GSI thread, and any failure here must never break a
+            // finalize that already committed (the match row + markers are safely persisted above).
+            maybeAutoClipRampages(matchRowId, s, durationS);
+
             log.info("Recording finalized -> match row {} ({} markers, {}s)",
                     matchRowId, s.getMarkers().size(), durationS);
         } catch (RuntimeException e) {
@@ -397,6 +412,47 @@ public class MatchFsm {
         } catch (SQLException e) {
             throw new IllegalStateException("Failed to persist finalized match", e);
         }
+    }
+
+    /**
+     * After a finalize commits, optionally carve a highlight clip around each detected rampage. Gated
+     * on {@code autoClipOnRampage}; the kill offsets come straight from the just-persisted in-memory
+     * markers (the same {@code videoOffsetS} base {@link ClipService} clamps), so no DB re-read. Each
+     * span's bounds are padded by {@code clipPaddingSeconds} and clamped to {@code [0, durationS]}, then
+     * handed to {@link ClipService#createAuto} (which dispatches @Async). Wrapped whole in try/catch: a
+     * clip failure must never strand the FSM or undo a committed match.
+     */
+    private void maybeAutoClipRampages(long matchRowId, RecordingSession s, int durationS) {
+        try {
+            if (!settings.get().autoClipOnRampage) {
+                return;
+            }
+            List<Double> killOffsets = new java.util.ArrayList<>();
+            for (PendingMarker m : s.getMarkers()) {
+                if ("kill".equals(m.type())) {
+                    killOffsets.add(m.videoOffsetS());
+                }
+            }
+            List<RampageSpan> spans = RampageDetector.detectFromOffsets(
+                    killOffsets, RampageDetector.DEFAULT_THRESHOLD, RampageDetector.DEFAULT_MAX_GAP_SECONDS);
+            if (spans.isEmpty()) {
+                return;
+            }
+            int pad = settings.get().clipPaddingSeconds;
+            for (RampageSpan span : spans) {
+                double startS = clamp(span.firstOffsetS() - pad, 0.0, durationS);
+                double endS = clamp(span.lastOffsetS() + pad, 0.0, durationS);
+                clipService.createAuto(matchRowId, startS, endS, "rampage");
+            }
+            log.info("Auto-clipped {} rampage span(s) for match row {}", spans.size(), matchRowId);
+        } catch (RuntimeException e) {
+            // A clip-trigger failure (bad span, ClipService reject) must not undo a committed finalize.
+            log.warn("Rampage auto-clip failed for match row {}: {}", matchRowId, e.toString());
+        }
+    }
+
+    private static double clamp(double value, double lower, double upper) {
+        return Math.max(lower, Math.min(value, upper));
     }
 
     private NewMatch newMatchRow(
