@@ -133,4 +133,88 @@ describe('JvmSupervisor', () => {
 
     expect(lines).toContain('hello world');
   });
+
+  it('splits a single multi-line stdout buffer into one onLog call per non-empty line', async () => {
+    // The token tests only ever emit a single line, so the split(/\r?\n/) + length===0 skip is
+    // otherwise unverified. A regression here would interleave/drop log lines AND defeat per-line
+    // token scrubbing across a multi-line stack trace. CRLF and LF must both split; the trailing
+    // empty segment after the final '\n' must be dropped.
+    const lines: string[] = [];
+    const sup = new JvmSupervisor({ onLog: (line) => lines.push(line) });
+    await sup.start();
+
+    children[0].stdout.emit('data', Buffer.from('line one\r\nline two\nline three\n'));
+
+    expect(lines).toEqual(['line one', 'line two', 'line three']);
+  });
+});
+
+describe('JvmSupervisor.stop — hard-kill escalation', () => {
+  // These tests drive the SIGTERM-then-escalate branch, which depends on the 4s waitForExit timer
+  // firing. start() resolves synchronously (first /health poll is ok) so it does not touch the fake
+  // clock; only the stop() escalation does, which is why fake timers are safe here.
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('escalates to taskkill /T /F (after SIGTERM) when SIGTERM does not exit within the grace window', async () => {
+    const platform = process.platform;
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+    try {
+      const sup = new JvmSupervisor({ onLog: () => {} });
+      await sup.start();
+      spawnMock.mockClear(); // ignore the spawn from start(); only count the taskkill spawn
+
+      // Never emit 'exit': waitForExit's 4s timer must fire and return false.
+      const stopped = sup.stop();
+      await vi.advanceTimersByTimeAsync(4_000); // cross the grace window deterministically
+      await stopped;
+
+      // Graceful SIGTERM is attempted FIRST (not a straight SIGKILL)...
+      expect(children[0].kill).toHaveBeenCalledWith('SIGTERM');
+      // ...then the hard tree-kill via taskkill — the kill-on-quit guarantee that frees :3223/:3224.
+      expect(spawnMock).toHaveBeenCalledWith(
+        'taskkill',
+        ['/PID', '4321', '/T', '/F'],
+        { windowsHide: true },
+      );
+    } finally {
+      Object.defineProperty(process, 'platform', { value: platform, configurable: true });
+    }
+  });
+
+  it('falls back to SIGKILL on non-win32 when there is no taskkill', async () => {
+    const platform = process.platform;
+    Object.defineProperty(process, 'platform', { value: 'linux', configurable: true });
+    try {
+      const sup = new JvmSupervisor({ onLog: () => {} });
+      await sup.start();
+      spawnMock.mockClear();
+
+      const stopped = sup.stop();
+      await vi.advanceTimersByTimeAsync(4_000);
+      await stopped;
+
+      // The else arm of the win32 check: SIGKILL, and crucially no taskkill spawn.
+      expect(children[0].kill).toHaveBeenNthCalledWith(1, 'SIGTERM');
+      expect(children[0].kill).toHaveBeenCalledWith('SIGKILL');
+      expect(spawnMock).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(process, 'platform', { value: platform, configurable: true });
+    }
+  });
+
+  it('returns immediately and nulls the handle when no child is running (and stays a no-op)', async () => {
+    const sup = new JvmSupervisor({ onLog: () => {} });
+
+    // stop() before any start(): the child-null / pid-undefined guard must early-return.
+    await expect(sup.stop()).resolves.toBeUndefined();
+    // A second stop() must also be a no-op — guards double-quit / quit-before-ready.
+    await expect(sup.stop()).resolves.toBeUndefined();
+
+    expect(spawnMock).not.toHaveBeenCalled(); // never spawned a core, never spawned taskkill
+  });
 });
