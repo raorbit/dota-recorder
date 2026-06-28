@@ -1,7 +1,11 @@
 import { useEffect, useState } from 'react';
 import {
+  fetchAudioInputs,
   fetchSettings,
   updateSettings,
+  type AudioInputOption,
+  type AudioSource,
+  type AudioSourceKind,
   type Settings,
   type SettingsPatch,
 } from '../../api/client';
@@ -39,6 +43,24 @@ const ENCODER_LABELS: Record<string, string> = {
 const RETENTION_MIN = 10;
 const RETENTION_MAX = 500;
 
+// The three audio-source kinds offered by the "Add source" chooser, with a label
+// and the single-glyph icon shown in each row's kind chip (also via [data-kind]).
+const AUDIO_KINDS: ReadonlyArray<{
+  readonly kind: AudioSourceKind;
+  readonly label: string;
+  readonly icon: string;
+}> = [
+  { kind: 'application', label: 'Application', icon: '◫' },
+  { kind: 'output', label: 'Output device', icon: '🔊' },
+  { kind: 'input', label: 'Microphone', icon: '🎙' },
+];
+
+const AUDIO_KIND_LABEL: Record<AudioSourceKind, string> = {
+  application: 'Application',
+  output: 'Output device',
+  input: 'Microphone',
+};
+
 // Single self-describing "Recorder" indicator. The recorder is app-managed now,
 // so we deliberately avoid any OBS jargon; the prefix makes the chip readable on
 // its own. Evaluated top-down, first match wins — connected is gated before the
@@ -65,11 +87,35 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
   const [retentionGb, setRetentionGb] = useState(50);
   const [accountId, setAccountId] = useState('');
 
+  // The editable audio-source list and a per-kind cache of picker options. The core
+  // seeds the list (we never synthesize a default here); the options cache is filled
+  // lazily by loadInputs() and degrades to [] when OBS is down.
+  const [audioSources, setAudioSources] = useState<AudioSource[]>([]);
+  const [inputsByKind, setInputsByKind] = useState<Record<AudioSourceKind, AudioInputOption[]>>({
+    application: [],
+    output: [],
+    input: [],
+  });
+
   const [saveState, setSaveState] = useState<SaveState>('idle');
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
+
+    // Fetch and cache the picker options for one kind, ignoring failures (the core
+    // already returns [] when OBS is down). Guards against the unmount flag so a
+    // late resolve doesn't write into a torn-down component.
+    const loadInputs = async (kind: AudioSourceKind): Promise<void> => {
+      try {
+        const opts = await fetchAudioInputs(kind);
+        if (cancelled) return;
+        setInputsByKind((prev) => ({ ...prev, [kind]: opts }));
+      } catch {
+        /* leave the cache as [] — the picker still shows the stored target */
+      }
+    };
+
     void (async (): Promise<void> => {
       try {
         const s = await fetchSettings();
@@ -79,7 +125,12 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
         setVideoDir(s.videoDir);
         setRetentionGb(s.retentionCapGb);
         setAccountId(s.accountId !== null ? String(s.accountId) : '');
+        setAudioSources(s.audioSources);
         setLoadState('ready');
+        // Prime each kind's options once the form is up.
+        void loadInputs('application');
+        void loadInputs('output');
+        void loadInputs('input');
       } catch {
         if (cancelled) return;
         setLoadState('error');
@@ -90,13 +141,27 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
     };
   }, []);
 
+  // Refetch one kind's picker options on demand (e.g. when adding an application
+  // source, whose process list is volatile). Best-effort; failures keep the cache.
+  const refreshInputs = (kind: AudioSourceKind): void => {
+    void (async (): Promise<void> => {
+      try {
+        const opts = await fetchAudioInputs(kind);
+        setInputsByKind((prev) => ({ ...prev, [kind]: opts }));
+      } catch {
+        /* keep prior options */
+      }
+    })();
+  };
+
   // A changed field marks the form dirty so Save is only offered when it matters.
   const dirty =
     settings !== null &&
     (resolution !== settings.resolution ||
       videoDir.trim() !== settings.videoDir ||
       retentionGb !== settings.retentionCapGb ||
-      accountId.trim() !== (settings.accountId !== null ? String(settings.accountId) : ''));
+      accountId.trim() !== (settings.accountId !== null ? String(settings.accountId) : '') ||
+      JSON.stringify(audioSources) !== JSON.stringify(settings.audioSources));
 
   const onBrowse = async (): Promise<void> => {
     const picked = await window.dotarec?.selectFolder();
@@ -104,6 +169,62 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
       setVideoDir(picked);
       setSaveState('idle');
     }
+  };
+
+  // ── Audio-source mutators. Each edits the list immutably and resets saveState to
+  // 'idle' (matching the other onChange handlers) so Save re-arms after a tweak. ──
+
+  const addSource = (kind: AudioSourceKind): void => {
+    const source: AudioSource = {
+      id: crypto.randomUUID(),
+      kind,
+      // application matches a process (null until a window is picked); output/input
+      // default to the system default device.
+      target: kind === 'application' ? null : 'default',
+      label: '',
+      volume: 100,
+      muted: false,
+    };
+    setAudioSources((prev) => [...prev, source]);
+    // The process/device list may have changed since mount — refetch for the new kind.
+    refreshInputs(kind);
+    setSaveState('idle');
+  };
+
+  const removeAt = (i: number): void => {
+    setAudioSources((prev) => prev.filter((_, idx) => idx !== i));
+    setSaveState('idle');
+  };
+
+  const setKind = (i: number, kind: AudioSourceKind): void => {
+    setAudioSources((prev) =>
+      prev.map((s, idx) =>
+        idx === i
+          ? { ...s, kind, target: kind === 'application' ? null : 'default', label: '' }
+          : s,
+      ),
+    );
+    refreshInputs(kind);
+    setSaveState('idle');
+  };
+
+  const setTarget = (i: number, value: string, label: string): void => {
+    setAudioSources((prev) =>
+      prev.map((s, idx) => (idx === i ? { ...s, target: value, label } : s)),
+    );
+    setSaveState('idle');
+  };
+
+  const setVolume = (i: number, pct: number): void => {
+    setAudioSources((prev) => prev.map((s, idx) => (idx === i ? { ...s, volume: pct } : s)));
+    setSaveState('idle');
+  };
+
+  const toggleMute = (i: number): void => {
+    setAudioSources((prev) =>
+      prev.map((s, idx) => (idx === i ? { ...s, muted: !s.muted } : s)),
+    );
+    setSaveState('idle');
   };
 
   const onSave = async (): Promise<void> => {
@@ -119,6 +240,8 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
       ...(trimmedAccount === ''
         ? { clearAccountId: true }
         : { accountId: Number(trimmedAccount) }),
+      // FULL-LIST REPLACE: always send the complete current array.
+      audioSources,
     };
 
     try {
@@ -128,6 +251,7 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
       setVideoDir(updated.videoDir);
       setRetentionGb(updated.retentionCapGb);
       setAccountId(updated.accountId !== null ? String(updated.accountId) : '');
+      setAudioSources(updated.audioSources);
       setSaveState('saved');
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to save settings.');
@@ -269,6 +393,143 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
                   }}
                 />
                 <span className="rec-rangeval">{retentionGb} GB</span>
+              </div>
+            </div>
+          </section>
+
+          <section className="rec-card" aria-label="Audio sources">
+            <h3 className="rec-sec">Audio sources</h3>
+            <p className="rec-desc aud-intro">
+              Each source is captured into the recording. Add your speakers, a
+              microphone, or a specific app like Discord.
+            </p>
+
+            {audioSources.map((src, i) => {
+              // Option list for this row's kind; ensure output/input always offer
+              // "Default", and surface an unknown stored target as a leading option
+              // so a picked device that's not currently enumerable still shows.
+              const opts = inputsByKind[src.kind];
+              const withDefault =
+                src.kind === 'application' || opts.some((o) => o.value === 'default')
+                  ? opts
+                  : [{ value: 'default', label: 'Default' }, ...opts];
+              const selectValue = src.target ?? '';
+              const options =
+                selectValue !== '' && !withDefault.some((o) => o.value === selectValue)
+                  ? [{ value: selectValue, label: src.label || selectValue }, ...withDefault]
+                  : withDefault;
+              const kindMeta = AUDIO_KINDS.find((k) => k.kind === src.kind);
+              const targetId = `aud-target-${src.id}`;
+              const volId = `aud-vol-${src.id}`;
+
+              return (
+                <div className="rec-row aud-row" key={src.id}>
+                  <div className="rec-rowlabel aud-meta">
+                    <span
+                      className="aud-kind"
+                      data-kind={src.kind}
+                      aria-hidden="true"
+                      title={AUDIO_KIND_LABEL[src.kind]}
+                    >
+                      {kindMeta?.icon ?? '♪'}
+                    </span>
+                    <div className="aud-fields">
+                      <label className="rec-label aud-kind-label" htmlFor={`aud-kind-${src.id}`}>
+                        {AUDIO_KIND_LABEL[src.kind]}
+                      </label>
+                      <select
+                        id={`aud-kind-${src.id}`}
+                        className="rec-select aud-kind-select"
+                        aria-label="Source kind"
+                        value={src.kind}
+                        onChange={(e) => setKind(i, e.target.value as AudioSourceKind)}
+                      >
+                        {AUDIO_KINDS.map((k) => (
+                          <option key={k.kind} value={k.kind}>
+                            {k.label}
+                          </option>
+                        ))}
+                      </select>
+                      <label className="aud-srlabel" htmlFor={targetId}>
+                        {src.kind === 'application' ? 'Application' : 'Device'}
+                      </label>
+                      <select
+                        id={targetId}
+                        className="rec-select aud-target"
+                        value={selectValue}
+                        onChange={(e) => {
+                          const opt = options.find((o) => o.value === e.target.value);
+                          setTarget(i, e.target.value, opt?.label ?? '');
+                        }}
+                      >
+                        {src.kind === 'application' && selectValue === '' && (
+                          <option value="">Select an application…</option>
+                        )}
+                        {options.map((o) => (
+                          <option key={o.value} value={o.value}>
+                            {o.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                  <div className="rec-control aud-control">
+                    <div className="rec-slider aud-volume">
+                      <label className="aud-srlabel" htmlFor={volId}>
+                        Volume
+                      </label>
+                      <input
+                        id={volId}
+                        className="rec-range"
+                        type="range"
+                        min={0}
+                        max={100}
+                        value={src.volume}
+                        onChange={(e) => setVolume(i, Number(e.target.value))}
+                      />
+                      <span className="rec-rangeval aud-volval">{src.volume}%</span>
+                    </div>
+                    <button
+                      type="button"
+                      className="aud-mute"
+                      data-muted={src.muted ? 'on' : 'off'}
+                      aria-pressed={src.muted}
+                      aria-label={src.muted ? 'Unmute source' : 'Mute source'}
+                      title={src.muted ? 'Unmute' : 'Mute'}
+                      onClick={() => toggleMute(i)}
+                    >
+                      {src.muted ? 'Muted' : 'On'}
+                    </button>
+                    <button
+                      type="button"
+                      className="aud-remove"
+                      aria-label="Remove source"
+                      title="Remove source"
+                      onClick={() => removeAt(i)}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+
+            <div className="rec-row aud-addrow">
+              <div className="rec-rowlabel">
+                <span className="rec-label">Add a source</span>
+                <p className="rec-desc">Capture another device or application.</p>
+              </div>
+              <div className="rec-control aud-add">
+                {AUDIO_KINDS.map((k) => (
+                  <button
+                    key={k.kind}
+                    type="button"
+                    className="rec-browse aud-add-kind"
+                    onClick={() => addSource(k.kind)}
+                  >
+                    <span aria-hidden="true">{k.icon}</span> {k.label}
+                  </button>
+                ))}
               </div>
             </div>
           </section>

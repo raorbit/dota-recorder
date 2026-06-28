@@ -2,7 +2,12 @@ package dev.dotarec.bridge;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 import dev.dotarec.config.SettingsStore;
+import dev.dotarec.config.SettingsStore.AudioSource;
 import dev.dotarec.config.SettingsStore.Settings;
+import dev.dotarec.obs.ObsController;
+import java.util.List;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -26,10 +31,14 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 public class SettingsController {
 
-    private final SettingsStore store;
+    private static final Logger log = LoggerFactory.getLogger(SettingsController.class);
 
-    public SettingsController(SettingsStore store) {
+    private final SettingsStore store;
+    private final ObsController obsController;
+
+    public SettingsController(SettingsStore store, ObsController obsController) {
         this.store = store;
+        this.obsController = obsController;
     }
 
     @GetMapping("/settings")
@@ -63,8 +72,22 @@ public class SettingsController {
                     } else if (patch.accountId() != null) {
                         current.accountId = patch.accountId();
                     }
+                    // audioSources is a FULL-LIST REPLACE: null = leave unchanged, [] = clear all,
+                    // [..] = replace the entire stored list. No per-element merge, no clear-flag — the
+                    // renderer always sends the complete current array on any edit/add/remove.
+                    if (patch.audioSources() != null) {
+                        current.audioSources = patch.audioSources();
+                    }
                     return current;
                 });
+        // Apply the (possibly new) audio source list to a live OBS without waiting for a reconnect.
+        // Best-effort: the persisted settings are the source of truth and the next disconnect->connect
+        // edge re-reconciles, so an OBS-down or transient failure here must never 500 the PUT.
+        try {
+            obsController.reconcileAudioOnDemand();
+        } catch (Exception e) {
+            log.debug("On-demand audio reconcile after settings PUT failed (OBS down?): {}", e.toString());
+        }
         return SettingsView.of(store.get());
     }
 
@@ -74,11 +97,21 @@ public class SettingsController {
      */
     @JsonInclude(JsonInclude.Include.ALWAYS)
     public record SettingsView(
-            String resolution, String encoder, int retentionCapGb, String videoDir, Long accountId) {
+            String resolution,
+            String encoder,
+            int retentionCapGb,
+            String videoDir,
+            Long accountId,
+            List<AudioSource> audioSources) {
 
         static SettingsView of(Settings s) {
             return new SettingsView(
-                    s.resolution, s.encoder, s.retentionCapGb, s.videoDir, s.accountId);
+                    s.resolution,
+                    s.encoder,
+                    s.retentionCapGb,
+                    s.videoDir,
+                    s.accountId,
+                    s.audioSources);
         }
     }
 
@@ -94,5 +127,6 @@ public class SettingsController {
             Integer retentionCapGb,
             String videoDir,
             Long accountId,
-            Boolean clearAccountId) {}
+            Boolean clearAccountId,
+            List<AudioSource> audioSources) {}
 }

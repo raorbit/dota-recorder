@@ -79,6 +79,25 @@ function toStatus(snapshot: StatusSnapshot): Status {
   };
 }
 
+// One audio source captured into the recording. FROZEN wire shape, serialized
+// identically by the core (Java record, Jackson) and here — field names/order are
+// verbatim. `id` is a stable UUID used as both the React key and the OBS input-name
+// suffix (never null/empty). `kind` selects the WASAPI capture kind. `target` is the
+// OBS itemValue selecting the device/process (a WASAPI device_id or the literal
+// "default" for output/input; an encoded window string like "::dota2.exe" for
+// application); null means "use default". `label` is display-only. `volume` is a
+// 0..100 UI percent (the core maps to an OBS linear multiplier). `muted` mutes it.
+export type AudioSourceKind = 'application' | 'output' | 'input';
+
+export interface AudioSource {
+  readonly id: string;
+  readonly kind: AudioSourceKind;
+  readonly target: string | null;
+  readonly label: string;
+  readonly volume: number;
+  readonly muted: boolean;
+}
+
 // User-editable configuration mirrored from the core's config/SettingsStore.
 // The OBS connection is app-managed and no longer part of this surface; only the
 // recording knobs are exposed. Writes go through PUT /settings as a partial patch
@@ -89,6 +108,9 @@ export interface Settings {
   readonly retentionCapGb: number;
   readonly videoDir: string;
   readonly accountId: number | null;
+  // Always a non-empty array from the core (a fresh install seeds one default-output
+  // source). On PUT it is a FULL-LIST REPLACE: send the complete current array.
+  readonly audioSources: AudioSource[];
 }
 
 // A partial update to Settings. Every field is optional so the renderer can PATCH
@@ -201,6 +223,21 @@ export function fetchStatus(): Promise<StatusSnapshot> {
 
 export function fetchSettings(): Promise<Settings> {
   return getJson<Settings>('/settings');
+}
+
+// One pickable device/process for an audio source's target, as the core's
+// /audio/inputs endpoint serializes it. `value` goes verbatim into
+// AudioSource.target; `label` is the human label for the picker.
+export interface AudioInputOption {
+  readonly value: string;
+  readonly label: string;
+}
+
+// GET /audio/inputs?kind=… — enumerates the selectable targets for an audio source
+// kind. The core returns [] (HTTP 200) when OBS is down or enumeration fails, so the
+// settings UI degrades gracefully rather than erroring.
+export function fetchAudioInputs(kind: AudioSourceKind): Promise<AudioInputOption[]> {
+  return getJson<AudioInputOption[]>(`/audio/inputs?kind=${kind}`);
 }
 
 // Applies a partial settings patch via PUT /settings and returns the updated

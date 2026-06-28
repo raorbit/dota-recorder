@@ -2,13 +2,19 @@ package dev.dotarec.bridge;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.dotarec.bridge.SettingsController.SettingsPatch;
 import dev.dotarec.bridge.SettingsController.SettingsView;
 import dev.dotarec.config.AppPaths;
 import dev.dotarec.config.SettingsStore;
+import dev.dotarec.config.SettingsStore.AudioSource;
+import dev.dotarec.obs.ObsController;
 import java.nio.file.Path;
+import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -31,7 +37,10 @@ class SettingsControllerTest {
         AppPaths paths =
                 new AppPaths(tmp.resolve("data").toString(), tmp.resolve("obs").toString());
         store = new SettingsStore(paths);
-        controller = new SettingsController(store);
+        // OBS not connected in unit tests: reconcileAudioOnDemand is a no-op, so the PUT never 500s.
+        ObsController obsController = mock(ObsController.class);
+        when(obsController.ensureConnected()).thenReturn(false);
+        controller = new SettingsController(store, obsController);
     }
 
     @Test
@@ -46,14 +55,20 @@ class SettingsControllerTest {
         assertThat(json.fieldNames())
                 .toIterable()
                 .containsExactlyInAnyOrder(
-                        "resolution", "encoder", "retentionCapGb", "videoDir", "accountId");
+                        "resolution",
+                        "encoder",
+                        "retentionCapGb",
+                        "videoDir",
+                        "accountId",
+                        "audioSources");
     }
 
     @Test
     void putSettings_roundTripsUserFacingFields() {
         SettingsView updated =
                 controller.putSettings(
-                        new SettingsPatch("1280x720", "x264", 80, "D:/clips", 96828122L, null));
+                        new SettingsPatch(
+                                "1280x720", "x264", 80, "D:/clips", 96828122L, null, null));
 
         assertThat(updated.resolution()).isEqualTo("1280x720");
         assertThat(updated.encoder()).isEqualTo("x264");
@@ -80,7 +95,7 @@ class SettingsControllerTest {
                 });
 
         // PUT an unrelated, user-facing field only.
-        controller.putSettings(new SettingsPatch("1280x720", null, null, null, null, null));
+        controller.putSettings(new SettingsPatch("1280x720", null, null, null, null, null, null));
 
         // Regression: the carry-forward must not wipe the OBS secret/port back to defaults.
         assertThat(store.get().obsPassword).isEqualTo("abc1234567890def");
@@ -94,7 +109,7 @@ class SettingsControllerTest {
 
         // A blanked Account ID field sends clearAccountId=true with no accountId value.
         SettingsView updated =
-                controller.putSettings(new SettingsPatch(null, null, null, null, null, true));
+                controller.putSettings(new SettingsPatch(null, null, null, null, null, true, null));
 
         assertThat(updated.accountId()).isNull();
         assertThat(store.get().accountId).isNull();
@@ -105,8 +120,62 @@ class SettingsControllerTest {
         store.update(s -> { s.accountId = 96828122L; return s; });
 
         // Without the clear flag, a null accountId means "leave unchanged".
-        controller.putSettings(new SettingsPatch("1280x720", null, null, null, null, null));
+        controller.putSettings(new SettingsPatch("1280x720", null, null, null, null, null, null));
 
         assertThat(store.get().accountId).isEqualTo(96828122L);
+    }
+
+    @Test
+    void getSettings_audioSourcesAlwaysNonEmptyOnFreshInstall() {
+        // The fresh-install seed: exactly one Dota application-capture source so a fresh install
+        // records the game's audio out of the box.
+        SettingsView view = controller.getSettings();
+        assertThat(view.audioSources()).hasSize(1);
+        AudioSource seed = view.audioSources().get(0);
+        assertThat(seed.kind()).isEqualTo("application");
+        assertThat(seed.target()).isEqualTo("::dota2.exe");
+        assertThat(seed.volume()).isEqualTo(100);
+        assertThat(seed.muted()).isFalse();
+    }
+
+    @Test
+    void putSettings_audioSources_fullListReplace() {
+        List<AudioSource> sources =
+                List.of(
+                        new AudioSource("id-1", "output", "default", "Desktop", 100, false),
+                        new AudioSource("id-2", "application", "::Discord.exe", "Discord", 80, true));
+
+        SettingsView updated =
+                controller.putSettings(
+                        new SettingsPatch(null, null, null, null, null, null, sources));
+
+        assertThat(updated.audioSources()).hasSize(2);
+        assertThat(store.get().audioSources).hasSize(2);
+        assertThat(store.get().audioSources.get(1).target()).isEqualTo("::Discord.exe");
+        assertThat(store.get().audioSources.get(1).muted()).isTrue();
+    }
+
+    @Test
+    void putSettings_nullAudioSources_leavesListUnchanged() {
+        List<AudioSource> sources =
+                List.of(new AudioSource("id-1", "input", "mic", "Mic", 50, false));
+        controller.putSettings(new SettingsPatch(null, null, null, null, null, null, sources));
+
+        // A later PUT with null audioSources must not touch the stored list.
+        controller.putSettings(new SettingsPatch("1280x720", null, null, null, null, null, null));
+
+        assertThat(store.get().audioSources).hasSize(1);
+        assertThat(store.get().audioSources.get(0).id()).isEqualTo("id-1");
+    }
+
+    @Test
+    void putSettings_emptyAudioSources_clearsList() {
+        // An explicit empty array clears all sources (distinct from null = unchanged).
+        SettingsView updated =
+                controller.putSettings(
+                        new SettingsPatch(null, null, null, null, null, null, List.of()));
+
+        assertThat(updated.audioSources()).isEmpty();
+        assertThat(store.get().audioSources).isEmpty();
     }
 }

@@ -55,6 +55,15 @@ public class SettingsStore {
          * goes dark (the GSI feed only carries a token once a cfg that has one is written).
          */
         public String gsiAuthToken = "";
+        /**
+         * User-managed audio source list captured into every recording. Each source is one OBS WASAPI
+         * input (application/output/input) with a 0–100 volume and a mute toggle. Seeded on
+         * {@link #load} with a single Dota application-capture source so a fresh install records the
+         * game's audio (and nothing else) out of the box; the user adds more sources (e.g. Discord, a
+         * mic) in the UI. The OBS scene configurer reconciles this list into {@code dotarec:<id>}-named
+         * inputs.
+         */
+        public java.util.List<AudioSource> audioSources = new java.util.ArrayList<>();
 
         /** Field-by-field copy (all fields are primitive/immutable) for atomic copy-on-write updates. */
         Settings copy() {
@@ -69,9 +78,23 @@ public class SettingsStore {
             c.accountId = accountId;
             c.opendotaApiKey = opendotaApiKey;
             c.gsiAuthToken = gsiAuthToken;
+            // Deep-copy the list (records are immutable, so element sharing is safe). Omitting this
+            // would silently drop audioSources on every copy-on-write update().
+            c.audioSources = new java.util.ArrayList<>(audioSources);
             return c;
         }
     }
+
+    /**
+     * One audio source captured into the recording. FROZEN wire shape — serialized identically by core
+     * (Jackson) and the renderer (TS). {@code id} is a stable client-or-core-generated UUID used as the
+     * React key AND the {@code dotarec:<id>} OBS input-name suffix; {@code kind} is one of
+     * {@code application|output|input}; {@code target} selects the device/process ({@code "default"} or
+     * a WASAPI device_id / encoded window string, may be null); {@code label} is display-only;
+     * {@code volume} is a 0–100 UI percent; {@code muted} toggles mute.
+     */
+    public record AudioSource(
+            String id, String kind, String target, String label, int volume, boolean muted) {}
 
     private static final String FILE_NAME = "settings.json";
 
@@ -108,6 +131,23 @@ public class SettingsStore {
         // Port 0 means "absent / never set"; restore our managed port rather than bind to 0.
         if (loaded.obsPort <= 0) {
             loaded.obsPort = 4466;
+        }
+        // Fresh install (or a legacy settings.json predating audioSources, which deserializes to
+        // null/empty): seed one Dota application-capture source so a fresh install records the game's
+        // audio (and only the game) out of the box. The window match "::dota2.exe" is the encoded
+        // "title:class:exe" string the scene configurer pairs with priority=2 (match by executable), so
+        // it binds whenever dota2.exe is running. This replaces the old implicit "Desktop Audio" add.
+        if (loaded.audioSources == null || loaded.audioSources.isEmpty()) {
+            loaded.audioSources =
+                    new java.util.ArrayList<>(
+                            java.util.List.of(
+                                    new AudioSource(
+                                            java.util.UUID.randomUUID().toString(),
+                                            "application",
+                                            "::dota2.exe",
+                                            "Dota 2",
+                                            100,
+                                            false)));
         }
         return loaded;
     }

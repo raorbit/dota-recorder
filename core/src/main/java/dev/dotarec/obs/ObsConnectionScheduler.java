@@ -35,6 +35,10 @@ public class ObsConnectionScheduler {
      */
     private boolean wasConnected = false;
 
+    /** Logs a scene-config failure loudly once, then quietly, so a persistent failure is visible but
+     * the 5s retry doesn't spam. Reset after a clean configure so a later regression re-surfaces. */
+    private boolean loggedConfigError = false;
+
     public ObsConnectionScheduler(
             ObsController obsController, ObsSceneConfigurer sceneConfigurer) {
         this.obsController = obsController;
@@ -52,11 +56,19 @@ public class ObsConnectionScheduler {
                 if (controller != null) {
                     sceneConfigurer.ensureSceneReady(controller);
                     log.info("OBS scene configured on connect");
+                    loggedConfigError = false;
                 }
             }
             wasConnected = connected;
         } catch (Exception e) {
-            log.debug("OBS connection/scene attempt failed (will retry): {}", e.toString());
+            // Surface the first failure with its stack (a silently-looping scene config is a real
+            // bug), then drop to debug so the 5s retry doesn't spam.
+            if (!loggedConfigError) {
+                log.warn("OBS scene configuration failed; will keep retrying", e);
+                loggedConfigError = true;
+            } else {
+                log.debug("OBS connection/scene attempt failed (will retry): {}", e.toString());
+            }
             wasConnected = false; // force a re-configure on the next successful connect
         }
     }

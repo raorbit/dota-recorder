@@ -5,9 +5,10 @@ import io.obswebsocket.community.client.OBSCommunicator;
 import io.obswebsocket.community.client.OBSRemoteController;
 import io.obswebsocket.community.client.message.event.outputs.RecordStateChangedEvent;
 import io.obswebsocket.community.client.message.response.general.GetVersionResponse;
+import io.obswebsocket.community.client.message.response.inputs.GetInputListResponse;
 import io.obswebsocket.community.client.message.response.inputs.GetInputMuteResponse;
-import io.obswebsocket.community.client.message.response.inputs.GetSpecialInputsResponse;
 import io.obswebsocket.community.client.message.response.record.StopRecordResponse;
+import io.obswebsocket.community.client.model.Input;
 import io.obswebsocket.community.client.message.response.scenes.GetCurrentProgramSceneResponse;
 import java.time.Instant;
 import java.util.concurrent.CountDownLatch;
@@ -26,8 +27,8 @@ import org.springframework.stereotype.Service;
  * <ul>
  *   <li>{@link #ensureConnected()} -- (re)establish the websocket, perform a v5 handshake, and
  *       report whether OBS is reachable. Never throws on a down OBS; returns {@code false}.</li>
- *   <li>{@link #isReady()} -- connected AND a program scene is active AND a desktop-audio input
- *       exists, so arming a recording against a green GSI card cannot silently capture nothing.</li>
+ *   <li>{@link #isReady()} -- connected AND a program scene is active AND an unmuted app-owned audio
+ *       input exists, so arming a recording against a green GSI card cannot silently capture nothing.</li>
  *   <li>{@link #startRecording()} / {@link #stopRecording()} -- StartRecord/StopRecord, with the
  *       saved file path read from the StopRecord response (the STARTED event's path is null in
  *       v5).</li>
@@ -66,6 +67,7 @@ public class ObsController implements ObsRecorder {
     private final SettingsStore settings;
     private final ObsHealth health;
     private final ObsEvents events;
+    private final ObsSceneConfigurer sceneConfigurer;
 
     /** The live controller; null when never connected or after a clean disconnect. */
     private volatile OBSRemoteController controller;
@@ -85,10 +87,33 @@ public class ObsController implements ObsRecorder {
      */
     private volatile boolean connectionReady;
 
-    public ObsController(SettingsStore settings, ObsHealth health, ObsEvents events) {
+    public ObsController(
+            SettingsStore settings,
+            ObsHealth health,
+            ObsEvents events,
+            ObsSceneConfigurer sceneConfigurer) {
         this.settings = settings;
         this.health = health;
         this.events = events;
+        this.sceneConfigurer = sceneConfigurer;
+    }
+
+    /**
+     * Re-applies the configured audio source list to a live OBS without waiting for a reconnect.
+     * Called by {@code SettingsController} after a settings PUT so an edit takes effect immediately.
+     * Best-effort: a no-op (debug log) when OBS is not connected, since the persisted settings are the
+     * source of truth and the next disconnected->connected edge re-reconciles.
+     */
+    public synchronized void reconcileAudioOnDemand() {
+        if (!health.isConnected()) {
+            log.debug("reconcileAudioOnDemand: OBS not connected; skipping (settings persist anyway)");
+            return;
+        }
+        OBSRemoteController c = this.controller;
+        if (c == null) {
+            return;
+        }
+        sceneConfigurer.reconcileAudioInputs(c);
     }
 
     @Override
@@ -404,17 +429,25 @@ public class ObsController implements ObsRecorder {
     }
 
     /**
-     * True when OBS exposes at least one desktop-audio special input that is not muted. Catches the
-     * silent-VOD failure mode (recording with no audio device). Mic inputs are ignored here -- this
-     * app cares that game/system audio is captured.
+     * True when OBS exposes at least one app-owned ({@code dotarec:}-prefixed) audio input that is not
+     * muted. Catches the silent-VOD failure mode (recording with no live audio source). Any configured
+     * source kind counts — a user who wires up only a mic or only application capture still passes
+     * readiness — which is why this replaces the old GetSpecialInputs desktop1/desktop2 check.
      */
     private boolean hasDesktopAudio(OBSRemoteController c) {
-        GetSpecialInputsResponse special = c.getSpecialInputs(REQUEST_TIMEOUT_MS);
-        if (special == null || !special.isSuccessful()) {
+        GetInputListResponse inputs = c.getInputList(null, REQUEST_TIMEOUT_MS);
+        if (inputs == null || !inputs.isSuccessful() || inputs.getInputs() == null) {
             return false;
         }
-        return isAudioInputLive(c, special.getDesktop1())
-                || isAudioInputLive(c, special.getDesktop2());
+        for (Input input : inputs.getInputs()) {
+            String name = input.getInputName();
+            if (name != null
+                    && name.startsWith(ObsSceneConfigurer.OWNED_PREFIX)
+                    && isAudioInputLive(c, name)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private boolean isAudioInputLive(OBSRemoteController c, String inputName) {
@@ -435,6 +468,15 @@ public class ObsController implements ObsRecorder {
     /** The live controller; only callers that already require an active connection use this. */
     OBSRemoteController controller() {
         return controller;
+    }
+
+    /**
+     * The live controller for out-of-package callers (e.g. the audio-enumeration bridge endpoint) that
+     * have already verified the connection via {@link #ensureConnected()}. Returns null when not
+     * connected so the caller degrades rather than NPEs.
+     */
+    public OBSRemoteController connectedController() {
+        return health.isConnected() ? this.controller : null;
     }
 
     private OBSRemoteController requireController() {

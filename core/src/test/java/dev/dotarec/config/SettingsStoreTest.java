@@ -2,6 +2,7 @@ package dev.dotarec.config;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import dev.dotarec.config.SettingsStore.AudioSource;
 import java.nio.file.Path;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -59,5 +60,47 @@ class SettingsStoreTest {
 
         assertThat(store.get().gsiAuthToken).isEqualTo("keep-me");
         assertThat(store.get().resolution).isEqualTo("2560x1440");
+    }
+
+    @Test
+    void freshStore_seedsExactlyOneDotaApplicationAudioSource(@TempDir Path dir) {
+        SettingsStore store = new SettingsStore(paths(dir));
+
+        assertThat(store.get().audioSources).hasSize(1);
+        AudioSource seed = store.get().audioSources.get(0);
+        assertThat(seed.kind()).isEqualTo("application");
+        assertThat(seed.target()).isEqualTo("::dota2.exe");
+        assertThat(seed.volume()).isEqualTo(100);
+        assertThat(seed.muted()).isFalse();
+        assertThat(seed.id()).isNotBlank();
+    }
+
+    @Test
+    void audioSources_survivesUpdateAndUnrelatedUpdate(@TempDir Path dir) {
+        SettingsStore store = new SettingsStore(paths(dir));
+        store.update(
+                s -> {
+                    s.audioSources =
+                            new java.util.ArrayList<>(
+                                    java.util.List.of(
+                                            new AudioSource("a", "input", "mic", "Mic", 70, true)));
+                    return s;
+                });
+
+        // The copy() must carry the list across an unrelated update (the copy() trap).
+        store.update(
+                s -> {
+                    s.resolution = "1280x720";
+                    return s;
+                });
+
+        assertThat(store.get().audioSources).hasSize(1);
+        assertThat(store.get().audioSources.get(0).id()).isEqualTo("a");
+        assertThat(store.get().audioSources.get(0).muted()).isTrue();
+
+        // And it round-trips through settings.json.
+        SettingsStore reloaded = new SettingsStore(paths(dir));
+        assertThat(reloaded.get().audioSources).hasSize(1);
+        assertThat(reloaded.get().audioSources.get(0).target()).isEqualTo("mic");
     }
 }
