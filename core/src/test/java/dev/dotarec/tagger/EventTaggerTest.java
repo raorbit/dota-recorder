@@ -95,6 +95,18 @@ class EventTaggerTest {
     }
 
     @Test
+    void playerBlockVanishesThenReturnsNonZero_isNotPhantomMarkers() {
+        // The player block drops on a heartbeat / reconnect (counters default to 0), then returns
+        // with the real running totals. Without the player-presence gate this pair would emit a
+        // burst of phantom markers (8 kills + 5 deaths); the gate must suppress them entirely.
+        GsiFrame absent = frame().wall(ANCHOR + 40_000L).noPlayer().build();
+        GsiFrame back =
+                frame().wall(ANCHOR + 40_100L).playerPresent(true).kills(8).deaths(5).assists(3).build();
+
+        assertThat(tagger.diff(absent, back, ANCHOR, DURATION)).isEmpty();
+    }
+
+    @Test
     void videoOffsetIsWallDeltaFromAnchor_notGameClock() {
         // Event lands 42.5s of wall time after the confirmed start. game_clock is deliberately a
         // wildly different value to prove it is NOT the offset source.

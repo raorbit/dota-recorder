@@ -15,7 +15,9 @@ import com.fasterxml.jackson.annotation.JsonProperty;
  *   <li>{@code map.clock_time} is an int that can be negative pre-horn; carried through verbatim.</li>
  *   <li>The {@code player} and {@code hero} blocks are ABSENT on HERO_SELECTION and on heartbeat
  *       pings, so every access below null-guards. {@link #toFrame(long)} treats a missing
- *       {@code game_state} as {@code "UNKNOWN"} so the FSM no-ops rather than NPEs.</li>
+ *       {@code game_state} as {@code "UNKNOWN"} so the FSM no-ops rather than NPEs, and records
+ *       {@code playerPresent}/{@code heroPresent} from the block presence so the tagger can suppress
+ *       phantom counter deltas across a dropped-then-returned player block.</li>
  *   <li>The {@code previously} diff block is intentionally NOT modeled -- the tagger diffs whole
  *       {@link GsiFrame}s itself.</li>
  * </ul>
@@ -65,6 +67,7 @@ public class GsiPayload {
         String heroName = hero != null ? hero.name : null;
         int heroId = hero != null ? hero.id : 0;
 
+        boolean playerPresent = player != null;
         int kills = player != null ? player.kills : 0;
         int deaths = player != null ? player.deaths : 0;
         int assists = player != null ? player.assists : 0;
@@ -77,6 +80,7 @@ public class GsiPayload {
                 paused,
                 heroPresent,
                 alive,
+                playerPresent,
                 matchId,
                 heroName,
                 heroId,
