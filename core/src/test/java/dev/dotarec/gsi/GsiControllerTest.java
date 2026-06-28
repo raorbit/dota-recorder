@@ -107,6 +107,10 @@ class GsiControllerTest {
                 .andExpect(status().isOk());
 
         verify(fsm).onFrame(org.mockito.ArgumentMatchers.any());
+        // An authorized frame credits the watchdog's liveness clock.
+        assertThat(heartbeat.lastAuthorizedFrameAgoMillis())
+                .as("an authorized frame marks the watchdog heartbeat")
+                .isLessThan(5_000L);
     }
 
     @Test
@@ -121,8 +125,13 @@ class GsiControllerTest {
 
         // Heartbeat is marked before the auth check, so a spoofed frame still shows GSI "alive"...
         assertThat(heartbeat.isAlive()).isTrue();
-        // ...but it must never reach the FSM (cannot trigger/stop a recording).
+        // ...but it must never reach the FSM (cannot trigger/stop a recording)...
         verify(fsm, never()).onFrame(org.mockito.ArgumentMatchers.any());
+        // ...and crucially it must NOT credit the watchdog's authorized-frame clock, or a flood of
+        // spoofed posts could suppress force-finalization during a real GSI silence.
+        assertThat(heartbeat.lastAuthorizedFrameAgoMillis())
+                .as("a dropped frame must not mark the watchdog heartbeat")
+                .isEqualTo(Long.MAX_VALUE);
     }
 
     @Test
