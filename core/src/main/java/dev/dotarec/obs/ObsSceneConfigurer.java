@@ -15,8 +15,10 @@ import io.obswebsocket.community.client.message.response.scenes.GetSceneListResp
 import io.obswebsocket.community.client.message.response.scenes.SetCurrentProgramSceneResponse;
 import io.obswebsocket.community.client.model.Input;
 import io.obswebsocket.community.client.model.Scene;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -162,7 +164,9 @@ public class ObsSceneConfigurer {
             log.warn("Failed to fetch input list; skipping audio reconcile");
             return;
         }
-        Set<String> existingOwned = ownedInputNames(inputs.getInputs());
+        // name -> current OBS input kind, so a source whose KIND changed (same id) is recreated rather
+        // than have settings overlaid onto an input of the wrong kind (an OBS input's kind is immutable).
+        Map<String, String> existingOwned = ownedInputKinds(inputs.getInputs());
 
         for (AudioSource s : desired) {
             String name = ownedInputName(s);
@@ -171,7 +175,19 @@ public class ObsSceneConfigurer {
                 log.warn("Audio source '{}' has unknown kind '{}'; skipping", name, s.kind());
                 continue;
             }
-            if (!existingOwned.contains(name)) {
+            boolean exists = existingOwned.containsKey(name);
+            if (exists && !obsKind.equals(existingOwned.get(name))) {
+                // Kind changed (e.g. application -> output). Remove the stale-kind input and fall
+                // through to recreate it with the new kind below.
+                RemoveInputResponse changed = controller.removeInput(name, REQUEST_TIMEOUT_MS);
+                if (changed == null || !changed.isSuccessful()) {
+                    log.warn("Failed to remove audio input '{}' to change its kind; continuing", name);
+                } else {
+                    log.info("Recreating audio input '{}' for kind change -> {}", name, obsKind);
+                }
+                exists = false;
+            }
+            if (!exists) {
                 CreateInputResponse created =
                         controller.createInput(
                                 SCENE_NAME,
@@ -208,7 +224,7 @@ public class ObsSceneConfigurer {
         }
 
         // Remove our orphans: dotarec: inputs whose id is no longer in the desired list.
-        for (String orphan : inputsToRemove(desired, existingOwned)) {
+        for (String orphan : inputsToRemove(desired, existingOwned.keySet())) {
             RemoveInputResponse removed = controller.removeInput(orphan, REQUEST_TIMEOUT_MS);
             if (removed == null || !removed.isSuccessful()) {
                 log.warn("Failed to remove orphaned audio input '{}'; continuing", orphan);
@@ -295,6 +311,21 @@ public class ObsSceneConfigurer {
             String name = i.getInputName();
             if (name != null && name.startsWith(OWNED_PREFIX)) {
                 owned.add(name);
+            }
+        }
+        return owned;
+    }
+
+    /** Map of {@code dotarec:}-prefixed input name -> its current OBS input kind (null-safe). */
+    static Map<String, String> ownedInputKinds(List<Input> inputs) {
+        Map<String, String> owned = new LinkedHashMap<>();
+        if (inputs == null) {
+            return owned;
+        }
+        for (Input i : inputs) {
+            String name = i.getInputName();
+            if (name != null && name.startsWith(OWNED_PREFIX)) {
+                owned.put(name, i.getInputKind());
             }
         }
         return owned;
