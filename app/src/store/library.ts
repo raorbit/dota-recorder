@@ -14,6 +14,7 @@ import {
   fetchMatches,
   fetchBucketCounts,
   fetchStatus,
+  setStarred,
   StatusSocket,
   type MatchSummary,
   type BucketCounts,
@@ -58,6 +59,7 @@ export interface LibraryState {
   readonly setDateFilter: (date: string | null) => void;
   readonly selectMatch: (id: number | null) => void;
   readonly setStatus: (status: Status | null) => void;
+  readonly toggleStar: (id: number, starred: boolean) => Promise<void>;
   readonly load: () => Promise<void>;
 }
 
@@ -85,6 +87,20 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   setDateFilter: (dateFilter) => set({ dateFilter }),
   selectMatch: (selectedMatchId) => set({ selectedMatchId }),
   setStatus: (status) => set({ status }),
+
+  // Star/unstar a match: flip it locally for instant feedback, then persist via
+  // PATCH /matches/{id}. Starred recordings are exempt from the retention sweep, so
+  // this is the lever that copy promises ("oldest unstarred removed first"). Reverts
+  // the optimistic change if the write fails.
+  toggleStar: async (id, starred) => {
+    const prev = get().matches;
+    set({ matches: prev.map((m) => (m.id === id ? { ...m, starred } : m)) });
+    try {
+      await setStarred(id, starred);
+    } catch {
+      set({ matches: prev });
+    }
+  },
 
   load: async () => {
     const token = ++loadToken;

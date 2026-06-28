@@ -43,21 +43,45 @@ interface RowProps {
   readonly match: MatchSummary;
   readonly selected: boolean;
   readonly onSelect: (id: number) => void;
+  readonly onToggleStar: (id: number, starred: boolean) => void;
 }
 
-function MatchRow({ match, selected, onSelect }: RowProps): React.JSX.Element {
+function MatchRow({ match, selected, onSelect, onToggleStar }: RowProps): React.JSX.Element {
   const hasResult = match.result === 'win' || match.result === 'loss';
   const hasKda =
     match.kills !== null && match.deaths !== null && match.assists !== null;
 
+  // The row is a clickable div (not a <button>) so it can hold the real star <button>
+  // without nesting interactive elements; Enter/Space still selects for keyboard users.
   return (
-    <button
-      type="button"
+    <div
       className="mt-row"
       data-selected={selected ? 'true' : 'false'}
+      role="button"
+      tabIndex={0}
       onClick={() => onSelect(match.id)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onSelect(match.id);
+        }
+      }}
     >
       <div className="mt-cell mt-hero">
+        <button
+          type="button"
+          className="mt-star"
+          data-on={match.starred ? 'true' : 'false'}
+          aria-pressed={match.starred}
+          aria-label={match.starred ? 'Unstar recording' : 'Star recording to keep it'}
+          title={match.starred ? 'Starred — kept from auto-delete' : 'Star to keep from auto-delete'}
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleStar(match.id, !match.starred);
+          }}
+        >
+          {match.starred ? '★' : '☆'}
+        </button>
         <span className="mt-hero-chip" aria-hidden="true" />
         <span className="mt-hero-name">{match.hero || 'Unknown hero'}</span>
       </div>
@@ -75,7 +99,7 @@ function MatchRow({ match, selected, onSelect }: RowProps): React.JSX.Element {
       <div className="mt-cell mt-mono">{match.mmrDelta ?? EMDASH}</div>
 
       <div className="mt-cell mt-date">{formatPlayedAt(match.playedAt)}</div>
-    </button>
+    </div>
   );
 }
 
@@ -90,6 +114,7 @@ export function MatchTable(): React.JSX.Element {
   const loadState = useLibraryStore((s) => s.loadState);
   const selectedMatchId = useLibraryStore((s) => s.selectedMatchId);
   const selectMatch = useLibraryStore((s) => s.selectMatch);
+  const toggleStar = useLibraryStore((s) => s.toggleStar);
 
   const visible = useMemo(
     () =>
@@ -143,6 +168,7 @@ export function MatchTable(): React.JSX.Element {
               match={m}
               selected={m.id === selectedMatchId}
               onSelect={selectMatch}
+              onToggleStar={(id, starred) => void toggleStar(id, starred)}
             />
           ))}
       </div>
