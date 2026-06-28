@@ -2,6 +2,7 @@ import type { StatusSnapshot } from '../../api/client';
 import type { SettingsTab } from '../../components/Sidebar';
 import { RecordingSettings } from './RecordingSettings';
 import { GsiSettings } from './GsiSettings';
+import { GeneralSettings } from './GeneralSettings';
 import './settings-view.css';
 
 interface SettingsViewProps {
@@ -19,6 +20,7 @@ export function SettingsView({ tab, snapshot }: SettingsViewProps): React.JSX.El
     <div className="settings-view">
       {tab === 'recording' && <RecordingSettings obs={snapshot?.obs ?? null} />}
       {tab === 'gsi' && <GsiSettings gsi={snapshot?.gsi ?? null} />}
+      {tab === 'general' && <GeneralSettings />}
     </div>
   );
 }
