@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { MatchSummary, Marker, PauseSpan } from '../api/client';
-import { fetchMarkers, fetchMatch, fetchPauses, fetchVideo } from '../api/client';
+import { fetchMarkers, fetchMatch, fetchPauses, videoStreamUrl } from '../api/client';
 import { bucketLabelOf } from '../store/buckets';
 import './video-player.css';
 
@@ -64,10 +64,13 @@ export function VideoPlayer({ match }: VideoPlayerProps): React.JSX.Element {
 
   const matchId = match?.id ?? null;
 
-  // Self-contained per-selection fetch: markers + detail (for durationS) + video
-  // (file:// url) in parallel via allSettled, so a 404 on /video (pruned/seeded,
-  // no file) still lets markers + duration render. Reset on matchId change /
-  // null; a `cancelled` guard drops late responses for a superseded selection so
+  // Self-contained per-selection fetch: markers + detail (for durationS + video
+  // availability) + pauses in parallel via allSettled. Video availability comes
+  // from the detail's `videoPath` — non-null/non-blank means the file exists, so
+  // videoUrl points at the authed range-streaming endpoint; null/blank (pruned by
+  // retention / seeded no-file) leaves videoUrl null and the placeholder renders.
+  // No separate /video round-trip needed. Reset on matchId change / null; a
+  // `cancelled` guard drops late responses for a superseded selection so
   // out-of-order resolves can't overwrite the current match's state.
   useEffect(() => {
     setMarkers([]);
@@ -82,23 +85,22 @@ export function VideoPlayer({ match }: VideoPlayerProps): React.JSX.Element {
     let cancelled = false;
     const id = matchId;
 
-    void Promise.allSettled([
-      fetchMarkers(id),
-      fetchMatch(id),
-      fetchVideo(id),
-      fetchPauses(id),
-    ]).then(([markersRes, detailRes, videoRes, pausesRes]) => {
-      if (cancelled) return; // a newer selection (or unmount) superseded this fetch
-      if (markersRes.status === 'fulfilled') setMarkers(markersRes.value);
-      if (detailRes.status === 'fulfilled') {
-        setDurationS(detailRes.value.durationS);
-        setRecordStartWall(detailRes.value.recordStartedWallMs);
-      }
-      // 404 (no file) just leaves videoUrl null — markers/duration still render.
-      if (videoRes.status === 'fulfilled') setVideoUrl(videoRes.value.url);
-      // A failed /pauses (none, or seeded) just leaves the span list empty.
-      if (pausesRes.status === 'fulfilled') setPauses(pausesRes.value);
-    });
+    void Promise.allSettled([fetchMarkers(id), fetchMatch(id), fetchPauses(id)]).then(
+      ([markersRes, detailRes, pausesRes]) => {
+        if (cancelled) return; // a newer selection (or unmount) superseded this fetch
+        if (markersRes.status === 'fulfilled') setMarkers(markersRes.value);
+        if (detailRes.status === 'fulfilled') {
+          setDurationS(detailRes.value.durationS);
+          setRecordStartWall(detailRes.value.recordStartedWallMs);
+          // Only point at the stream when a file actually exists. A blank/null
+          // videoPath (pruned/seeded) leaves videoUrl null -> placeholder shows.
+          const path = detailRes.value.videoPath;
+          if (path != null && path.trim() !== '') setVideoUrl(videoStreamUrl(id));
+        }
+        // A failed /pauses (none, or seeded) just leaves the span list empty.
+        if (pausesRes.status === 'fulfilled') setPauses(pausesRes.value);
+      },
+    );
 
     return () => {
       cancelled = true;
@@ -156,10 +158,11 @@ export function VideoPlayer({ match }: VideoPlayerProps): React.JSX.Element {
     <div className="vp-stage">
       <div className="vp-hatch" aria-hidden="true" />
 
-      {/* Real VOD behind the chrome. file:// works in this Electron renderer; if a
-          CSP/origin change later blocks it, add an HTTP-range endpoint core-side
-          and point videoUrl at that stream url — no change needed below.
-          src omitted when videoUrl is null (not fetched, 404, or seeded no-file):
+      {/* Real VOD behind the chrome. videoUrl points at the authed loopback range
+          stream (GET /matches/{id}/video/stream) — a plain http(s) media load that
+          Chromium can seek; the bridge token rides the ?token= query param since a
+          <video> element can't set the X-Dotarec-Token header.
+          src omitted when videoUrl is null (not fetched, or seeded/pruned no-file):
           an empty media element over which markers + scrubber still render. */}
       <video
         ref={videoRef}

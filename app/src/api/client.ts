@@ -27,6 +27,18 @@ function wsUrl(): string {
   return token ? `${base}?token=${encodeURIComponent(token)}` : base;
 }
 
+// URL the renderer drops straight into <video src> for playback + seeking.
+// Points at the authed loopback streaming endpoint (GET /matches/{id}/video/stream),
+// which serves the VOD bytes with HTTP Range support. A <video> element can't send
+// the X-Dotarec-Token header, so — exactly like wsUrl() — the token rides the query
+// string (BridgeAuthFilter accepts ?token= on any gated path). Absent outside
+// Electron (browser dev), where the core runs auth-disabled.
+export function videoStreamUrl(id: number): string {
+  const base = `${bridgeBase()}/matches/${id}/video/stream`;
+  const token = window.dotarec?.bridgeToken;
+  return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+}
+
 export interface Health {
   readonly status: 'ok' | string;
   readonly version: string;
@@ -360,14 +372,6 @@ export interface PauseSpan {
   readonly endWall: number | null;
 }
 
-// GET /matches/{id}/video — absolute path + a file:// URL. 404s (throws) when the
-// row is unknown or its video was pruned by retention.
-export interface VideoLocation {
-  readonly matchId: number;
-  readonly path: string;
-  readonly url: string;
-}
-
 // GET /buckets/counts — one count per library bucket. Always all seven keys.
 export interface BucketCounts {
   readonly ranked: number;
@@ -385,14 +389,6 @@ export function fetchMatch(id: number): Promise<MatchDetail> {
 
 export function fetchMarkers(id: number): Promise<Marker[]> {
   return getJson<Marker[]>(`/matches/${id}/markers`);
-}
-
-// GET /matches/{id}/video — resolves the recorded file as { path, url } where
-// `url` is a file:// URI the renderer can drop straight into <video src>. Throws
-// (404) when the row has no video_path or retention pruned the file; callers wrap
-// it in Promise.allSettled so markers/duration still render without a file.
-export function fetchVideo(id: number): Promise<VideoLocation> {
-  return getJson<VideoLocation>(`/matches/${id}/video`);
 }
 
 export function fetchPauses(id: number): Promise<PauseSpan[]> {
