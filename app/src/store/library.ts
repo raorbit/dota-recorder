@@ -92,15 +92,16 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
 
   // Star/unstar a match: flip it locally for instant feedback, then persist via
   // PATCH /matches/{id}. Starred recordings are exempt from the retention sweep, so
-  // this is the lever that copy promises ("oldest unstarred removed first"). Reverts
-  // the optimistic change if the write fails.
+  // this is the lever that copy promises ("oldest unstarred removed first"). Both the
+  // optimistic flip and the on-failure revert are functional per-row updates (not a
+  // whole-array snapshot) so a list reload landing during the in-flight PATCH — a
+  // coalesced match.* event fires load() every ~200ms — isn't clobbered on revert.
   toggleStar: async (id, starred) => {
-    const prev = get().matches;
-    set({ matches: prev.map((m) => (m.id === id ? { ...m, starred } : m)) });
+    set((s) => ({ matches: s.matches.map((m) => (m.id === id ? { ...m, starred } : m)) }));
     try {
       await setStarred(id, starred);
     } catch {
-      set({ matches: prev });
+      set((s) => ({ matches: s.matches.map((m) => (m.id === id ? { ...m, starred: !starred } : m)) }));
     }
   },
 

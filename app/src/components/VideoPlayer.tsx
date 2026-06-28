@@ -96,6 +96,7 @@ export function VideoPlayer({ match }: VideoPlayerProps): React.JSX.Element {
     setDurationS(null);
     setVideoUrl(null);
     setProgress(0);
+    setCurrentTimeS(0); // else the readout shows the previous match's position for a video-less row
     setConfirmDelete(false);
     setDeleting(false);
 
