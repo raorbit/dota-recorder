@@ -6,6 +6,7 @@ import dev.dotarec.config.SettingsStore;
 import dev.dotarec.data.MarkerRepository;
 import dev.dotarec.data.MatchRepository;
 import dev.dotarec.data.MatchRepository.NewMatch;
+import dev.dotarec.data.MatchSummary;
 import dev.dotarec.data.PauseRepository;
 import dev.dotarec.data.RecordingSessionRepository;
 import dev.dotarec.data.RecordingSessionRepository.RecordingEventRow;
@@ -18,7 +19,9 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Optional;
 import java.util.Set;
+import java.util.function.Consumer;
 import java.util.stream.Stream;
 import javax.sql.DataSource;
 import org.slf4j.Logger;
@@ -252,28 +255,143 @@ public class CrashRecoveryRunner implements ApplicationRunner {
     }
 
     private void reconcileOrphanVods() {
-        // Scan the active drive AND every configured archive drive: a VOD stranded on an archive drive
-        // by an interrupted cross-store move (copied there but the row never repointed) would otherwise
-        // be invisible to the active-drive-only scan and lost forever. Reclaiming it here re-imports it
-        // as a video-only row.
         Set<String> referenced = referencedVideoPaths();
-        for (Path dir : scanDirs()) {
-            // Per-dir guard + try/catch: a missing/unplugged archive drive (or a bad path) must never
-            // abort startup, and one bad drive must not stop the others from being scanned.
-            try {
-                if (dir == null || !Files.isDirectory(dir)) {
-                    continue;
-                }
-                try (Stream<Path> stream = Files.list(dir)) {
-                    stream.filter(Files::isRegularFile)
-                            .filter(this::isRecordingFile)
-                            .filter(path -> !referenced.contains(normalize(path)))
-                            .forEach(this::importOrphanVod);
-                }
-            } catch (Exception e) {
-                // Best-effort: a bad path or IO error here must never abort startup.
-                log.warn("Could not reconcile orphan recordings under {}: {}", dir, e.toString());
+        // Active drive: an unreferenced recording here is a crash that lost its journaled path; adopt it
+        // as a standalone gsi_only row (its OBS name carries no match id to tie it back to).
+        scanOrphans(videoDir(), referenced, this::importOrphanVod);
+        // Archive drives: an unreferenced recording here is the residue of an interrupted cross-store
+        // move (copied across, but the row's repoint or the source delete didn't finish before a crash).
+        // The destination name is {@code <matchId>-...}, so we recover the ORIGINAL row rather than
+        // splitting off a duplicate — re-link it if the row lost its file, else drop the redundant copy.
+        for (Path dir : archiveDirs()) {
+            scanOrphans(dir, referenced, this::recoverArchiveLeftover);
+        }
+    }
+
+    /**
+     * Walks {@code dir} for unreferenced recording files and hands each to {@code handler}. The whole
+     * walk is guarded: a missing/unplugged drive or a bad path must never abort startup, and one bad
+     * drive must not stop the others from being scanned.
+     */
+    private void scanOrphans(Path dir, Set<String> referenced, Consumer<Path> handler) {
+        try {
+            if (dir == null || !Files.isDirectory(dir)) {
+                return;
             }
+            try (Stream<Path> stream = Files.list(dir)) {
+                stream.filter(Files::isRegularFile)
+                        .filter(this::isRecordingFile)
+                        .filter(path -> !referenced.contains(normalize(path)))
+                        .forEach(handler);
+            }
+        } catch (Exception e) {
+            // Best-effort: a bad path or IO error here must never abort startup.
+            log.warn("Could not reconcile orphan recordings under {}: {}", dir, e.toString());
+        }
+    }
+
+    /**
+     * Recovers an unreferenced recording found on an ARCHIVE drive — the residue of a cross-store move
+     * a crash interrupted. The archiver names destinations {@code <matchId>-<original>}, so the leading
+     * id ties the file back to its match:
+     *
+     * <ul>
+     *   <li>if that match lost its file (the move repoint never committed, e.g. an atomic rename
+     *       consumed the source before the crash), RE-LINK the row to this recovered copy instead of
+     *       importing a detached duplicate;</li>
+     *   <li>if the match is already intact (its row still points at a file that exists), this is a
+     *       redundant leftover/partial copy from the move — DELETE it to reclaim the space;</li>
+     *   <li>if there is no id prefix or no such match (the row was deleted), fall back to importing it
+     *       as a standalone gsi_only row, exactly as the active-drive scan does.</li>
+     * </ul>
+     */
+    private void recoverArchiveLeftover(Path file) {
+        try {
+            Long matchId = leadingMatchId(file.getFileName().toString());
+            if (matchId != null) {
+                Optional<MatchSummary> row = matches.findById(matchId);
+                if (row.isPresent()) {
+                    if (videoFileMissing(row.get())) {
+                        String thumb =
+                                recoverArchivedThumb(file.getParent(), matchId, row.get().thumbPath());
+                        matches.updateVideoPath(matchId, file.toString(), thumb);
+                        log.warn("Re-linked stranded archive recording {} to match {} (interrupted move)",
+                                file, matchId);
+                    } else {
+                        deleteQuietly(file);
+                        log.warn("Removed redundant archive move-leftover {} (match {} already intact)",
+                                file, matchId);
+                    }
+                    return;
+                }
+            }
+            importOrphanVod(file);
+        } catch (Exception e) {
+            // One bad leftover must not abort the rest of the scan.
+            log.warn("Could not recover archive leftover {}: {}", file, e.toString());
+        }
+    }
+
+    /**
+     * Parses the {@code <matchId>-...} prefix the archiver stamps onto relocated files, or null when the
+     * name doesn't start with digits followed by a {@code -} and a non-empty remainder. Only called for
+     * files under archive dirs (where the archiver always prefixes), so active-drive OBS names like
+     * {@code 2026-06-28 14-30-15.mp4} are never run through it and the leading-year can't misfire.
+     */
+    private static Long leadingMatchId(String fileName) {
+        int dash = fileName.indexOf('-');
+        if (dash <= 0 || dash == fileName.length() - 1) {
+            return null;
+        }
+        for (int i = 0; i < dash; i++) {
+            if (!Character.isDigit(fileName.charAt(i))) {
+                return null;
+            }
+        }
+        try {
+            return Long.parseLong(fileName.substring(0, dash));
+        } catch (NumberFormatException e) {
+            return null; // far longer than any real surrogate id -> not one of ours
+        }
+    }
+
+    /** True when a row's current video file is absent (null/blank path, or the file no longer exists). */
+    private boolean videoFileMissing(MatchSummary row) {
+        Path p = safePath(row.videoPath());
+        return p == null || !Files.exists(p);
+    }
+
+    /**
+     * Finds the archived thumbnail paired with a recovered video — the archiver writes it to
+     * {@code <dir>/thumbs/<matchId>-<original>}. Returns {@code fallback} (the row's existing thumb) when
+     * none is found, so a re-link never blanks a thumbnail it couldn't improve on.
+     */
+    private String recoverArchivedThumb(Path archiveDir, long matchId, String fallback) {
+        if (archiveDir == null) {
+            return fallback;
+        }
+        Path thumbDir = archiveDir.resolve("thumbs");
+        if (!Files.isDirectory(thumbDir)) {
+            return fallback;
+        }
+        String prefix = matchId + "-";
+        try (Stream<Path> stream = Files.list(thumbDir)) {
+            return stream.filter(Files::isRegularFile)
+                    .filter(p -> p.getFileName().toString().startsWith(prefix))
+                    .findFirst()
+                    .map(Path::toString)
+                    .orElse(fallback);
+        } catch (Exception e) {
+            return fallback;
+        }
+    }
+
+    /** Deletes a leftover file, swallowing/logging IO failures so recovery never aborts on one. */
+    private void deleteQuietly(Path file) {
+        try {
+            Files.deleteIfExists(file);
+        } catch (Exception e) {
+            log.warn("Could not delete archive move-leftover {}: {}", file, e.toString());
         }
     }
 
@@ -295,15 +413,13 @@ public class CrashRecoveryRunner implements ApplicationRunner {
     }
 
     /**
-     * The directories the orphan scan walks: the active recording drive ({@code videoDir}) first, then
-     * each configured archive drive ({@code storageLocations[].path}). Blank entries are skipped and
-     * unparseable ones map to null (the caller guards each remaining dir with an {@code isDirectory}
-     * check, so nulls/missing drives are tolerated). No dedup is needed — a dir appearing twice only
-     * re-checks the same already-referenced files harmlessly.
+     * The configured archive directories ({@code storageLocations[].path}). Blank entries are skipped
+     * and unparseable ones map to null (the caller guards each with an {@code isDirectory} check, so
+     * nulls/missing drives are tolerated). The active recording drive is scanned separately — it gets
+     * the plain-import treatment, archive drives get id-prefix recovery.
      */
-    private List<Path> scanDirs() {
+    private List<Path> archiveDirs() {
         List<Path> dirs = new ArrayList<>();
-        dirs.add(videoDir());
         List<SettingsStore.StorageLocation> archives = settings.get().storageLocations;
         if (archives != null) {
             for (SettingsStore.StorageLocation loc : archives) {
