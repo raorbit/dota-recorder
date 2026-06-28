@@ -63,13 +63,13 @@ const QUALITY_PRESETS: ReadonlyArray<{ readonly value: string; readonly label: s
   { value: 'Lossless', label: 'Lossless (huge files)' },
 ];
 
-// OBS RecFormat2 containers. The crash-safe subset only — plain `mp4` is intentionally
-// omitted (unfinalized-file corruption risk on crash). Out-of-list stored value preserved.
+// OBS RecFormat2 containers. Restricted to the MP4 variants the in-app Chromium <video> can decode
+// for jump-to-moment playback: mkv/mov record fine but won't preview in-app (no Matroska demuxer,
+// flaky MOV), which silently breaks the headline feature. Both options here are crash-safe; plain
+// `mp4` is omitted (unfinalized-file corruption risk on crash). Out-of-list stored value preserved.
 const FORMAT_PRESETS: ReadonlyArray<{ readonly value: string; readonly label: string }> = [
   { value: 'hybrid_mp4', label: 'MP4 (hybrid)' },
   { value: 'fragmented_mp4', label: 'MP4 (fragmented)' },
-  { value: 'mkv', label: 'MKV' },
-  { value: 'mov', label: 'MOV' },
 ];
 
 const RETENTION_MIN = 10;
@@ -192,13 +192,20 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
   // Each tick degrades to {dataUri:null} on failure → the UI shows the placeholder.
   useEffect(() => {
     let cancelled = false;
+    // Skip a tick while the previous fetch is still in flight, so a slow/contended OBS screenshot
+    // (up to the 5s fetch timeout) can't stack overlapping requests on the fixed 1s interval.
+    let inFlight = false;
 
     const tick = async (): Promise<void> => {
+      if (inFlight) return;
+      inFlight = true;
       try {
         const next = await fetchScenePreview();
         if (!cancelled) setPreview(next);
       } catch {
         if (!cancelled) setPreview({ dataUri: null });
+      } finally {
+        inFlight = false;
       }
     };
 
