@@ -42,16 +42,13 @@ import java.util.Locale;
  *   <li>{@code GET /matches/{id}} -- one match, or 404.</li>
  *   <li>{@code GET /matches/{id}/markers} -- the seekable timeline, ordered by video offset.</li>
  *   <li>{@code GET /matches/{id}/pauses} -- pause spans, chronological.</li>
- *   <li>{@code GET /matches/{id}/video} -- a {@code file://} URL + absolute path to the .mp4, or 404
- *       when the row is missing or its video was pruned ({@code video_path} null). Retained for
- *       back-compat; the player now streams the bytes via {@code /video/stream} (below).</li>
  *   <li>{@code GET /matches/{id}/video/stream} -- the recorded VOD bytes over the authed loopback
  *       bridge so a renderer {@code <video>} element can play + seek without a cross-origin
  *       {@code file://} load. Honors HTTP {@code Range}: a {@code Range} header yields 206 Partial
  *       Content with a {@code Content-Range} (Chromium's seek path), an absent header yields 200
  *       with {@code Accept-Ranges: bytes} and the full body, an unsatisfiable range yields 416.
- *       404 with the same reasons as {@code /video} (row missing / {@code video_path} null / file
- *       gone from disk). A {@code <video src>} can't set the {@code X-Dotarec-Token} header, so the
+ *       404 when the row is missing, its {@code video_path} is null (pruned/never recorded), or the
+ *       file is gone from disk. A {@code <video src>} can't set the {@code X-Dotarec-Token} header, so the
  *       renderer passes the bridge token on the {@code ?token=} query param -- {@code BridgeAuthFilter}
  *       already accepts the token there for every gated path (same as the WS handshake).</li>
  *   <li>{@code PATCH /matches/{id}} {@code { starred }} -- toggles the star, returns the updated row.</li>
@@ -103,27 +100,11 @@ public class MatchController {
         return pauses.findByMatchId(id);
     }
 
-    /**
-     * Resolves the playable video for a match. 404 (with a reason) when the match is unknown or its
-     * video has been pruned by retention ({@code video_path} null) -- the player shows a
-     * "recording removed" state rather than a broken video element.
-     */
-    @GetMapping("/matches/{id}/video")
-    public VideoLocation video(@PathVariable long id) {
-        MatchSummary m = matches.findById(id)
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "No match " + id));
-        String path = m.videoPath();
-        if (path == null || path.isBlank()) {
-            throw new ResponseStatusException(HttpStatus.NOT_FOUND,
-                    "Video for match " + id + " is unavailable (pruned by retention or never recorded)");
-        }
-        return new VideoLocation(id, path, new File(path).toURI().toString());
-    }
 
     /**
      * Streams the recorded VOD bytes for a match with HTTP Range support so a renderer
      * {@code <video>} element can play and seek over the authed loopback bridge (no cross-origin
-     * {@code file://} load). 404 (same reasons as {@link #video}) when the match is unknown, its
+     * {@code file://} load). 404 when the match is unknown, its
      * {@code video_path} is null/blank (pruned by retention / never recorded), or the file is gone
      * from disk. A {@code Range} header yields 206 + {@code Content-Range}; its absence yields 200 +
      * {@code Accept-Ranges: bytes}; an unsatisfiable range yields 416. The body is streamed in 64KB
@@ -245,9 +226,6 @@ public class MatchController {
     private static boolean isBlank(String s) {
         return s == null || s.isBlank();
     }
-
-    /** {@code GET /matches/{id}/video} response: the absolute path plus a {@code file://} URL. */
-    public record VideoLocation(long matchId, String path, String url) {}
 
     /** {@code PATCH /matches/{id}} body. Only {@code starred} is supported for now; null = no change. */
     public record MatchPatch(Boolean starred) {}
