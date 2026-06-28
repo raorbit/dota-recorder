@@ -82,8 +82,13 @@ public class SettingsStore {
          * game's audio (and nothing else) out of the box; the user adds more sources (e.g. Discord, a
          * mic) in the UI. The OBS scene configurer reconciles this list into {@code dotarec:<id>}-named
          * inputs.
+         *
+         * <p>Defaults to {@code null} (NOT an empty list) on purpose: load() seeds the Dota default
+         * ONLY when the field is null (a fresh install or a legacy settings.json predating the field),
+         * so an explicit empty list the user saved by clearing every source is durable and is NOT
+         * re-seeded on the next launch.
          */
-        public java.util.List<AudioSource> audioSources = new java.util.ArrayList<>();
+        public java.util.List<AudioSource> audioSources;
 
         /** Field-by-field copy (all fields are primitive/immutable) for atomic copy-on-write updates. */
         Settings copy() {
@@ -102,8 +107,9 @@ public class SettingsStore {
             c.opendotaApiKey = opendotaApiKey;
             c.gsiAuthToken = gsiAuthToken;
             // Deep-copy the list (records are immutable, so element sharing is safe). Omitting this
-            // would silently drop audioSources on every copy-on-write update().
-            c.audioSources = new java.util.ArrayList<>(audioSources);
+            // would silently drop audioSources on every copy-on-write update(). Null-safe: the field
+            // defaults to null pre-seed, though copy() is only ever called on post-load settings.
+            c.audioSources = audioSources == null ? null : new java.util.ArrayList<>(audioSources);
             return c;
         }
     }
@@ -174,12 +180,12 @@ public class SettingsStore {
         if (loaded.format == null || loaded.format.isBlank()) {
             loaded.format = "hybrid_mp4";
         }
-        // Fresh install (or a legacy settings.json predating audioSources, which deserializes to
-        // null/empty): seed one Dota application-capture source so a fresh install records the game's
-        // audio (and only the game) out of the box. The window match "::dota2.exe" is the encoded
-        // "title:class:exe" string the scene configurer pairs with priority=2 (match by executable), so
-        // it binds whenever dota2.exe is running. This replaces the old implicit "Desktop Audio" add.
-        if (loaded.audioSources == null || loaded.audioSources.isEmpty()) {
+        // Seed one Dota application-capture source ONLY on a genuinely fresh field (null = fresh
+        // install or a legacy settings.json predating audioSources) so the game's audio records out of
+        // the box. An explicit empty list (the user cleared every source) is left empty and durable.
+        // The window match "::dota2.exe" is the encoded "title:class:exe" string the scene configurer
+        // pairs with priority=2 (match by executable), so it binds whenever dota2.exe is running.
+        if (loaded.audioSources == null) {
             loaded.audioSources =
                     new java.util.ArrayList<>(
                             java.util.List.of(

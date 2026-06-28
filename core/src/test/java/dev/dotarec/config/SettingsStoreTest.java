@@ -205,4 +205,23 @@ class SettingsStoreTest {
         assertThat(reloaded.get().audioSources).hasSize(1);
         assertThat(reloaded.get().audioSources.get(0).target()).isEqualTo("mic");
     }
+
+    @Test
+    void clearedAudioSources_areDurable_notReseededOnReload(@TempDir Path dir) {
+        SettingsStore store = new SettingsStore(paths(dir));
+        // Fresh install seeds the Dota default.
+        assertThat(store.get().audioSources).hasSize(1);
+
+        // The user clears every audio source (an explicit empty list, not a missing field).
+        store.update(
+                s -> {
+                    s.audioSources = new java.util.ArrayList<>();
+                    return s;
+                });
+        assertThat(store.get().audioSources).isEmpty();
+
+        // A reload must NOT resurrect the Dota default — only a null (fresh/legacy) field re-seeds.
+        SettingsStore reloaded = new SettingsStore(paths(dir));
+        assertThat(reloaded.get().audioSources).isEmpty();
+    }
 }
