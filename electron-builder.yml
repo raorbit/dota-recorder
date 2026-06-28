@@ -58,9 +58,15 @@ extraResources:
       - ".obs-*.ok"
 
 # koffi (optional native FFI for the Job Object) must stay outside the asar so its
-# .node binary is loadable; harmless when koffi isn't installed (nothing matches).
+# .node binary is loadable. In koffi 3.x the native binary no longer lives under
+# koffi/ — it ships in a scoped per-platform package the loader resolves as
+# @koromix/koffi-<platform>-<arch>/<triplet>/koffi.node (e.g. @koromix/koffi-win32-x64/
+# win32_x64/koffi.node). BOTH must be unpacked: an asar-trapped .node can't be dlopen'd,
+# so the packaged build would silently fall back to taskkill /T /F. Harmless when koffi
+# isn't installed (nothing matches).
 asarUnpack:
   - "**/node_modules/koffi/**"
+  - "**/node_modules/@koromix/**"
 
 win:
   # Brand red-diamond icon (multi-size .ico) for the exe, taskbar, and installer.
