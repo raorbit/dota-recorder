@@ -47,6 +47,9 @@ const ENCODER_LABELS: Record<string, string> = {
 // back to x264 in OBS, so only these are offered.
 const ENCODER_OVERRIDE_TOKENS: ReadonlyArray<string> = ['x264', 'nvenc', 'qsv', 'amd'];
 
+// The fps/quality/format value sets below mirror the server-side allow-lists in
+// SettingsController.ALLOWED_* — keep them in sync (the core 400s a value outside its set).
+//
 // Frame-rate presets. OBS "Common FPS" integers only (FPSType stays 0); 120/144 would
 // need FPSType=1 and fractional rates (29.97) need a String, so the int field is
 // restricted to 30/60.

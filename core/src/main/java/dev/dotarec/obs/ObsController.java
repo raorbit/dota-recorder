@@ -8,8 +8,8 @@ import io.obswebsocket.community.client.message.response.general.GetVersionRespo
 import io.obswebsocket.community.client.message.response.inputs.GetInputListResponse;
 import io.obswebsocket.community.client.message.response.inputs.GetInputMuteResponse;
 import io.obswebsocket.community.client.message.response.record.StopRecordResponse;
-import io.obswebsocket.community.client.model.Input;
 import io.obswebsocket.community.client.message.response.scenes.GetCurrentProgramSceneResponse;
+import io.obswebsocket.community.client.model.Input;
 import java.time.Instant;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;

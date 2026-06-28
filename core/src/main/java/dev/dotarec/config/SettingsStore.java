@@ -8,6 +8,9 @@ import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.UUID;
 import java.util.function.UnaryOperator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -88,7 +91,7 @@ public class SettingsStore {
          * so an explicit empty list the user saved by clearing every source is durable and is NOT
          * re-seeded on the next launch.
          */
-        public java.util.List<AudioSource> audioSources;
+        public List<AudioSource> audioSources;
 
         /** Field-by-field copy (all fields are primitive/immutable) for atomic copy-on-write updates. */
         Settings copy() {
@@ -109,7 +112,7 @@ public class SettingsStore {
             // Deep-copy the list (records are immutable, so element sharing is safe). Omitting this
             // would silently drop audioSources on every copy-on-write update(). Null-safe: the field
             // defaults to null pre-seed, though copy() is only ever called on post-load settings.
-            c.audioSources = audioSources == null ? null : new java.util.ArrayList<>(audioSources);
+            c.audioSources = audioSources == null ? null : new ArrayList<>(audioSources);
             return c;
         }
     }
@@ -187,10 +190,10 @@ public class SettingsStore {
         // pairs with priority=2 (match by executable), so it binds whenever dota2.exe is running.
         if (loaded.audioSources == null) {
             loaded.audioSources =
-                    new java.util.ArrayList<>(
-                            java.util.List.of(
+                    new ArrayList<>(
+                            List.of(
                                     new AudioSource(
-                                            java.util.UUID.randomUUID().toString(),
+                                            UUID.randomUUID().toString(),
                                             "application",
                                             "::dota2.exe",
                                             "Dota 2",
