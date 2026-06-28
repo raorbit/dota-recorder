@@ -51,6 +51,13 @@ public class RecordingSession {
     private int radiantScore;
     private int direScore;
 
+    /**
+     * True once a GAME_IN_PROGRESS frame has been observed for this recording. Lets the FSM tell a
+     * NEW match's opening draft (an arm state seen after the prior match was already in progress) apart
+     * from the SAME match's repeated arm-state frames, so the latter don't thrash stop/start.
+     */
+    private boolean reachedGameInProgress;
+
     public String getSurrogateId() {
         return surrogateId;
     }
@@ -178,10 +185,20 @@ public class RecordingSession {
         return direScore;
     }
 
+    public boolean hasReachedGameInProgress() {
+        return reachedGameInProgress;
+    }
+
+    /** Latches that this recording has seen a GAME_IN_PROGRESS frame (set by the FSM). */
+    public void markReachedGameInProgress() {
+        this.reachedGameInProgress = true;
+    }
+
     /**
      * Snapshots the match facts from a frame that carries them. Frames with the hero block absent
      * (heartbeats, hero-select, the terminal POST_GAME frame) leave the last good hero/id intact so
-     * finalize still records who played; counters are always taken from the latest frame.
+     * finalize still records who played; the K/D/A counters are likewise held at their last good value
+     * whenever the player block is absent.
      */
     public void observe(GsiFrame frame) {
         if (frame.matchId() != 0L) {
@@ -190,9 +207,14 @@ public class RecordingSession {
         if (frame.heroPresent() && frame.hero() != null) {
             this.hero = frame.hero();
         }
-        this.kills = frame.kills();
-        this.deaths = frame.deaths();
-        this.assists = frame.assists();
+        // Guard the counters on player presence (like matchId/hero): a heartbeat/reconnect frame drops
+        // the player block, which zeroes K/D/A upstream (GsiPayload.toFrame). Copying those zeros would
+        // let a dropout-then-silence force-finalize persist 0/0/0 over the last good counters.
+        if (frame.playerPresent()) {
+            this.kills = frame.kills();
+            this.deaths = frame.deaths();
+            this.assists = frame.assists();
+        }
         this.radiantScore = frame.radiantScore();
         this.direScore = frame.direScore();
     }

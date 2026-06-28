@@ -182,12 +182,18 @@ public class MatchFsm {
         if (s == null) {
             return false;
         }
-        if (isArmState(frame.gameState())) {
-            return true;
-        }
         long currentMatchId = s.getMatchId();
         long nextMatchId = frame.matchId();
-        return currentMatchId != 0L && nextMatchId != 0L && nextMatchId != currentMatchId;
+        if (currentMatchId != 0L && nextMatchId != 0L && nextMatchId != currentMatchId) {
+            // A genuinely different match id while recording -> the previous match ended; roll.
+            return true;
+        }
+        // An arm state (HERO_SELECTION/STRATEGY_TIME/PRE_GAME) only signals a NEW match once we've
+        // already reached GAME_IN_PROGRESS for the current one (a fresh draft began without a
+        // POST_GAME). Repeated arm-state frames of the SAME draft -- of which Dota streams many at
+        // ~10Hz before the horn -- must NOT roll, or one match would be shredded into dozens of tiny
+        // start/stop VOD rows.
+        return isArmState(frame.gameState()) && s.hasReachedGameInProgress();
     }
 
     private void startRecording(GsiFrame frame) {
@@ -225,6 +231,9 @@ public class MatchFsm {
         s.setRecordStartedWallMs(anchor);
         s.observe(frame);
         s.setLastFrame(frame);
+        if (GAME_IN_PROGRESS.equals(frame.gameState())) {
+            s.markReachedGameInProgress();
+        }
         // If recording opens mid-match while already paused (launched during a live-game pause), seed
         // the leading pause span here: tagAndObserve only detects edges from the SECOND frame on (the
         // first frame is consumed here), so a begins-paused match would otherwise drop the leading
@@ -277,6 +286,9 @@ public class MatchFsm {
         }
         s.observe(frame);
         s.setLastFrame(frame);
+        if (GAME_IN_PROGRESS.equals(frame.gameState())) {
+            s.markReachedGameInProgress();
+        }
         updateJournalSnapshot(s, "recording", null, null);
     }
 
