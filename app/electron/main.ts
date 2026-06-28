@@ -4,7 +4,7 @@
 // TODO(plan Step 1+): surface a loud, actionable error window when the core fails
 // to start or crashes mid-session ("core stopped - recordings paused") instead of
 // the bare dialog used here.
-import { app, BrowserWindow, dialog } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain } from 'electron';
 import { randomBytes } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -154,6 +154,19 @@ function createWindow(): void {
   mainWindow.once('ready-to-show', () => mainWindow?.show());
   mainWindow.on('closed', () => {
     mainWindow = null;
+  });
+
+  // Native folder picker for the recording output-folder Browse button. Renderer-driven over
+  // IPC because the renderer is sandboxed and can't open dialogs itself. Registered with handle()
+  // (idempotent re-register on window re-create) and parented to the window so it's modal.
+  ipcMain.removeHandler('dialog:selectFolder');
+  ipcMain.handle('dialog:selectFolder', async (): Promise<string | null> => {
+    if (!mainWindow) return null;
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: 'Choose recording folder',
+      properties: ['openDirectory', 'createDirectory'],
+    });
+    return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0];
   });
 
   // Lock the window to its own bundled content: deny popups and block any navigation away from the

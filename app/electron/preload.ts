@@ -10,7 +10,7 @@
 // self-contained -- the constants below mirror the canonical copies in paths.ts
 // (the loopback host/port and token arg prefix are frozen by the runtime contract),
 // and DotaRecBridge is a type-only import (elided at compile time, no require).
-import { contextBridge } from 'electron';
+import { contextBridge, ipcRenderer } from 'electron';
 import type { DotaRecBridge } from './bridge-contract';
 
 const BRIDGE_HOST = '127.0.0.1';
@@ -31,6 +31,7 @@ const bridge: DotaRecBridge = {
   healthUrl: HEALTH_URL,
   wsUrl: WS_URL,
   bridgeToken,
+  selectFolder: () => ipcRenderer.invoke('dialog:selectFolder') as Promise<string | null>,
 };
 
 contextBridge.exposeInMainWorld('dotarec', bridge);
