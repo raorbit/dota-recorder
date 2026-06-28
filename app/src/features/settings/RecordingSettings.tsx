@@ -236,6 +236,11 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
       (encoderChoice === 'auto' ? '' : encoderChoice) !== settings.encoder ||
       JSON.stringify(audioSources) !== JSON.stringify(settings.audioSources));
 
+  // The output folder only governs WHERE NEW recordings are written; existing VODs keep their stored
+  // paths and stay where they are. Surface that as a reminder once the folder is actually changed.
+  const folderChanged =
+    settings !== null && videoDir.trim() !== '' && videoDir.trim() !== settings.videoDir;
+
   const onBrowse = async (): Promise<void> => {
     const picked = await window.dotarec?.selectFolder();
     if (picked) {
@@ -565,6 +570,15 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
                 </button>
               </div>
             </div>
+            {folderChanged && (
+              <p className="rec-note" role="status">
+                <span className="rec-note-icon" aria-hidden="true">
+                  i
+                </span>
+                Existing recordings stay in their current folder — only new recordings will be saved
+                here.
+              </p>
+            )}
             <div className="rec-row">
               <div className="rec-rowlabel">
                 <label className="rec-label" htmlFor="rec-retention">
