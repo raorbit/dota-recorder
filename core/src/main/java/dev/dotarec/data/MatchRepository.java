@@ -206,6 +206,23 @@ public class MatchRepository {
         }
     }
 
+    /**
+     * Deletes a match row by id. Its {@code markers} and {@code pauses} cascade away via the
+     * {@code ON DELETE CASCADE} FKs (foreign_keys is enforced on every pooled connection). Returns the
+     * number of rows deleted (0 when the id was unknown), so the caller can 404. The {@code .mp4} +
+     * thumbnail on disk are unlinked by the caller, not here.
+     */
+    public int delete(long id) {
+        String sql = "DELETE FROM matches WHERE id = ?";
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, id);
+            return ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to delete match " + id, e);
+        }
+    }
+
     // ---- retention helpers -------------------------------------------------
 
     /**

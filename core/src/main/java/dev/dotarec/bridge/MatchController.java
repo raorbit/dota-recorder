@@ -6,14 +6,18 @@ import dev.dotarec.data.MatchRepository;
 import dev.dotarec.data.MatchSummary;
 import dev.dotarec.data.PauseRepository;
 import dev.dotarec.data.PauseSpan;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpRange;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -57,6 +61,8 @@ import java.util.Locale;
  */
 @RestController
 public class MatchController {
+
+    private static final Logger log = LoggerFactory.getLogger(MatchController.class);
 
     private final MatchRepository matches;
     private final MarkerRepository markers;
@@ -210,6 +216,34 @@ public class MatchController {
         }
         return matches.findById(id)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "No match " + id));
+    }
+
+    /**
+     * Permanently deletes a match: the {@code .mp4} + thumbnail on disk, then the row (its markers +
+     * pauses cascade via the FK). 404 when the id is unknown. File unlinks are best-effort — a missing
+     * or locked file is logged and never blocks the row delete (so a half-pruned recording can still
+     * be removed). No undo.
+     */
+    @DeleteMapping("/matches/{id}")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void delete(@PathVariable long id) {
+        MatchSummary m = matches.findById(id)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "No match " + id));
+        deleteFileQuietly(m.videoPath());
+        deleteFileQuietly(m.thumbPath());
+        matches.delete(id);
+    }
+
+    /** Best-effort unlink: ignores a null/blank/missing path; logs (never throws) on an I/O failure. */
+    private static void deleteFileQuietly(String path) {
+        if (path == null || path.isBlank()) {
+            return;
+        }
+        try {
+            Files.deleteIfExists(new File(path).toPath());
+        } catch (IOException e) {
+            log.warn("Could not delete file {} while deleting a match: {}", path, e.toString());
+        }
     }
 
     @GetMapping("/buckets/counts")
