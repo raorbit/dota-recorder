@@ -126,8 +126,8 @@ public class MatchController {
      * {@code file://} load). 404 (same reasons as {@link #video}) when the match is unknown, its
      * {@code video_path} is null/blank (pruned by retention / never recorded), or the file is gone
      * from disk. A {@code Range} header yields 206 + {@code Content-Range}; its absence yields 200 +
-     * {@code Accept-Ranges: bytes}; an unsatisfiable range yields 416. {@code ResourceRegion} is
-     * written by Spring's auto-registered {@code ResourceRegionHttpMessageConverter}.
+     * {@code Accept-Ranges: bytes}; an unsatisfiable range yields 416. The body is streamed in 64KB
+     * chunks via {@link StreamingResponseBody} (no whole-file buffering).
      */
     @GetMapping("/matches/{id}/video/stream")
     public ResponseEntity<StreamingResponseBody> videoStream(
