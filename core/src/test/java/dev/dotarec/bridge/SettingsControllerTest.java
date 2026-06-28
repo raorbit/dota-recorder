@@ -72,7 +72,9 @@ class SettingsControllerTest {
                         "fps",
                         "quality",
                         "format",
-                        "storageLocations");
+                        "storageLocations",
+                        "autoClipOnRampage",
+                        "clipPaddingSeconds");
     }
 
     @Test
@@ -81,7 +83,7 @@ class SettingsControllerTest {
                 controller.putSettings(
                         new SettingsPatch(
                                 "1280x720", "x264", 80, "D:/clips", 96828122L, null, null, null,
-                                null, null, null));
+                                null, null, null, null, null));
 
         assertThat(updated.resolution()).isEqualTo("1280x720");
         assertThat(updated.encoder()).isEqualTo("x264");
@@ -102,7 +104,8 @@ class SettingsControllerTest {
         SettingsView updated =
                 controller.putSettings(
                         new SettingsPatch(
-                                null, null, null, null, null, null, null, 30, "Stream", "mkv", null));
+                                null, null, null, null, null, null, null, 30, "Stream", "mkv", null,
+                                null, null));
 
         assertThat(updated.fps()).isEqualTo(30);
         assertThat(updated.quality()).isEqualTo("Stream");
@@ -120,7 +123,7 @@ class SettingsControllerTest {
                                 controller.putSettings(
                                         new SettingsPatch(
                                                 null, null, null, null, null, null, null, 144, null,
-                                                null, null)))
+                                                null, null, null, null)))
                 .isInstanceOfSatisfying(
                         ResponseStatusException.class,
                         e -> assertThat(e.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST));
@@ -136,7 +139,7 @@ class SettingsControllerTest {
                                 controller.putSettings(
                                         new SettingsPatch(
                                                 null, null, null, null, null, null, null, null,
-                                                "garbage", null, null)))
+                                                "garbage", null, null, null, null)))
                 .isInstanceOfSatisfying(
                         ResponseStatusException.class,
                         e -> assertThat(e.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST));
@@ -152,7 +155,7 @@ class SettingsControllerTest {
                                 controller.putSettings(
                                         new SettingsPatch(
                                                 null, null, null, null, null, null, null, null, null,
-                                                "avi", null)))
+                                                "avi", null, null, null)))
                 .isInstanceOfSatisfying(
                         ResponseStatusException.class,
                         e -> assertThat(e.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST));
@@ -174,7 +177,8 @@ class SettingsControllerTest {
         SettingsView updated =
                 controller.putSettings(
                         new SettingsPatch(
-                                null, null, null, null, null, null, null, 30, null, null, null));
+                                null, null, null, null, null, null, null, 30, null, null, null,
+                                null, null));
 
         assertThat(updated.fps()).isEqualTo(30);
         // The omitted fields are left exactly as they were.
@@ -196,7 +200,8 @@ class SettingsControllerTest {
         // PUT an unrelated, user-facing field only.
         controller.putSettings(
                 new SettingsPatch(
-                        "1280x720", null, null, null, null, null, null, null, null, null, null));
+                        "1280x720", null, null, null, null, null, null, null, null, null, null,
+                        null, null));
 
         // Regression: the carry-forward must not wipe the OBS secret/port back to defaults.
         assertThat(store.get().obsPassword).isEqualTo("abc1234567890def");
@@ -212,7 +217,8 @@ class SettingsControllerTest {
         SettingsView updated =
                 controller.putSettings(
                         new SettingsPatch(
-                                null, null, null, null, null, true, null, null, null, null, null));
+                                null, null, null, null, null, true, null, null, null, null, null,
+                                null, null));
 
         assertThat(updated.accountId()).isNull();
         assertThat(store.get().accountId).isNull();
@@ -225,7 +231,8 @@ class SettingsControllerTest {
         // Without the clear flag, a null accountId means "leave unchanged".
         controller.putSettings(
                 new SettingsPatch(
-                        "1280x720", null, null, null, null, null, null, null, null, null, null));
+                        "1280x720", null, null, null, null, null, null, null, null, null, null,
+                        null, null));
 
         assertThat(store.get().accountId).isEqualTo(96828122L);
     }
@@ -236,7 +243,7 @@ class SettingsControllerTest {
                 new SettingsPatch(
                         null, null, null, null, null, null,
                         List.of(new AudioSource("x", "bogus", "t", "L", 100, false)),
-                        null, null, null, null);
+                        null, null, null, null, null, null);
         assertThatThrownBy(() -> controller.putSettings(patch))
                 .isInstanceOf(ResponseStatusException.class);
         // Rejected before persist: still the seeded Dota default, list not replaced.
@@ -249,7 +256,7 @@ class SettingsControllerTest {
                 new SettingsPatch(
                         null, null, null, null, null, null,
                         List.of(new AudioSource("x", "output", "default", "L", 150, false)),
-                        null, null, null, null);
+                        null, null, null, null, null, null);
         assertThatThrownBy(() -> controller.putSettings(patch))
                 .isInstanceOf(ResponseStatusException.class);
         assertThat(store.get().audioSources).hasSize(1);
@@ -278,7 +285,8 @@ class SettingsControllerTest {
         SettingsView updated =
                 controller.putSettings(
                         new SettingsPatch(
-                                null, null, null, null, null, null, sources, null, null, null, null));
+                                null, null, null, null, null, null, sources, null, null, null, null,
+                                null, null));
 
         assertThat(updated.audioSources()).hasSize(2);
         assertThat(store.get().audioSources).hasSize(2);
@@ -291,12 +299,15 @@ class SettingsControllerTest {
         List<AudioSource> sources =
                 List.of(new AudioSource("id-1", "input", "mic", "Mic", 50, false));
         controller.putSettings(
-                new SettingsPatch(null, null, null, null, null, null, sources, null, null, null, null));
+                new SettingsPatch(
+                        null, null, null, null, null, null, sources, null, null, null, null, null,
+                        null));
 
         // A later PUT with null audioSources must not touch the stored list.
         controller.putSettings(
                 new SettingsPatch(
-                        "1280x720", null, null, null, null, null, null, null, null, null, null));
+                        "1280x720", null, null, null, null, null, null, null, null, null, null,
+                        null, null));
 
         assertThat(store.get().audioSources).hasSize(1);
         assertThat(store.get().audioSources.get(0).id()).isEqualTo("id-1");
@@ -308,7 +319,8 @@ class SettingsControllerTest {
         SettingsView updated =
                 controller.putSettings(
                         new SettingsPatch(
-                                null, null, null, null, null, null, List.of(), null, null, null, null));
+                                null, null, null, null, null, null, List.of(), null, null, null, null,
+                                null, null));
 
         assertThat(updated.audioSources()).isEmpty();
         assertThat(store.get().audioSources).isEmpty();
@@ -332,7 +344,8 @@ class SettingsControllerTest {
         SettingsView updated =
                 controller.putSettings(
                         new SettingsPatch(
-                                null, null, null, null, null, null, null, null, null, null, locs));
+                                null, null, null, null, null, null, null, null, null, null, locs,
+                                null, null));
 
         assertThat(updated.storageLocations()).hasSize(2);
         assertThat(store.get().storageLocations).hasSize(2);
@@ -345,12 +358,13 @@ class SettingsControllerTest {
         controller.putSettings(
                 new SettingsPatch(
                         null, null, null, null, null, null, null, null, null, null,
-                        List.of(new StorageLocation("a", "E:/archive", 500))));
+                        List.of(new StorageLocation("a", "E:/archive", 500)), null, null));
 
         // A later PUT with null storageLocations must not touch the stored list.
         controller.putSettings(
                 new SettingsPatch(
-                        "1280x720", null, null, null, null, null, null, null, null, null, null));
+                        "1280x720", null, null, null, null, null, null, null, null, null, null,
+                        null, null));
 
         assertThat(store.get().storageLocations).hasSize(1);
         assertThat(store.get().storageLocations.get(0).path()).isEqualTo("E:/archive");
@@ -361,12 +375,13 @@ class SettingsControllerTest {
         controller.putSettings(
                 new SettingsPatch(
                         null, null, null, null, null, null, null, null, null, null,
-                        List.of(new StorageLocation("a", "E:/archive", 500))));
+                        List.of(new StorageLocation("a", "E:/archive", 500)), null, null));
 
         SettingsView updated =
                 controller.putSettings(
                         new SettingsPatch(
-                                null, null, null, null, null, null, null, null, null, null, List.of()));
+                                null, null, null, null, null, null, null, null, null, null, List.of(),
+                                null, null));
 
         assertThat(updated.storageLocations()).isEmpty();
         assertThat(store.get().storageLocations).isEmpty();
@@ -377,7 +392,7 @@ class SettingsControllerTest {
         SettingsPatch patch =
                 new SettingsPatch(
                         null, null, null, null, null, null, null, null, null, null,
-                        List.of(new StorageLocation("a", "  ", 500)));
+                        List.of(new StorageLocation("a", "  ", 500)), null, null);
         assertThatThrownBy(() -> controller.putSettings(patch))
                 .isInstanceOfSatisfying(
                         ResponseStatusException.class,
@@ -390,7 +405,7 @@ class SettingsControllerTest {
         SettingsPatch patch =
                 new SettingsPatch(
                         null, null, null, null, null, null, null, null, null, null,
-                        List.of(new StorageLocation("a", "E:/archive", 0)));
+                        List.of(new StorageLocation("a", "E:/archive", 0)), null, null);
         assertThatThrownBy(() -> controller.putSettings(patch))
                 .isInstanceOfSatisfying(
                         ResponseStatusException.class,
@@ -404,7 +419,8 @@ class SettingsControllerTest {
                         null, null, null, null, null, null, null, null, null, null,
                         List.of(
                                 new StorageLocation("a", "E:/archive", 500),
-                                new StorageLocation("b", "E:/archive", 800)));
+                                new StorageLocation("b", "E:/archive", 800)),
+                        null, null);
         assertThatThrownBy(() -> controller.putSettings(patch))
                 .isInstanceOfSatisfying(
                         ResponseStatusException.class,
@@ -417,7 +433,7 @@ class SettingsControllerTest {
         SettingsPatch patch =
                 new SettingsPatch(
                         null, null, null, "D:/clips", null, null, null, null, null, null,
-                        List.of(new StorageLocation("a", "D:/clips", 500)));
+                        List.of(new StorageLocation("a", "D:/clips", 500)), null, null);
         assertThatThrownBy(() -> controller.putSettings(patch))
                 .isInstanceOfSatisfying(
                         ResponseStatusException.class,
@@ -432,7 +448,7 @@ class SettingsControllerTest {
         SettingsPatch patch =
                 new SettingsPatch(
                         null, null, null, "D:/rec", null, null, null, null, null, null,
-                        List.of(new StorageLocation("a", "D:/rec/archive", 500)));
+                        List.of(new StorageLocation("a", "D:/rec/archive", 500)), null, null);
         assertThatThrownBy(() -> controller.putSettings(patch))
                 .isInstanceOfSatisfying(
                         ResponseStatusException.class,
@@ -450,7 +466,8 @@ class SettingsControllerTest {
                         null, null, null, "D:/clips", null, null, null, null, null, null,
                         List.of(
                                 new StorageLocation("a", "E:/archive", 500),
-                                new StorageLocation("b", "E:/archive/inner", 800)));
+                                new StorageLocation("b", "E:/archive/inner", 800)),
+                        null, null);
         assertThatThrownBy(() -> controller.putSettings(patch))
                 .isInstanceOfSatisfying(
                         ResponseStatusException.class,
@@ -467,7 +484,7 @@ class SettingsControllerTest {
         SettingsPatch patch =
                 new SettingsPatch(
                         null, null, null, activeDir, null, null, null, null, null, null,
-                        List.of(new StorageLocation("a", ".", 500)));
+                        List.of(new StorageLocation("a", ".", 500)), null, null);
         assertThatThrownBy(() -> controller.putSettings(patch))
                 .isInstanceOfSatisfying(
                         ResponseStatusException.class,
@@ -483,7 +500,7 @@ class SettingsControllerTest {
                                 controller.putSettings(
                                         new SettingsPatch(
                                                 null, null, 0, null, null, null, null, null, null,
-                                                null, null)))
+                                                null, null, null, null)))
                 .isInstanceOfSatisfying(
                         ResponseStatusException.class,
                         e -> assertThat(e.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST));
@@ -501,7 +518,7 @@ class SettingsControllerTest {
                                 controller.putSettings(
                                         new SettingsPatch(
                                                 null, null, null, "   ", null, null, null, null, null,
-                                                null, null)))
+                                                null, null, null, null)))
                 .isInstanceOfSatisfying(
                         ResponseStatusException.class,
                         e -> assertThat(e.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST));
@@ -521,7 +538,8 @@ class SettingsControllerTest {
         SettingsView updated =
                 controller.putSettings(
                         new SettingsPatch(
-                                null, null, 80, "D:/clips", null, null, null, null, null, null, locs));
+                                null, null, 80, "D:/clips", null, null, null, null, null, null, locs,
+                                null, null));
 
         assertThat(updated.retentionCapGb()).isEqualTo(80);
         assertThat(updated.storageLocations()).hasSize(2);
