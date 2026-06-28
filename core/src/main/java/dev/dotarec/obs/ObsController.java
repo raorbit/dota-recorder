@@ -262,10 +262,10 @@ public class ObsController implements ObsRecorder {
 
     @Override
     public boolean isReady() {
-        // Connected + a program scene is active + at least one desktop-audio input exists. These are
-        // read-only existence checks: they prove a scene/source is CONFIGURED, not that pixels are
-        // non-black -- but they catch the common "green GSI, OBS records nothing" failure (no scene,
-        // no audio device) before the FSM arms a recording.
+        // Connected + a program scene is active + (when audio is configured) at least one live
+        // app-owned audio input exists. These are read-only existence checks: they prove a
+        // scene/source is CONFIGURED, not that pixels are non-black -- but they catch the common
+        // "green GSI, OBS records nothing" failure (no scene, no audio device) before the FSM arms.
         if (!health.isConnected()) {
             return false;
         }
@@ -275,10 +275,24 @@ public class ObsController implements ObsRecorder {
         }
         try {
             boolean sceneOk = refreshSceneActive();
-            boolean audioOk = hasDesktopAudio(c);
+            // Only gate on audio when the user actually configured audio sources. An empty list is a
+            // deliberate "record video only" choice; requiring an audio input there would make
+            // isReady() permanently false and silently disable ALL recording (the FSM never arms).
+            boolean audioOk = !hasConfiguredAudioSources() || hasDesktopAudio(c);
             return sceneOk && audioOk;
         } catch (Exception e) {
             log.warn("OBS readiness check failed: {}", e.toString());
+            return false;
+        }
+    }
+
+    /** Whether the user has any audio sources configured (an empty list = deliberate video-only). */
+    private boolean hasConfiguredAudioSources() {
+        try {
+            var sources = settings.get().audioSources;
+            return sources != null && !sources.isEmpty();
+        } catch (RuntimeException e) {
+            // Settings unreadable: don't let that wedge readiness — treat as no audio gate.
             return false;
         }
     }

@@ -3,6 +3,7 @@ package dev.dotarec.obs;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -10,9 +11,13 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import dev.dotarec.config.SettingsStore;
+import dev.dotarec.config.SettingsStore.AudioSource;
 import io.obswebsocket.community.client.OBSRemoteController;
+import io.obswebsocket.community.client.message.response.inputs.GetInputListResponse;
 import io.obswebsocket.community.client.message.response.record.StartRecordResponse;
 import io.obswebsocket.community.client.message.response.record.StopRecordResponse;
+import io.obswebsocket.community.client.message.response.scenes.GetCurrentProgramSceneResponse;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
@@ -155,6 +160,63 @@ class ObsControllerTest {
         InOrder order = inOrder(obs);
         order.verify(obs).stopRecord(anyLong());
         order.verify(obs).startRecord(anyLong());
+    }
+
+    @Test
+    void isReady_withEmptyAudioSources_doesNotRequireAudioInput() {
+        // A user who cleared every audio source wants a video-only recording. isReady() must NOT
+        // demand an audio input there, or it would be permanently false and disable all recording.
+        ObsHealth health = new ObsHealth();
+        SettingsStore settings = mock(SettingsStore.class);
+        SettingsStore.Settings s = new SettingsStore.Settings();
+        s.audioSources = List.of(); // explicitly no audio
+        when(settings.get()).thenReturn(s);
+
+        ObsController controller =
+                new ObsController(settings, health, new ObsEvents(health), sceneConfigurer());
+        OBSRemoteController obs = mock(OBSRemoteController.class);
+        GetCurrentProgramSceneResponse scene = mock(GetCurrentProgramSceneResponse.class);
+        when(scene.isSuccessful()).thenReturn(true);
+        when(scene.getCurrentProgramSceneName()).thenReturn("Dota");
+        when(obs.getCurrentProgramScene(anyLong())).thenReturn(scene);
+        ReflectionTestUtils.setField(controller, "controller", obs);
+        health.setConnected(true);
+
+        assertThat(controller.isReady())
+                .as("video-only (no audio sources) must still be ready to record")
+                .isTrue();
+        // The audio existence check must be short-circuited entirely, not just tolerated.
+        verify(obs, never()).getInputList(nullable(String.class), anyLong());
+    }
+
+    @Test
+    void isReady_withConfiguredAudio_stillRequiresALiveAudioInput() {
+        // Regression guard: when the user DOES configure audio, the readiness gate still fires so a
+        // misconfigured/absent audio input is caught before arming (no silent silent-track recording).
+        ObsHealth health = new ObsHealth();
+        SettingsStore settings = mock(SettingsStore.class);
+        SettingsStore.Settings s = new SettingsStore.Settings();
+        s.audioSources = List.of(new AudioSource("a", "application", "::dota2.exe", "Dota", 100, false));
+        when(settings.get()).thenReturn(s);
+
+        ObsController controller =
+                new ObsController(settings, health, new ObsEvents(health), sceneConfigurer());
+        OBSRemoteController obs = mock(OBSRemoteController.class);
+        GetCurrentProgramSceneResponse scene = mock(GetCurrentProgramSceneResponse.class);
+        when(scene.isSuccessful()).thenReturn(true);
+        when(scene.getCurrentProgramSceneName()).thenReturn("Dota");
+        when(obs.getCurrentProgramScene(anyLong())).thenReturn(scene);
+        // No app-owned audio inputs present yet -> readiness must stay false.
+        GetInputListResponse inputs = mock(GetInputListResponse.class);
+        when(inputs.isSuccessful()).thenReturn(true);
+        when(inputs.getInputs()).thenReturn(List.of());
+        when(obs.getInputList(nullable(String.class), anyLong())).thenReturn(inputs);
+        ReflectionTestUtils.setField(controller, "controller", obs);
+        health.setConnected(true);
+
+        assertThat(controller.isReady())
+                .as("configured audio with no live input must NOT be ready")
+                .isFalse();
     }
 
     @Test
