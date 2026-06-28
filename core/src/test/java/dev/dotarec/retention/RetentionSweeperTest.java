@@ -12,10 +12,13 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
 
+import dev.dotarec.config.SettingsStore.StorageLocation;
+
 import javax.sql.DataSource;
 import java.io.RandomAccessFile;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -181,6 +184,32 @@ class RetentionSweeperTest {
     }
 
     @Test
+    void budgetIsSumOfCapsAndEvictsGloballyOldestAcrossDrives() throws Exception {
+        long gib = 1024L * 1024 * 1024;
+        // Active cap 1 GiB + one archive drive cap 1 GiB => total budget 2 GiB.
+        Path archiveDir = Files.createDirectories(videoDir.getParent().resolve("archive"));
+        settings.get().retentionCapGb = 1;
+        settings.get().storageLocations =
+                new ArrayList<>(List.of(new StorageLocation("a", archiveDir.toString(), 1)));
+
+        // Oldest lives on the ARCHIVE drive; newer lives on the active drive. total = 2.5 GiB > 2 GiB.
+        long oldestOnArchive =
+                seedWithFilesIn(archiveDir, "old.mp4", "old.jpg", 3 * gib / 2, 1_000L, false);
+        long newerOnActive = seedWithFiles("new.mp4", "new.jpg", gib, 2_000L, false);
+
+        RetentionSweeper.SweepResult result = sweeper.sweep(null);
+
+        // Eviction is by global age, not per-drive: the oldest (on the archive drive) is pruned even
+        // though the active drive alone is also over its own 1 GiB cap.
+        assertThat(result.deletedIds()).containsExactly(oldestOnArchive);
+        assertThat(Files.exists(archiveDir.resolve("old.mp4"))).isFalse();
+        assertThat(Files.exists(videoDir.resolve("new.mp4"))).isTrue();
+        assertThat(matches.findById(newerOnActive).orElseThrow().videoPath()).isNotNull();
+        // 1 GiB remaining is now under the 2 GiB budget, so the sweep stops after one deletion.
+        assertThat(result.totalAfterBytes()).isEqualTo(gib);
+    }
+
+    @Test
     void freeSpaceCheckNeverThrowsAndReturnsNullWhenHealthy() {
         // The temp video drive has plenty of space in CI; the check must not throw and (almost
         // always) reports healthy. We only assert it doesn't blow up and returns a String-or-null.
@@ -196,8 +225,18 @@ class RetentionSweeperTest {
 
     private long seedWithFiles(String video, String thumb, long diskSizeBytes, long dbSizeBytes,
                                long playedAt, boolean starred) throws Exception {
-        Path videoPath = videoDir.resolve(video);
-        Path thumbPath = videoDir.resolve(thumb);
+        return seedWithFilesIn(videoDir, video, thumb, diskSizeBytes, dbSizeBytes, playedAt, starred);
+    }
+
+    private long seedWithFilesIn(Path dir, String video, String thumb, long sizeBytes, long playedAt,
+                                 boolean starred) throws Exception {
+        return seedWithFilesIn(dir, video, thumb, sizeBytes, sizeBytes, playedAt, starred);
+    }
+
+    private long seedWithFilesIn(Path dir, String video, String thumb, long diskSizeBytes,
+                                 long dbSizeBytes, long playedAt, boolean starred) throws Exception {
+        Path videoPath = dir.resolve(video);
+        Path thumbPath = dir.resolve(thumb);
         createSparseFile(videoPath, diskSizeBytes);
         Files.createFile(thumbPath);
         return matches.insert(new NewMatch(

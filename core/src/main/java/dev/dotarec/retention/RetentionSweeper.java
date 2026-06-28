@@ -149,17 +149,32 @@ public class RetentionSweeper {
         return warning;
     }
 
+    /**
+     * Total disk budget = sum of every configured location's cap (the active recording drive's
+     * {@code retentionCapGb} PLUS each archive drive's {@code capGb}). Eviction is global, not
+     * per-drive: while stored video exceeds this sum, the oldest non-starred VOD is pruned wherever
+     * it lives. Per-drive caps govern only WHERE the archiver places files; age governs deletion.
+     */
     private long capBytes() {
-        int capGb;
+        int activeCapGb;
         try {
-            capGb = settings.get().retentionCapGb;
+            activeCapGb = settings.get().retentionCapGb;
         } catch (RuntimeException e) {
-            capGb = DEFAULT_CAP_GB;
+            return (long) DEFAULT_CAP_GB * BYTES_PER_GB;
         }
-        if (capGb <= 0) {
-            capGb = DEFAULT_CAP_GB;
+        if (activeCapGb <= 0) {
+            activeCapGb = DEFAULT_CAP_GB;
         }
-        return (long) capGb * BYTES_PER_GB;
+        long sumGb = activeCapGb;
+        List<SettingsStore.StorageLocation> archives = settings.get().storageLocations;
+        if (archives != null) {
+            for (SettingsStore.StorageLocation loc : archives) {
+                if (loc != null && loc.capGb() > 0) {
+                    sumGb += loc.capGb();
+                }
+            }
+        }
+        return sumGb * BYTES_PER_GB;
     }
 
     private Path videoDir() {
