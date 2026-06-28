@@ -9,9 +9,7 @@ import dev.dotarec.data.PauseSpan;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpHeaders;
-import org.springframework.http.HttpRange;
 import org.springframework.http.HttpStatus;
-import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -27,13 +25,9 @@ import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBo
 
 import java.io.File;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
-import java.util.Locale;
 
 /**
  * Matches endpoints consumed by the Electron browse/player UI over the loopback bridge.
@@ -131,80 +125,7 @@ public class MatchController {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND,
                     "Video for match " + id + " is unavailable (file missing on disk)");
         }
-
-        MediaType type = contentType(file);
-        long length;
-        try {
-            length = Files.size(file);
-        } catch (IOException e) {
-            throw new UncheckedIOException("Failed to read video size: " + file, e);
-        }
-
-        // Stream the bytes via StreamingResponseBody rather than a (Generic)HttpMessageConverter:
-        // it streams in chunks (no whole-file buffering) and is written by a dedicated return-value
-        // handler, so it sidesteps the converter-generics trap that erases ResourceRegion under a
-        // ResponseEntity<?> return type. <video> always sends a Range, so the 206 path is the hot one.
-        List<HttpRange> ranges = headers.getRange();
-        if (ranges.isEmpty()) {
-            // No Range header -> full body, 200. Advertise Accept-Ranges so Chromium knows it can seek.
-            return ResponseEntity.ok()
-                    .contentType(type)
-                    .contentLength(length)
-                    .header(HttpHeaders.ACCEPT_RANGES, "bytes")
-                    .body(out -> copyRange(file, 0, length, out));
-        }
-        HttpRange range = ranges.get(0);
-        long start = range.getRangeStart(length);
-        long end = range.getRangeEnd(length); // clamped to length-1 by HttpRange
-        if (start >= length || start > end) {
-            // Unsatisfiable (start beyond EOF): 416 with the actual size so the client can re-ask.
-            return ResponseEntity.status(HttpStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
-                    .header(HttpHeaders.CONTENT_RANGE, "bytes */" + length)
-                    .build();
-        }
-        long regionLen = end - start + 1;
-        return ResponseEntity.status(HttpStatus.PARTIAL_CONTENT)
-                .contentType(type)
-                .contentLength(regionLen)
-                .header(HttpHeaders.ACCEPT_RANGES, "bytes")
-                .header(HttpHeaders.CONTENT_RANGE, "bytes " + start + "-" + end + "/" + length)
-                .body(out -> copyRange(file, start, regionLen, out));
-    }
-
-    /** Streams {@code count} bytes of {@code file} starting at {@code start} to {@code out}, chunked. */
-    private static void copyRange(Path file, long start, long count, OutputStream out)
-            throws IOException {
-        try (InputStream in = Files.newInputStream(file)) {
-            in.skipNBytes(start);
-            byte[] buf = new byte[64 * 1024];
-            long remaining = count;
-            while (remaining > 0) {
-                int n = in.read(buf, 0, (int) Math.min(buf.length, remaining));
-                if (n < 0) {
-                    break;
-                }
-                out.write(buf, 0, n);
-                remaining -= n;
-            }
-        }
-    }
-
-    /**
-     * Explicit extension -> media type map. {@code Files.probeContentType} is unreliable on Windows
-     * (depends on registry MIME registrations), so the recording containers are mapped by hand.
-     */
-    private static MediaType contentType(Path file) {
-        String name = file.getFileName().toString().toLowerCase(Locale.ROOT);
-        if (name.endsWith(".mp4")) {
-            return MediaType.valueOf("video/mp4");
-        }
-        if (name.endsWith(".mkv")) {
-            return MediaType.valueOf("video/x-matroska");
-        }
-        if (name.endsWith(".mov")) {
-            return MediaType.valueOf("video/quicktime");
-        }
-        return MediaType.APPLICATION_OCTET_STREAM;
+        return VideoStreamSupport.stream(file, headers);
     }
 
     @PatchMapping("/matches/{id}")
