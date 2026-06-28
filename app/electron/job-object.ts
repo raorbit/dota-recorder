@@ -18,13 +18,22 @@ function createNoop(): AssignFn {
   };
 }
 
-function createJobObjectAssign(): AssignFn {
-  if (process.platform !== 'win32') return createNoop();
+// Lazy, guarded require so a missing native module never breaks startup. Split
+// out (and overridable) so unit tests can inject a fake koffi without a real
+// native binary; production passes nothing and gets the real require.
+function loadKoffi(): typeof import('koffi') {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  return require('koffi') as typeof import('koffi');
+}
+
+export function createJobObjectAssign(
+  platform: NodeJS.Platform = process.platform,
+  koffiLoader: () => typeof import('koffi') = loadKoffi,
+): AssignFn {
+  if (platform !== 'win32') return createNoop();
 
   try {
-    // Lazy, guarded require so a missing native module never breaks startup.
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const koffi = require('koffi') as typeof import('koffi');
+    const koffi = koffiLoader();
 
     const kernel32 = koffi.load('kernel32.dll');
 
