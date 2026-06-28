@@ -111,6 +111,26 @@ class ObsConfigWriterTest {
     }
 
     @Test
+    void manualEncoderOverrideIsWrittenVerbatimAndNotProbed(@TempDir Path dir) throws Exception {
+        AppPaths paths = paths(dir);
+        SettingsStore settings = new SettingsStore(paths);
+        // User explicitly picked x264 on an NVIDIA box: the manual (non-blank) choice must win over the
+        // probe, be written verbatim into the profile, and stay persisted (the blank "auto" sentinel
+        // must NOT override it). writer() supplies the nvidiaProbe, which would otherwise pick nvenc.
+        settings.update(
+                s -> {
+                    s.encoder = "x264";
+                    return s;
+                });
+        writer(paths, settings, "", "0").configure();
+
+        Path ini = new ObsLayout(paths.obsDir()).profileIni();
+        assertThat(Files.readString(ini)).contains("RecEncoder=x264");
+        // The manual choice is preserved (not overwritten by the probe).
+        assertThat(settings.get().encoder).isEqualTo("x264");
+    }
+
+    @Test
     void blankEncoderFallsBackToX264InProfile(@TempDir Path dir) throws Exception {
         AppPaths paths = paths(dir);
         SettingsStore settings = new SettingsStore(paths);
