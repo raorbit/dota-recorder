@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import dev.dotarec.config.SettingsStore;
 import dev.dotarec.config.SettingsStore.AudioSource;
 import dev.dotarec.config.SettingsStore.Settings;
+import dev.dotarec.config.SettingsStore.StorageLocation;
 import dev.dotarec.obs.ObsController;
 import dev.dotarec.obs.setup.ObsConfigWriter;
 import java.util.List;
@@ -99,6 +100,9 @@ public class SettingsController {
                 }
             }
         }
+        if (patch.storageLocations() != null) {
+            validateStorageLocations(patch.storageLocations(), patch.videoDir());
+        }
         // Atomic read-copy-mutate: only the user-facing fields are overlaid (non-null), so the
         // app-managed OBS fields (host/port/password) carry forward untouched rather than being
         // reset to defaults.
@@ -138,6 +142,11 @@ public class SettingsController {
                     if (patch.audioSources() != null) {
                         current.audioSources = patch.audioSources();
                     }
+                    // storageLocations is a FULL-LIST REPLACE too: null = leave unchanged, [] = clear
+                    // (single-drive), [..] = replace the whole archive-drive list.
+                    if (patch.storageLocations() != null) {
+                        current.storageLocations = patch.storageLocations();
+                    }
                     return current;
                 });
         // Apply the (possibly new) audio source list to a live OBS without waiting for a reconnect.
@@ -161,6 +170,47 @@ public class SettingsController {
     }
 
     /**
+     * Validates a full-list-replace of {@code storageLocations}: each path non-blank, each
+     * {@code capGb > 0}, and every path distinct from the others AND from the active recording
+     * directory ({@code patchVideoDir} when the same PUT also changes it, else the stored one) — an
+     * archive drive pointed at the active dir would make the archiver move a file onto itself. A cap
+     * that exceeds the drive's physical capacity is intentionally NOT rejected here: it's warn-only
+     * in the UI, matching the "free-space check warns, never blocks" posture.
+     */
+    private void validateStorageLocations(List<StorageLocation> locations, String patchVideoDir) {
+        String activeDir = patchVideoDir != null ? patchVideoDir : store.get().videoDir;
+        Set<String> seen = new java.util.HashSet<>();
+        if (activeDir != null && !activeDir.isBlank()) {
+            seen.add(normalizePath(activeDir));
+        }
+        for (StorageLocation loc : locations) {
+            if (loc == null || loc.path() == null || loc.path().isBlank()) {
+                throw new ResponseStatusException(
+                        HttpStatus.BAD_REQUEST, "storage location path must not be blank");
+            }
+            if (loc.capGb() <= 0) {
+                throw new ResponseStatusException(
+                        HttpStatus.BAD_REQUEST,
+                        "storage location cap must be > 0 GB (was " + loc.capGb() + " for " + loc.path() + ")");
+            }
+            if (!seen.add(normalizePath(loc.path()))) {
+                throw new ResponseStatusException(
+                        HttpStatus.BAD_REQUEST,
+                        "duplicate storage location (or matches the recording folder): " + loc.path());
+            }
+        }
+    }
+
+    /** Best-effort path normalization for distinctness checks (Windows paths are case-insensitive). */
+    private static String normalizePath(String path) {
+        try {
+            return java.nio.file.Path.of(path.trim()).normalize().toString().toLowerCase();
+        } catch (RuntimeException e) {
+            return path.trim().toLowerCase();
+        }
+    }
+
+    /**
      * Read view of settings. The app-managed OBS connection (host/port/password) is intentionally
      * omitted. Null fields are still serialized so the UI sees a stable shape.
      */
@@ -174,7 +224,8 @@ public class SettingsController {
             List<AudioSource> audioSources,
             int fps,
             String quality,
-            String format) {
+            String format,
+            List<StorageLocation> storageLocations) {
 
         static SettingsView of(Settings s) {
             return new SettingsView(
@@ -186,7 +237,8 @@ public class SettingsController {
                     s.audioSources,
                     s.fps,
                     s.quality,
-                    s.format);
+                    s.format,
+                    s.storageLocations);
         }
     }
 
@@ -206,5 +258,6 @@ public class SettingsController {
             List<AudioSource> audioSources,
             Integer fps,
             String quality,
-            String format) {}
+            String format,
+            List<StorageLocation> storageLocations) {}
 }
