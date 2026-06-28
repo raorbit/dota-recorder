@@ -45,6 +45,14 @@ function clamp01(v: number): number {
   return Math.min(1, Math.max(0, v));
 }
 
+// The media element's duration when it's a usable positive, finite number; otherwise null. A
+// seeded/empty player reports 0 or NaN, which must not drive the readout, the playhead fill, or
+// scrubbing. Single source of truth for "is this duration usable" so the readout/playhead/scrub
+// checks can't drift apart.
+function usableDuration(v: HTMLVideoElement | null): number | null {
+  return v && Number.isFinite(v.duration) && v.duration > 0 ? v.duration : null;
+}
+
 // Playback time (non-negative seconds) as M:SS for the transport readout.
 function fmtPlayTime(seconds: number): string {
   const s = Number.isFinite(seconds) && seconds > 0 ? Math.trunc(seconds) : 0;
@@ -155,20 +163,20 @@ export function VideoPlayer({ match }: VideoPlayerProps): React.JSX.Element {
   // Capture the media element's real duration once it (or a fresh src) reports one. Falls back to
   // null for a seeded/empty player so the readout uses the DB estimate instead.
   function handleDurationChange(): void {
-    const v = videoRef.current;
-    setMediaDurationS(v && Number.isFinite(v.duration) && v.duration > 0 ? v.duration : null);
+    setMediaDurationS(usableDuration(videoRef.current));
   }
 
   // Live playhead from the media element. duration unknown (seeded empty video)
   // leaves progress at 0 and the fill collapsed — no misleading mock playhead.
   function handleTimeUpdate(): void {
     const v = videoRef.current;
-    if (!v || !Number.isFinite(v.duration) || v.duration <= 0) {
+    const d = usableDuration(v);
+    if (!v || d === null) {
       setProgress(0);
       setCurrentTimeS(0);
       return;
     }
-    setProgress((v.currentTime / v.duration) * 100);
+    setProgress((v.currentTime / d) * 100);
     setCurrentTimeS(v.currentTime);
   }
 
@@ -219,11 +227,12 @@ export function VideoPlayer({ match }: VideoPlayerProps): React.JSX.Element {
   // media duration.
   function handleScrubClick(e: React.MouseEvent<HTMLDivElement>): void {
     const v = videoRef.current;
-    if (!v || !Number.isFinite(v.duration) || v.duration <= 0) return;
+    const d = usableDuration(v);
+    if (!v || d === null) return;
     const rect = e.currentTarget.getBoundingClientRect();
     if (rect.width <= 0) return;
     const fraction = clamp01((e.clientX - rect.left) / rect.width);
-    seekTo(fraction * v.duration);
+    seekTo(fraction * d);
   }
 
   const dur = durationS ?? 0;
