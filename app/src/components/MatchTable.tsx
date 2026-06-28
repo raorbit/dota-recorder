@@ -82,6 +82,9 @@ function MatchRow({ match, selected, onSelect, onToggleStar }: RowProps): React.
       tabIndex={0}
       onClick={() => onSelect(match.id)}
       onKeyDown={(e) => {
+        // Only the row's OWN Enter/Space selects. Without this guard, activating the nested star
+        // button by keyboard bubbles here too — toggling the star AND selecting the row in one press.
+        if (e.target !== e.currentTarget) return;
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
           onSelect(match.id);
