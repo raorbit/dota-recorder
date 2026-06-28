@@ -82,8 +82,10 @@ class ObsConfigWriterTest {
                 // where a single backslash is an escape char, so a raw Windows path would be mangled
                 // on read ("bad output path", recording never starts). See ObsConfigWriter.writeProfile.
                 .contains("FilePath=" + settings.get().videoDir.replace('\\', '/'));
-        // Probed encoder token is persisted so the UI can reflect it.
-        assertThat(settings.get().encoder).isEqualTo("nvenc");
+        // The auto-detected encoder is written into the PROFILE but NOT persisted into settings: a blank
+        // encoder stays the "auto" sentinel so the UI keeps showing Auto and a GPU swap re-probes on the
+        // next launch (Codex C9 / ObsConfigWriter.resolveEncoder).
+        assertThat(settings.get().encoder).isBlank();
     }
 
     @Test

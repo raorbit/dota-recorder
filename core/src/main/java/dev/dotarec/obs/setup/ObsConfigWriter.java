@@ -58,6 +58,10 @@ public class ObsConfigWriter {
     private final EncoderProbe encoderProbe;
     private final String sourceDir;
     private final String obsVersion;
+
+    /** Per-process cache of the auto-detected encoder so the (bounded) GPU probe runs at most once per
+     * launch; a new process re-probes so a swapped GPU re-adapts. Null until first resolved. */
+    private volatile String resolvedAutoEncoder;
     private final ObjectMapper mapper =
             new ObjectMapper().enable(SerializationFeature.INDENT_OUTPUT);
 
@@ -96,14 +100,15 @@ public class ObsConfigWriter {
     }
 
     /**
-     * Pins the obs-websocket password, the managed port, and the auto-detected encoder in a single
-     * atomic settings update so the read-modify-write cannot race a concurrent {@code PUT /settings}.
-     * The (possibly slow) GPU probe runs OUTSIDE the settings lock; its result is applied only if the
-     * encoder is still unset when the update commits.
+     * Pins the obs-websocket password and the managed port in a single atomic settings update so the
+     * read-modify-write cannot race a concurrent {@code PUT /settings}.
+     *
+     * <p>The auto-detected encoder is deliberately NOT persisted here: a blank {@code encoder} is the
+     * "auto" sentinel, and {@link #resolveEncoder} probes the GPU at profile-write time (cached per
+     * process). Persisting the probed token would defeat the sentinel — the UI would then show the
+     * resolved encoder as a manual override, and a later GPU swap would never re-probe.
      */
     private void ensureSettings() {
-        String current = settings.get().encoder;
-        String probed = (current == null || current.isBlank()) ? encoderProbe.detect() : null;
         settings.update(
                 s -> {
                     if (s.obsPassword == null || s.obsPassword.isBlank()) {
@@ -112,11 +117,30 @@ public class ObsConfigWriter {
                     if (s.obsPort <= 0) {
                         s.obsPort = MANAGED_PORT;
                     }
-                    if (probed != null && (s.encoder == null || s.encoder.isBlank())) {
-                        s.encoder = probed;
-                    }
                     return s;
                 });
+    }
+
+    /**
+     * Resolves the {@code RecEncoder} token for the profile. An explicit (non-blank) {@code encoder}
+     * is the user's manual override, used as-is. A blank encoder means "auto": the GPU is probed once
+     * per process (cached in {@link #resolvedAutoEncoder}) so a swapped GPU re-adapts on the next
+     * launch while the UI keeps showing "Auto" (settings.encoder stays blank). Falls back to x264 so
+     * the profile never writes an empty RecEncoder that OBS would reject.
+     */
+    private String resolveEncoder(SettingsStore.Settings s) {
+        if (s.encoder != null && !s.encoder.isBlank()) {
+            return s.encoder;
+        }
+        String cached = resolvedAutoEncoder;
+        if (cached == null) {
+            cached = encoderProbe.detect();
+            if (cached == null || cached.isBlank()) {
+                cached = EncoderProbe.X264;
+            }
+            resolvedAutoEncoder = cached;
+        }
+        return cached;
     }
 
     /** 24-char URL-safe token (144 bits of entropy) — ample for a loopback-only server. */
@@ -229,9 +253,10 @@ public class ObsConfigWriter {
     private void writeProfile(ObsLayout layout) {
         SettingsStore.Settings s = settings.get();
         int[] res = parseResolution(s.resolution);
-        // ensureSettings() has already resolved+persisted the encoder (auto-detect on blank); this is
-        // a defensive fallback only, and never mutates/saves settings here.
-        String encoder = (s.encoder == null || s.encoder.isBlank()) ? EncoderProbe.X264 : s.encoder;
+        // Resolve the encoder for the profile: the user's manual choice, or the auto-probed GPU encoder
+        // when blank ("auto"). The blank sentinel is never persisted, so the UI keeps showing Auto and a
+        // GPU swap re-probes next launch; this never mutates/saves settings.
+        String encoder = resolveEncoder(s);
         String recPath =
                 (s.videoDir == null || s.videoDir.isBlank())
                         ? paths.videoDir().toString()
