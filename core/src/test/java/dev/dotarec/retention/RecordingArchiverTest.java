@@ -327,6 +327,58 @@ class RecordingArchiverTest {
         assertThat(Files.exists(videoDir.resolve("head.mp4"))).isTrue();
     }
 
+    @Test
+    void doesNotMisattributeAVodOnAPrefixSharingSiblingDriveToTheActiveDrive() throws Exception {
+        // Path-prefix correctness: locationOf appends a separator before its startsWith match so an
+        // active drive "<tmp>/vid" never claims a file stored under the sibling "<tmp>/video2" (the
+        // bare string "<tmp>/video2/..." DOES start with "<tmp>/vid", so a regression to a bare
+        // startsWith would mis-attribute it). Every other test here uses non-prefix-sharing names
+        // (ssd/hdd/hdd1/hdd2), so this is the only guard on the separator-append.
+        //
+        // Re-point the active drive at "<tmp>/vid" and add an archive at the sibling "<tmp>/video2"
+        // whose name shares that prefix. Seed an archive-resident VOD under video2 plus two VODs on the
+        // active vid drive that over-cap it (forcing a real move). If video2's VOD were mis-classified
+        // as living on the active drive it would be counted against the active cap AND become a move
+        // candidate (it is the OLDEST, so the FIRST one a regression would try to relocate). We assert
+        // it is left exactly where it sits: not moved, path unchanged, file untouched on disk.
+        Path vid = Files.createDirectories(videoDir.getParent().resolve("vid"));
+        settings.get().videoDir = vid.toString();
+        videoDir = vid; // so configureArchive's parent-resolve produces the sibling "<tmp>/video2"
+        Path video2 = configureArchive("video2", 10);
+        settings.get().retentionCapGb = 1; // active "vid" holds 1 GiB; two 1 GiB VODs forces a move
+
+        // The archive-resident VOD is the OLDEST overall: a bare-startsWith regression would attribute
+        // it to "vid" and pick it as the first relocation candidate.
+        long onArchive = seed(video2, "v2.mp4", "v2.jpg", GIB, 500L, false);
+        long activeOldest = seed(vid, "a.mp4", "a.jpg", GIB, 1_000L, false);
+        long activeNewest = seed(vid, "b.mp4", "b.jpg", GIB, 2_000L, false);
+
+        RecordingArchiver.ArchiveResult result = archiver.archive(null);
+
+        // Only an ACTIVE-drive VOD is relocated; the video2 VOD is correctly seen as already on the
+        // archive and is never a move candidate (so it is absent from movedIds).
+        assertThat(result.movedIds()).containsExactly(activeOldest);
+        assertThat(result.movedIds()).doesNotContain(onArchive);
+
+        // The video2 VOD's row and file are untouched — not repointed, not relocated, byte-for-byte
+        // intact where it was seeded under the sibling drive.
+        var archiveRow = matches.findById(onArchive).orElseThrow();
+        assertThat(archiveRow.videoPath()).isEqualTo(video2.resolve("v2.mp4").toString());
+        assertThat(archiveRow.thumbPath())
+                .isEqualTo(video2.resolve("thumbs").resolve("v2.jpg").toString());
+        assertThat(Files.exists(video2.resolve("v2.mp4"))).isTrue();
+        assertThat(Files.size(video2.resolve("v2.mp4"))).isEqualTo(GIB);
+        // No id-prefixed copy of it was created on the active vid drive (which a mis-move would do).
+        assertThat(Files.exists(vid.resolve(onArchive + "-v2.mp4"))).isFalse();
+
+        // The active drive's own oldest VOD did relocate onto video2 (under the id-prefixed name),
+        // confirming the move loop actually ran and the archive drive was usable as a target.
+        assertThat(matches.findById(activeOldest).orElseThrow().videoPath())
+                .isEqualTo(video2.resolve(activeOldest + "-a.mp4").toString());
+        assertThat(matches.findById(activeNewest).orElseThrow().videoPath())
+                .isEqualTo(vid.resolve("b.mp4").toString());
+    }
+
     /** Adds an archive location with {@code capGb} and returns its created directory. */
     private Path configureArchive(String name, int capGb) throws Exception {
         Path dir = Files.createDirectories(videoDir.getParent().resolve(name));
