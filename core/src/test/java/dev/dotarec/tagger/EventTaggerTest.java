@@ -45,12 +45,13 @@ class EventTaggerTest {
 
         List<PendingMarker> markers = tagger.diff(prev, curr, ANCHOR, DURATION);
 
-        // 1 kill + 1 assist + 1 death (counter) + 1 death (falling edge) = 2 deaths total.
+        // The deaths counter (+1) and the alive falling edge describe the SAME death, so it must
+        // emit exactly ONE death marker, not two -- the edge is suppressed when the counter moved.
         assertThat(markers).extracting(PendingMarker::type)
-                .containsExactlyInAnyOrder("kill", "assist", "death", "death");
+                .containsExactlyInAnyOrder("kill", "assist", "death");
         assertThat(markers).filteredOn(m -> m.type().equals("kill")).hasSize(1);
         assertThat(markers).filteredOn(m -> m.type().equals("assist")).hasSize(1);
-        assertThat(markers).filteredOn(m -> m.type().equals("death")).hasSize(2);
+        assertThat(markers).filteredOn(m -> m.type().equals("death")).hasSize(1);
     }
 
     @Test
