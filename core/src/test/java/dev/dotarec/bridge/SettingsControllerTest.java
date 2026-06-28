@@ -423,4 +423,94 @@ class SettingsControllerTest {
                         ResponseStatusException.class,
                         e -> assertThat(e.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST));
     }
+
+    @Test
+    void putSettings_rejectsArchiveNestedUnderActiveRecordingDir() {
+        // A nested pair (D:\rec + D:\rec\archive) is rejected: bytes under the inner dir would be
+        // double-counted toward both locations and the archiver would keep attributing the same file
+        // to two drives (recurring no-op self-moves). Containment, not just exact duplication, is bad.
+        SettingsPatch patch =
+                new SettingsPatch(
+                        null, null, null, "D:/rec", null, null, null, null, null, null,
+                        List.of(new StorageLocation("a", "D:/rec/archive", 500)));
+        assertThatThrownBy(() -> controller.putSettings(patch))
+                .isInstanceOfSatisfying(
+                        ResponseStatusException.class,
+                        e -> assertThat(e.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST));
+        // Nothing persisted: the store keeps its fresh-install empty archive list.
+        assertThat(store.get().storageLocations).isEmpty();
+    }
+
+    @Test
+    void putSettings_rejectsArchiveNestedUnderAnotherArchive() {
+        // The same containment check applies BETWEEN two archive drives, not just against the active
+        // dir: E:\a contains E:\a\b, so the pair is rejected.
+        SettingsPatch patch =
+                new SettingsPatch(
+                        null, null, null, "D:/clips", null, null, null, null, null, null,
+                        List.of(
+                                new StorageLocation("a", "E:/archive", 500),
+                                new StorageLocation("b", "E:/archive/inner", 800)));
+        assertThatThrownBy(() -> controller.putSettings(patch))
+                .isInstanceOfSatisfying(
+                        ResponseStatusException.class,
+                        e -> assertThat(e.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST));
+    }
+
+    @Test
+    void putSettings_rejectsRelativeArchivePathThatCanonicalizesOntoActiveDir() {
+        // A relative archive path (".") must be canonicalized the SAME way the byte-attribution code
+        // does (toAbsolutePath().normalize()) BEFORE the distinctness check, or it could slip past here
+        // yet still resolve onto the active recording dir at move time (a self-move). With the active
+        // dir set to the JVM working dir, "." canonicalizes onto it and must be rejected.
+        String activeDir = System.getProperty("user.dir");
+        SettingsPatch patch =
+                new SettingsPatch(
+                        null, null, null, activeDir, null, null, null, null, null, null,
+                        List.of(new StorageLocation("a", ".", 500)));
+        assertThatThrownBy(() -> controller.putSettings(patch))
+                .isInstanceOfSatisfying(
+                        ResponseStatusException.class,
+                        e -> assertThat(e.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST));
+    }
+
+    @Test
+    void putSettings_rejectsNonPositiveRetentionCap() {
+        // A cleared "Max storage" field arrives as 0; persisting retentionCapGb=0 would starve the
+        // sweeper's budget. Reject it (400), mirroring the per-archive cap check.
+        assertThatThrownBy(
+                        () ->
+                                controller.putSettings(
+                                        new SettingsPatch(
+                                                null, null, 0, null, null, null, null, null, null,
+                                                null, null)))
+                .isInstanceOfSatisfying(
+                        ResponseStatusException.class,
+                        e -> assertThat(e.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST));
+        // The store keeps its default 50 GiB cap, not a partially-applied 0.
+        assertThat(store.get().retentionCapGb).isEqualTo(50);
+    }
+
+    @Test
+    void putSettings_acceptsDistinctPositiveStorageLocationsAndRoundTrips() {
+        // The happy path: distinct, non-nested archive paths with positive caps, plus a positive
+        // active cap, are accepted (200) and round-trip through the store.
+        List<StorageLocation> locs =
+                List.of(
+                        new StorageLocation("a", "E:/archive-one", 2000),
+                        new StorageLocation("b", "F:/archive-two", 4000));
+
+        SettingsView updated =
+                controller.putSettings(
+                        new SettingsPatch(
+                                null, null, 80, "D:/clips", null, null, null, null, null, null, locs));
+
+        assertThat(updated.retentionCapGb()).isEqualTo(80);
+        assertThat(updated.storageLocations()).hasSize(2);
+        // Persisted, not just echoed.
+        assertThat(store.get().retentionCapGb).isEqualTo(80);
+        assertThat(store.get().storageLocations).hasSize(2);
+        assertThat(store.get().storageLocations.get(0).path()).isEqualTo("E:/archive-one");
+        assertThat(store.get().storageLocations.get(1).capGb()).isEqualTo(4000);
+    }
 }

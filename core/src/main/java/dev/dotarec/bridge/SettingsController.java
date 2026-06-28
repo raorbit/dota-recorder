@@ -100,6 +100,14 @@ public class SettingsController {
                 }
             }
         }
+        // The active-drive retention cap must stay positive, mirroring the per-archive cap check in
+        // validateStorageLocations. Without this a cleared "Max storage" field (which the UI sends as
+        // 0) would persist retentionCapGb=0 and starve the sweeper's budget.
+        if (patch.retentionCapGb() != null && patch.retentionCapGb() <= 0) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "retention cap must be > 0 GB (was " + patch.retentionCapGb() + ")");
+        }
         if (patch.storageLocations() != null) {
             validateStorageLocations(patch.storageLocations(), patch.videoDir());
         }
@@ -171,17 +179,30 @@ public class SettingsController {
 
     /**
      * Validates a full-list-replace of {@code storageLocations}: each path non-blank, each
-     * {@code capGb > 0}, and every path distinct from the others AND from the active recording
-     * directory ({@code patchVideoDir} when the same PUT also changes it, else the stored one) — an
-     * archive drive pointed at the active dir would make the archiver move a file onto itself. A cap
-     * that exceeds the drive's physical capacity is intentionally NOT rejected here: it's warn-only
-     * in the UI, matching the "free-space check warns, never blocks" posture.
+     * {@code capGb > 0}, and every path distinct from AND not nested within the others or the active
+     * recording directory ({@code patchVideoDir} when the same PUT also changes it, else the stored
+     * one).
+     *
+     * <p>Both exact duplicates and parent/child containment are rejected. An archive drive pointed at
+     * the active dir would make the archiver move a file onto itself; a nested pair (one path a prefix
+     * of another, e.g. {@code D:\rec} and {@code D:\rec\archive}) is just as bad — bytes under the
+     * inner dir are counted toward BOTH locations in {@code StorageController.usage}, and the archiver
+     * keeps attributing the same file to two drives, producing recurring no-op self-moves. Containment
+     * is tested on the canonical form with a trailing {@link java.io.File#separator} appended, matching
+     * {@code RecordingArchiver.locationOf}/{@code StorageController.prefix}, so {@code D:\rec} matches
+     * {@code D:\rec\archive} but NOT a sibling {@code D:\record}.
+     *
+     * <p>A cap that exceeds the drive's physical capacity is intentionally NOT rejected here: it's
+     * warn-only in the UI, matching the "free-space check warns, never blocks" posture.
      */
     private void validateStorageLocations(List<StorageLocation> locations, String patchVideoDir) {
         String activeDir = patchVideoDir != null ? patchVideoDir : store.get().videoDir;
-        Set<String> seen = new java.util.HashSet<>();
+        // Accumulate the canonical form of every path accepted so far (the active recording dir plus
+        // each validated archive path) and test every new path against all of them for either-direction
+        // containment. A plain Set would catch only exact duplicates, not nesting.
+        List<String> accepted = new java.util.ArrayList<>();
         if (activeDir != null && !activeDir.isBlank()) {
-            seen.add(normalizePath(activeDir));
+            accepted.add(normalizePath(activeDir));
         }
         for (StorageLocation loc : locations) {
             if (loc == null || loc.path() == null || loc.path().isBlank()) {
@@ -193,18 +214,42 @@ public class SettingsController {
                         HttpStatus.BAD_REQUEST,
                         "storage location cap must be > 0 GB (was " + loc.capGb() + " for " + loc.path() + ")");
             }
-            if (!seen.add(normalizePath(loc.path()))) {
-                throw new ResponseStatusException(
-                        HttpStatus.BAD_REQUEST,
-                        "duplicate storage location (or matches the recording folder): " + loc.path());
+            String candidate = normalizePath(loc.path());
+            for (String existing : accepted) {
+                if (candidate.equals(existing) || contains(existing, candidate) || contains(candidate, existing)) {
+                    throw new ResponseStatusException(
+                            HttpStatus.BAD_REQUEST,
+                            "storage location overlaps another folder (duplicate, nested, or the recording"
+                                    + " folder): " + loc.path());
+                }
             }
+            accepted.add(candidate);
         }
     }
 
-    /** Best-effort path normalization for distinctness checks (Windows paths are case-insensitive). */
+    /**
+     * True when canonical path {@code outer} contains {@code inner} (i.e. {@code outer} is a strict
+     * parent of {@code inner}). Appends a trailing {@link java.io.File#separator} to {@code outer}
+     * before the prefix test so {@code D:\rec} matches {@code D:\rec\archive} but not a sibling
+     * {@code D:\record} — identical to the attribution-side prefix logic.
+     */
+    private static boolean contains(String outer, String inner) {
+        String prefix = outer.endsWith(java.io.File.separator) ? outer : outer + java.io.File.separator;
+        return inner.startsWith(prefix);
+    }
+
+    /**
+     * Best-effort path normalization for distinctness/containment checks (Windows paths are
+     * case-insensitive). MUST match the canonical form used by the byte-attribution code
+     * ({@code RecordingArchiver.locationOf} and {@code StorageController.normalize}):
+     * {@code toAbsolutePath().normalize().toString().toLowerCase()}. Without {@code toAbsolutePath()}
+     * a relative archive path (e.g. {@code "."}) would canonicalize differently here than at
+     * attribution time, so it could pass this distinctness check yet still resolve onto the active
+     * recording dir at move time (self-move). Keeping both forms identical closes that drift.
+     */
     private static String normalizePath(String path) {
         try {
-            return java.nio.file.Path.of(path.trim()).normalize().toString().toLowerCase();
+            return java.nio.file.Path.of(path.trim()).toAbsolutePath().normalize().toString().toLowerCase();
         } catch (RuntimeException e) {
             return path.trim().toLowerCase();
         }
