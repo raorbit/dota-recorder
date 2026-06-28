@@ -51,7 +51,8 @@ public class ObsSceneConfigurer {
 
     private static final Logger log = LoggerFactory.getLogger(ObsSceneConfigurer.class);
 
-    static final String SCENE_NAME = "Dota";
+    /** Canonical OBS scene name; the single source of truth for every consumer of the Dota scene. */
+    public static final String SCENE_NAME = "Dota";
     static final String GAME_CAPTURE_INPUT = "Game Capture";
     static final String GAME_CAPTURE_KIND = "game_capture";
 

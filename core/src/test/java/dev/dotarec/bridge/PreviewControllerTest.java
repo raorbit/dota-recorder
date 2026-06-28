@@ -9,6 +9,7 @@ import static org.mockito.Mockito.when;
 
 import dev.dotarec.bridge.PreviewController.ScenePreview;
 import dev.dotarec.obs.ObsController;
+import dev.dotarec.obs.ObsSceneConfigurer;
 import io.obswebsocket.community.client.OBSRemoteController;
 import io.obswebsocket.community.client.message.response.sources.GetSourceScreenshotResponse;
 import org.junit.jupiter.api.Test;
@@ -24,7 +25,7 @@ class PreviewControllerTest {
     private GetSourceScreenshotResponse screenshot(OBSRemoteController c) {
         GetSourceScreenshotResponse resp = mock(GetSourceScreenshotResponse.class);
         when(c.getSourceScreenshot(
-                        eq("Dota"), eq("jpg"), any(), any(), any(), anyLong()))
+                        eq(ObsSceneConfigurer.SCENE_NAME), eq("jpg"), any(), any(), any(), anyLong()))
                 .thenReturn(resp);
         return resp;
     }
@@ -91,7 +92,8 @@ class PreviewControllerTest {
         OBSRemoteController c = mock(OBSRemoteController.class);
         when(obs.ensureConnected()).thenReturn(true);
         when(obs.connectedController()).thenReturn(c);
-        when(c.getSourceScreenshot(eq("Dota"), eq("jpg"), any(), any(), any(), anyLong()))
+        when(c.getSourceScreenshot(
+                        eq(ObsSceneConfigurer.SCENE_NAME), eq("jpg"), any(), any(), any(), anyLong()))
                 .thenThrow(new RuntimeException("boom"));
 
         // The endpoint swallows the exception and degrades; it must not propagate / 500.
