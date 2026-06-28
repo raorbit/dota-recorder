@@ -14,6 +14,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
@@ -251,21 +252,28 @@ public class CrashRecoveryRunner implements ApplicationRunner {
     }
 
     private void reconcileOrphanVods() {
-        try {
-            Path videoDir = videoDir();
-            if (videoDir == null || !Files.isDirectory(videoDir)) {
-                return;
+        // Scan the active drive AND every configured archive drive: a VOD stranded on an archive drive
+        // by an interrupted cross-store move (copied there but the row never repointed) would otherwise
+        // be invisible to the active-drive-only scan and lost forever. Reclaiming it here re-imports it
+        // as a video-only row.
+        Set<String> referenced = referencedVideoPaths();
+        for (Path dir : scanDirs()) {
+            // Per-dir guard + try/catch: a missing/unplugged archive drive (or a bad path) must never
+            // abort startup, and one bad drive must not stop the others from being scanned.
+            try {
+                if (dir == null || !Files.isDirectory(dir)) {
+                    continue;
+                }
+                try (Stream<Path> stream = Files.list(dir)) {
+                    stream.filter(Files::isRegularFile)
+                            .filter(this::isRecordingFile)
+                            .filter(path -> !referenced.contains(normalize(path)))
+                            .forEach(this::importOrphanVod);
+                }
+            } catch (Exception e) {
+                // Best-effort: a bad path or IO error here must never abort startup.
+                log.warn("Could not reconcile orphan recordings under {}: {}", dir, e.toString());
             }
-            Set<String> referenced = referencedVideoPaths();
-            try (Stream<Path> stream = Files.list(videoDir)) {
-                stream.filter(Files::isRegularFile)
-                        .filter(this::isRecordingFile)
-                        .filter(path -> !referenced.contains(normalize(path)))
-                        .forEach(this::importOrphanVod);
-            }
-        } catch (Exception e) {
-            // Best-effort: a bad path or IO error here must never abort startup.
-            log.warn("Could not reconcile orphan recordings: {}", e.toString());
         }
     }
 
@@ -284,6 +292,28 @@ public class CrashRecoveryRunner implements ApplicationRunner {
             }
         }
         return out;
+    }
+
+    /**
+     * The directories the orphan scan walks: the active recording drive ({@code videoDir}) first, then
+     * each configured archive drive ({@code storageLocations[].path}). Blank entries are skipped and
+     * unparseable ones map to null (the caller guards each remaining dir with an {@code isDirectory}
+     * check, so nulls/missing drives are tolerated). No dedup is needed — a dir appearing twice only
+     * re-checks the same already-referenced files harmlessly.
+     */
+    private List<Path> scanDirs() {
+        List<Path> dirs = new ArrayList<>();
+        dirs.add(videoDir());
+        List<SettingsStore.StorageLocation> archives = settings.get().storageLocations;
+        if (archives != null) {
+            for (SettingsStore.StorageLocation loc : archives) {
+                if (loc == null || loc.path() == null || loc.path().isBlank()) {
+                    continue;
+                }
+                dirs.add(safePath(loc.path()));
+            }
+        }
+        return dirs;
     }
 
     /**

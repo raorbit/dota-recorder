@@ -19,6 +19,7 @@ import java.io.RandomAccessFile;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -207,6 +208,48 @@ class RetentionSweeperTest {
         assertThat(matches.findById(newerOnActive).orElseThrow().videoPath()).isNotNull();
         // 1 GiB remaining is now under the 2 GiB budget, so the sweep stops after one deletion.
         assertThat(result.totalAfterBytes()).isEqualTo(gib);
+    }
+
+    @Test
+    void capLargerThanPhysicalDiskIsClampedSoEvictionStillFires() throws Exception {
+        long gib = 1024L * 1024 * 1024;
+        // A 500 GiB configured cap on a drive that physically holds only 1 GiB. Without clamping the
+        // global budget would be 500 GiB, total stored could never reach it, and eviction would be
+        // disabled entirely — the active drive would grow unbounded. capBytes() clamps each location to
+        // min(configuredCap, physical total), so the effective budget here is 1 GiB and an over-budget
+        // oldest non-starred VOD is still pruned.
+        settings.get().retentionCapGb = 500;
+
+        // Inject a deterministic total-space probe: the video drive reports a 1 GiB physical capacity.
+        Map<String, Long> totalByDir = new HashMap<>();
+        totalByDir.put(videoDir.toAbsolutePath().normalize().toString(), gib);
+        RetentionSweeper.TotalSpaceProbe probe =
+                d -> {
+                    Long t = totalByDir.get(d.toAbsolutePath().normalize().toString());
+                    if (t == null) {
+                        throw new java.io.IOException("no injected total for " + d);
+                    }
+                    return t;
+                };
+        RetentionSweeper clamped =
+                new RetentionSweeper(matches, settings, events, new StorageMaintenanceLock(), probe);
+
+        // 2 GiB stored on the 1-GiB-physical drive: 1.5 GiB old + 0.5 GiB new. Clamped budget = 1 GiB,
+        // so the oldest is evicted and 0.5 GiB remains (under budget).
+        long oldest = seedWithFiles("old.mp4", "old.jpg", 3 * gib / 2, 1_000L, false);
+        long newer = seedWithFiles("new.mp4", "new.jpg", gib / 2, 2_000L, false);
+
+        RetentionSweeper.SweepResult result = clamped.sweep(null);
+
+        // Eviction fired despite the 500 GiB configured cap, because the budget was clamped to 1 GiB.
+        assertThat(result.capBytes()).isEqualTo(gib);
+        assertThat(result.deletedIds()).containsExactly(oldest);
+        assertThat(Files.exists(videoDir.resolve("old.mp4"))).isFalse();
+        assertThat(matches.findById(oldest).orElseThrow().videoPath()).isNull();
+        // The newer VOD survives: 0.5 GiB is under the clamped 1 GiB budget.
+        assertThat(Files.exists(videoDir.resolve("new.mp4"))).isTrue();
+        assertThat(matches.findById(newer).orElseThrow().videoPath()).isNotNull();
+        assertThat(result.totalAfterBytes()).isEqualTo(gib / 2);
     }
 
     @Test

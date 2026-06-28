@@ -45,14 +45,54 @@ public class RetentionSweeper {
     /** Warn before a record if free disk would dip under this (one large match's worth). */
     private static final long LOW_DISK_THRESHOLD_BYTES = 5L * BYTES_PER_GB;
 
+    /**
+     * Probes a directory's filesystem TOTAL capacity. Pulled behind an interface (mirroring
+     * {@link RecordingArchiver.FreeSpaceProbe}) so tests can inject a deterministic disk size instead
+     * of depending on the host filesystem. Used to clamp a configured cap to what the disk can hold.
+     */
+    @FunctionalInterface
+    public interface TotalSpaceProbe {
+        long totalBytes(Path dir) throws IOException;
+    }
+
     private final MatchRepository matches;
     private final SettingsStore settings;
     private final EventPublisher events;
+    private final StorageMaintenanceLock maintenanceLock;
+    private final TotalSpaceProbe totalSpace;
 
+    @org.springframework.beans.factory.annotation.Autowired
+    public RetentionSweeper(
+            MatchRepository matches,
+            SettingsStore settings,
+            EventPublisher events,
+            StorageMaintenanceLock maintenanceLock) {
+        this(matches, settings, events, maintenanceLock,
+                dir -> Files.getFileStore(dir).getTotalSpace());
+    }
+
+    /**
+     * Backward-compatible constructor for existing tests: defaults a fresh {@link
+     * StorageMaintenanceLock} (the sweeper is the sole lock holder in those tests, so a private
+     * instance is fine) and a real total-space probe.
+     */
     public RetentionSweeper(MatchRepository matches, SettingsStore settings, EventPublisher events) {
+        this(matches, settings, events, new StorageMaintenanceLock(),
+                dir -> Files.getFileStore(dir).getTotalSpace());
+    }
+
+    /** Test seam: inject a deterministic total-space probe (and the shared lock). */
+    RetentionSweeper(
+            MatchRepository matches,
+            SettingsStore settings,
+            EventPublisher events,
+            StorageMaintenanceLock maintenanceLock,
+            TotalSpaceProbe totalSpace) {
         this.matches = matches;
         this.settings = settings;
         this.events = events;
+        this.maintenanceLock = maintenanceLock;
+        this.totalSpace = totalSpace;
     }
 
     /** Scheduled hourly sweep with no protected match (nothing is actively recording from here). */
@@ -71,50 +111,60 @@ public class RetentionSweeper {
      * @return result describing freed bytes and the swept ids
      */
     public SweepResult sweep(Long protectedId) {
-        long capBytes = capBytes();
-        long total = totalStoredVideoBytes();
-        if (total <= capBytes) {
-            return SweepResult.empty(total, capBytes);
-        }
-
-        List<MatchSummary> candidates = matches.findSweepCandidates(); // oldest first
-        List<Long> deletedIds = new ArrayList<>();
-        long freed = 0L;
-
-        for (MatchSummary m : candidates) {
+        // Serialize against the archiver's move pass: the two run on different scheduler-pool threads
+        // and both mutate the same VOD files/rows, so an unguarded interleave could delete a file the
+        // archiver is mid-copy of, or null a row the archiver just repointed. The lock is reentrant, so
+        // RecordingArchiver.archive() calling sweep() on its OWN thread (while already holding it) is
+        // safe.
+        maintenanceLock.lock();
+        try {
+            long capBytes = capBytes();
+            long total = totalStoredVideoBytes();
             if (total <= capBytes) {
-                break;
+                return SweepResult.empty(total, capBytes);
             }
-            if (protectedId != null && m.id() == protectedId) {
-                continue; // never delete the actively-recording match's file
-            }
-            long size = videoSizeBytes(m);
-            boolean videoGone = deleteFileQuietly(m.videoPath());
-            boolean thumbGone = deleteFileQuietly(m.thumbPath());
-            if (!videoGone) {
-                log.warn("Retention sweep left match {} intact because video deletion failed", m.id());
-                continue;
-            }
-            total -= size;
-            if (!thumbGone) {
-                log.warn(
-                        "Retention sweep could not delete thumbnail for match {}; pruning video row anyway",
-                        m.id());
-            }
-            matches.nullVideoPath(m.id());
-            deletedIds.add(m.id());
-            freed += size;
-        }
 
-        if (!deletedIds.isEmpty()) {
-            Map<String, Object> payload = new LinkedHashMap<>();
-            payload.put("freedBytes", freed);
-            payload.put("deletedIds", deletedIds);
-            events.publish("retention.swept", payload);
-            log.info("Retention sweep freed {} bytes across {} recordings (cap {} bytes)",
-                    freed, deletedIds.size(), capBytes);
+            List<MatchSummary> candidates = matches.findSweepCandidates(); // oldest first
+            List<Long> deletedIds = new ArrayList<>();
+            long freed = 0L;
+
+            for (MatchSummary m : candidates) {
+                if (total <= capBytes) {
+                    break;
+                }
+                if (protectedId != null && m.id() == protectedId) {
+                    continue; // never delete the actively-recording match's file
+                }
+                long size = videoSizeBytes(m);
+                boolean videoGone = deleteFileQuietly(m.videoPath());
+                boolean thumbGone = deleteFileQuietly(m.thumbPath());
+                if (!videoGone) {
+                    log.warn("Retention sweep left match {} intact because video deletion failed", m.id());
+                    continue;
+                }
+                total -= size;
+                if (!thumbGone) {
+                    log.warn(
+                            "Retention sweep could not delete thumbnail for match {}; pruning video row anyway",
+                            m.id());
+                }
+                matches.nullVideoPath(m.id());
+                deletedIds.add(m.id());
+                freed += size;
+            }
+
+            if (!deletedIds.isEmpty()) {
+                Map<String, Object> payload = new LinkedHashMap<>();
+                payload.put("freedBytes", freed);
+                payload.put("deletedIds", deletedIds);
+                events.publish("retention.swept", payload);
+                log.info("Retention sweep freed {} bytes across {} recordings (cap {} bytes)",
+                        freed, deletedIds.size(), capBytes);
+            }
+            return new SweepResult(freed, deletedIds, total, capBytes);
+        } finally {
+            maintenanceLock.unlock();
         }
-        return new SweepResult(freed, deletedIds, total, capBytes);
     }
 
     /**
@@ -154,27 +204,66 @@ public class RetentionSweeper {
      * {@code retentionCapGb} PLUS each archive drive's {@code capGb}). Eviction is global, not
      * per-drive: while stored video exceeds this sum, the oldest non-starred VOD is pruned wherever
      * it lives. Per-drive caps govern only WHERE the archiver places files; age governs deletion.
+     *
+     * <p>Each location's contribution is CLAMPED to {@code min(configuredCap, drive's real total
+     * capacity)}. A cap larger than the disk would otherwise inflate the global budget above what the
+     * disks can physically hold — so {@code totalStored} could never reach it and eviction would be
+     * disabled entirely, letting the active drive grow unbounded. Clamping keeps the budget honest. If
+     * a drive can't be stat'd (unplugged/not yet created), we fall back to its raw configured cap —
+     * you can't clamp what you can't measure, and under-counting is safer than aborting the sweep.
      */
     private long capBytes() {
         int activeCapGb;
+        String videoDir;
+        List<SettingsStore.StorageLocation> archives;
         try {
-            activeCapGb = settings.get().retentionCapGb;
+            SettingsStore.Settings s = settings.get();
+            activeCapGb = s.retentionCapGb;
+            videoDir = s.videoDir;
+            archives = s.storageLocations;
         } catch (RuntimeException e) {
             return (long) DEFAULT_CAP_GB * BYTES_PER_GB;
         }
         if (activeCapGb <= 0) {
             activeCapGb = DEFAULT_CAP_GB;
         }
-        long sumGb = activeCapGb;
-        List<SettingsStore.StorageLocation> archives = settings.get().storageLocations;
+        // Location 0 (active drive) is clamped too: a 500 GiB cap on a 256 GiB SSD must not pretend
+        // there's 500 GiB of budget there.
+        long sumBytes = clampedCapBytes(videoDir, activeCapGb);
         if (archives != null) {
             for (SettingsStore.StorageLocation loc : archives) {
                 if (loc != null && loc.capGb() > 0) {
-                    sumGb += loc.capGb();
+                    sumBytes += clampedCapBytes(loc.path(), loc.capGb());
                 }
             }
         }
-        return sumGb * BYTES_PER_GB;
+        return sumBytes;
+    }
+
+    /**
+     * A single location's budget in bytes, clamped to the drive's physical total capacity. Falls back
+     * to the raw configured cap when the directory is blank/unparseable or can't be stat'd.
+     */
+    private long clampedCapBytes(String dir, int capGb) {
+        long capBytes = (long) capGb * BYTES_PER_GB;
+        if (dir == null || dir.isBlank()) {
+            return capBytes;
+        }
+        Path path;
+        try {
+            path = Path.of(dir);
+        } catch (RuntimeException e) {
+            return capBytes;
+        }
+        try {
+            long total = totalSpace.totalBytes(path);
+            return Math.min(capBytes, total);
+        } catch (IOException | RuntimeException e) {
+            // Can't measure (drive unplugged / dir not yet created): keep the raw cap rather than
+            // clamp to zero, which would make the global budget collapse and over-evict.
+            log.debug("Total-space probe failed for {}; using raw cap: {}", path, e.toString());
+            return capBytes;
+        }
     }
 
     private Path videoDir() {
