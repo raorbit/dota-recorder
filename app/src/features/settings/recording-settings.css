@@ -13,6 +13,9 @@
 .rec-preview {
   position: relative;
   width: 100%;
+  /* Capped to the 480x270 screenshot size so it renders at native resolution and stays a modest
+     preview rather than a full-bleed panel that pushes the form below the fold. */
+  max-width: 480px;
   aspect-ratio: 16 / 9;
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
