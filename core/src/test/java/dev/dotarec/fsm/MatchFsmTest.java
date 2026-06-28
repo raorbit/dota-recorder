@@ -158,6 +158,26 @@ class MatchFsmTest {
     }
 
     @Test
+    void repeatedArmStateFramesOfSameDraft_startExactlyOnce_andDoNotRoll() {
+        // The opening draft streams many arm-state frames (Dota POSTs ~10Hz of HERO_SELECTION then
+        // PRE_GAME before the horn). They all belong to the SAME match, so they must not finalize and
+        // re-start the recording -- otherwise one draft is shredded into dozens of tiny VOD rows.
+        fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_HERO_SELECTION").noHero().activity(null).build());
+        assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
+        for (int i = 0; i < 10; i++) {
+            fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_HERO_SELECTION").noHero().activity(null).build());
+        }
+        for (int i = 0; i < 6; i++) {
+            fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_PRE_GAME").noHero().activity(null).build());
+        }
+
+        assertThat(obs.startCalls).as("repeated same-draft arm frames must not re-start").isEqualTo(1);
+        assertThat(obs.stopCalls).as("repeated same-draft arm frames must not finalize").isZero();
+        assertThat(matches.findAll()).as("no tiny VOD rows from arm-state thrash").isEmpty();
+        assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
+    }
+
+    @Test
     void armStateWhileRecording_finalizesOldRecordingAndStartsNewOne() {
         fsm.onFrame(frame().matchId(111L)
                 .state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")
@@ -436,6 +456,27 @@ class MatchFsmTest {
         // forceFinalize when idle is a harmless no-op.
         fsm.forceFinalize();
         assertThat(matches.findAll()).hasSize(1);
+    }
+
+    @Test
+    void playerBlockDropoutThenForceFinalize_keepsLastGoodKda() {
+        // Player block present with real K/D/A.
+        fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing")
+                .hero("npc_dota_hero_juggernaut").kills(2).deaths(1).assists(3).build());
+        assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
+
+        // A reconnect heartbeat drops the player block (KDA zero out in the frame). The session must
+        // hold its last good counters rather than copy those zeros.
+        fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing")
+                .hero("npc_dota_hero_juggernaut").noPlayer().build());
+
+        // GSI then goes silent for good; the watchdog force-finalizes off that zeroed-looking frame.
+        fsm.forceFinalize();
+
+        MatchSummary row = matches.findAll().get(0);
+        assertThat(row.kills()).as("dropout must not zero kills").isEqualTo(2);
+        assertThat(row.deaths()).as("dropout must not zero deaths").isEqualTo(1);
+        assertThat(row.assists()).as("dropout must not zero assists").isEqualTo(3);
     }
 
     @Test

@@ -82,8 +82,10 @@ class ObsConfigWriterTest {
                 // where a single backslash is an escape char, so a raw Windows path would be mangled
                 // on read ("bad output path", recording never starts). See ObsConfigWriter.writeProfile.
                 .contains("FilePath=" + settings.get().videoDir.replace('\\', '/'));
-        // Probed encoder token is persisted so the UI can reflect it.
-        assertThat(settings.get().encoder).isEqualTo("nvenc");
+        // The auto-detected encoder is written into the PROFILE but NOT persisted into settings: a blank
+        // encoder stays the "auto" sentinel so the UI keeps showing Auto and a GPU swap re-probes on the
+        // next launch (Codex C9 / ObsConfigWriter.resolveEncoder).
+        assertThat(settings.get().encoder).isBlank();
     }
 
     @Test
@@ -106,6 +108,26 @@ class ObsConfigWriterTest {
                 .contains("RecFormat2=mkv")
                 // FPSType stays the literal "Common FPS" mode.
                 .contains("FPSType=0");
+    }
+
+    @Test
+    void manualEncoderOverrideIsWrittenVerbatimAndNotProbed(@TempDir Path dir) throws Exception {
+        AppPaths paths = paths(dir);
+        SettingsStore settings = new SettingsStore(paths);
+        // User explicitly picked x264 on an NVIDIA box: the manual (non-blank) choice must win over the
+        // probe, be written verbatim into the profile, and stay persisted (the blank "auto" sentinel
+        // must NOT override it). writer() supplies the nvidiaProbe, which would otherwise pick nvenc.
+        settings.update(
+                s -> {
+                    s.encoder = "x264";
+                    return s;
+                });
+        writer(paths, settings, "", "0").configure();
+
+        Path ini = new ObsLayout(paths.obsDir()).profileIni();
+        assertThat(Files.readString(ini)).contains("RecEncoder=x264");
+        // The manual choice is preserved (not overwritten by the probe).
+        assertThat(settings.get().encoder).isEqualTo("x264");
     }
 
     @Test

@@ -70,6 +70,9 @@ public class GsiController {
                 log.warn("Dropping GSI frame with missing/mismatched auth token");
                 return ResponseEntity.ok().build();
             }
+            // Only authorized frames credit the watchdog's liveness clock, so a flood of invalid POSTs
+            // to the token-exempt /gsi endpoint can't suppress force-finalization during a real silence.
+            heartbeat.markAuthorized();
             captureAccountId(payload);
             GsiFrame frame = payload.toFrame(wallClockMillis);
             matchFsm.onFrame(frame);

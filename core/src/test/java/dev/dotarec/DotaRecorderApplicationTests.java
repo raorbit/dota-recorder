@@ -12,6 +12,7 @@ import org.junit.jupiter.api.io.TempDir;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.ApplicationContext;
+import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 
@@ -32,6 +33,11 @@ import org.springframework.test.context.DynamicPropertySource;
 @SpringBootTest(
         classes = DotaRecorderApplication.class,
         webEnvironment = SpringBootTest.WebEnvironment.NONE)
+// Close the context at the end of the class so the pooled HikariDataSource releases its handle on the
+// temp SQLite file BEFORE JUnit's static @TempDir cleanup tries to delete it (on Windows an open file
+// blocks directory deletion). The pool intentionally holds the DB open for the app's lifetime, so
+// without this the cached context would still own the file when @TempDir runs.
+@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class DotaRecorderApplicationTests {
 
     @TempDir static Path tmp;

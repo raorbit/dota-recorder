@@ -48,6 +48,12 @@ dependencies {
     // and is intentionally NOT wired for the v0.1 foundation.
     implementation("org.xerial:sqlite-jdbc:3.46.1.0")
 
+    // Connection pool for the SQLite DataSource. The GSI feed drives ~10Hz journal writes during a
+    // recording; an unpooled SQLiteDataSource opens/closes a physical file handle (re-running the
+    // PRAGMAs) on every call. Hikari keeps a small warm pool so those writes reuse a connection.
+    // Version is managed by the Spring Boot BOM (Hikari is Boot's default pool).
+    implementation("com.zaxxer:HikariCP")
+
     // OBS control over obs-websocket protocol v5 (OBS 28+). This is the
     // community fork that targets v5; the old net.twasi client is v4-only and
     // would NOT authenticate against a stock modern OBS. Pulls in Jetty's

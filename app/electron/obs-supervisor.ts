@@ -36,6 +36,16 @@ export interface ObsSupervisorOptions {
   readonly bridgeToken?: string;
   /** Called with each line of OBS stdout/stderr (for the log file). */
   readonly onLog?: (line: string) => void;
+  /**
+   * Called when OBS exits WITHOUT a stop() request (a crash). The supervisor has already cleared its
+   * child handle, so the caller can relaunch a fresh ObsSupervisor in response.
+   */
+  readonly onUnexpectedExit?: (info: ObsExitInfo) => void;
+}
+
+export interface ObsExitInfo {
+  readonly code: number | null;
+  readonly signal: NodeJS.Signals | null;
 }
 
 export class ObsSupervisor {
@@ -50,6 +60,7 @@ export class ObsSupervisor {
   private readonly healthTimeoutMs: number;
   private readonly bridgeToken: string | undefined;
   private readonly onLog: (line: string) => void;
+  private readonly onUnexpectedExit: ((info: ObsExitInfo) => void) | undefined;
 
   constructor(opts: ObsSupervisorOptions) {
     this.obsDir = opts.obsDir;
@@ -61,6 +72,7 @@ export class ObsSupervisor {
     this.healthTimeoutMs = opts.healthTimeoutMs ?? 30_000;
     this.bridgeToken = opts.bridgeToken;
     this.onLog = opts.onLog ?? ((line) => console.log(`[obs] ${line}`));
+    this.onUnexpectedExit = opts.onUnexpectedExit;
   }
 
   /** Spawn obs64.exe with the exact portable arg list and resolve once OBS is healthy. */
@@ -101,27 +113,32 @@ export class ObsSupervisor {
     // OBS aborts with a fatal "Failed to load theme" before binding the websocket. Portable
     // config/logs still land under the root: portable mode resolves those via the exe path
     // (`../../config`), not cwd, so they stay alongside the binary regardless.
-    this.child = spawn(obs64Path, args, {
+    const child = spawn(obs64Path, args, {
       cwd: path.join(this.obsDir, 'bin', '64bit'),
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    this.child = child;
 
-    if (this.child.pid !== undefined) {
+    if (child.pid !== undefined) {
       // Tie OBS's lifetime to this process: the OS reaps it on hard crash.
-      assignJob.assign(this.child.pid);
+      assignJob.assign(child.pid);
     }
 
-    this.child.stdout?.on('data', (buf: Buffer) => this.emitLines(buf));
-    this.child.stderr?.on('data', (buf: Buffer) => this.emitLines(buf));
-    this.child.on('exit', (code, signal) => {
+    child.stdout?.on('data', (buf: Buffer) => this.emitLines(buf));
+    child.stderr?.on('data', (buf: Buffer) => this.emitLines(buf));
+    child.on('exit', (code, signal) => {
+      // Only clear the handle if THIS child is still current (a newer start() may have replaced it).
+      if (this.child === child) {
+        this.child = null;
+      }
       if (!this.stopping) {
         this.onLog(`OBS exited unexpectedly (code=${code ?? 'null'} signal=${signal ?? 'null'})`);
+        this.onUnexpectedExit?.({ code, signal });
       }
-      this.child = null;
     });
 
-    await this.waitForObs();
+    await this.waitForObs(child);
   }
 
   /** Graceful-then-forceful shutdown of the OBS tree. */
@@ -203,14 +220,15 @@ export class ObsSupervisor {
     }
   }
 
-  private async waitForObs(): Promise<void> {
+  private async waitForObs(child: ChildProcess): Promise<void> {
     const deadline = Date.now() + this.healthTimeoutMs;
     let delay = 200;
     let lastError: unknown = null;
 
     while (Date.now() < deadline) {
-      if (this.child === null && this.stopping) {
-        throw new Error('Supervisor stopped before OBS became healthy.');
+      if (this.child !== child) {
+        // Superseded by a newer start(), or the child exited (crash/stop nulled it): stop polling.
+        throw new Error('Supervisor superseded before OBS became healthy.');
       }
       try {
         // The core auto-connects to OBS on its retry loop; /status reflects that via

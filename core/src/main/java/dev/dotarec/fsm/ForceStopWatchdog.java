@@ -19,8 +19,10 @@ import org.springframework.stereotype.Component;
  * {@code GsiHeartbeat}'s 5s ALIVE_WINDOW: that window drives the UI's green/red dot and should flip
  * the instant frames stop, whereas cutting a recording must tolerate brief drops (reconnects,
  * abandons, a momentary hitch) without losing the match. So the watchdog reads
- * {@link GsiHeartbeat#lastFrameAgoMillis()} directly rather than {@link GsiHeartbeat#isAlive()},
- * which is hardwired to the 5s UI window.
+ * {@link GsiHeartbeat#lastAuthorizedFrameAgoMillis()} directly rather than
+ * {@link GsiHeartbeat#isAlive()}, which is hardwired to the 5s UI window. It reads the AUTHORIZED
+ * timestamp (not the raw heartbeat) so malformed/unauthenticated POSTs to the token-exempt /gsi
+ * endpoint cannot keep a runaway recording alive past a real GSI silence.
  *
  * <p>Threading: this runs on the Spring scheduler thread while {@link MatchFsm#onFrame} runs on the
  * GSI request thread. Both {@code onFrame} and {@code forceFinalize} are {@code synchronized} on the
@@ -51,7 +53,7 @@ public class ForceStopWatchdog {
         if (fsm.getState() != MatchState.RECORDING) {
             return;
         }
-        long ago = heartbeat.lastFrameAgoMillis();
+        long ago = heartbeat.lastAuthorizedFrameAgoMillis();
         if (ago >= SILENCE_THRESHOLD_MS) {
             log.warn("GSI silent for {}ms while recording; force-finalizing", ago);
             fsm.forceFinalize();

@@ -29,6 +29,17 @@ export interface SupervisorOptions {
   readonly bridgeToken?: string;
   /** Called with each line of core stdout/stderr (for the log file later). */
   readonly onLog?: (line: string) => void;
+  /**
+   * Called when the core exits WITHOUT a stop() request — i.e. it crashed. The supervisor has
+   * already cleared its child handle by the time this fires, so calling start() again from inside
+   * the callback (a restart) is safe.
+   */
+  readonly onUnexpectedExit?: (info: ExitInfo) => void;
+}
+
+export interface ExitInfo {
+  readonly code: number | null;
+  readonly signal: NodeJS.Signals | null;
 }
 
 export class JvmSupervisor {
@@ -37,11 +48,13 @@ export class JvmSupervisor {
   private readonly healthTimeoutMs: number;
   private readonly bridgeToken: string | undefined;
   private readonly onLog: (line: string) => void;
+  private readonly onUnexpectedExit: ((info: ExitInfo) => void) | undefined;
 
   constructor(opts: SupervisorOptions = {}) {
     this.healthTimeoutMs = opts.healthTimeoutMs ?? 30_000;
     this.bridgeToken = opts.bridgeToken;
     this.onLog = opts.onLog ?? ((line) => console.log(`[core] ${line}`));
+    this.onUnexpectedExit = opts.onUnexpectedExit;
   }
 
   /** Spawn the JVM core and resolve once GET /health reports ok. */
@@ -64,11 +77,15 @@ export class JvmSupervisor {
       `-Dapp.obs.dir=${obsDir()}`,
       ...(source ? [`-Dapp.obs.source-dir=${source}`] : []),
       `-Dapp.obs.version=${obsVersion()}`,
+      // Pass our pid so the core's parent-death watchdog can self-exit if Electron dies hard and the
+      // Job Object reaper was unavailable (koffi failed to load) — freeing :3223/:3224 and the
+      // websocket port for the next launch instead of orphaning the JVM.
+      `-Dapp.parent-pid=${process.pid}`,
       '-jar',
       jar,
     ];
 
-    this.child = spawn(javaw, jvmArgs, {
+    const child = spawn(javaw, jvmArgs, {
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
       // Hand the core its bridge token out-of-band (env, not argv) so it can enforce
@@ -77,22 +94,28 @@ export class JvmSupervisor {
         ? { ...process.env, [BRIDGE_TOKEN_ENV]: this.bridgeToken }
         : process.env,
     });
+    this.child = child;
 
-    if (this.child.pid !== undefined) {
+    if (child.pid !== undefined) {
       // Tie the child's lifetime to this process: the OS reaps it on hard crash.
-      assignJob.assign(this.child.pid);
+      assignJob.assign(child.pid);
     }
 
-    this.child.stdout?.on('data', (buf: Buffer) => this.emitLines(buf));
-    this.child.stderr?.on('data', (buf: Buffer) => this.emitLines(buf));
-    this.child.on('exit', (code, signal) => {
+    child.stdout?.on('data', (buf: Buffer) => this.emitLines(buf));
+    child.stderr?.on('data', (buf: Buffer) => this.emitLines(buf));
+    child.on('exit', (code, signal) => {
+      // Only clear the handle if THIS child is still current — a newer start() (e.g. a crash-triggered
+      // restart) may already have replaced it. Clearing it FIRST lets onUnexpectedExit restart cleanly.
+      if (this.child === child) {
+        this.child = null;
+      }
       if (!this.stopping) {
         this.onLog(`core exited unexpectedly (code=${code ?? 'null'} signal=${signal ?? 'null'})`);
+        this.onUnexpectedExit?.({ code, signal });
       }
-      this.child = null;
     });
 
-    await this.waitForHealth();
+    await this.waitForHealth(child);
   }
 
   /** Graceful-then-forceful shutdown of the JVM tree. */
@@ -145,14 +168,17 @@ export class JvmSupervisor {
     }
   }
 
-  private async waitForHealth(): Promise<void> {
+  private async waitForHealth(child: ChildProcess): Promise<void> {
     const deadline = Date.now() + this.healthTimeoutMs;
     let delay = 200;
     let lastError: unknown = null;
 
     while (Date.now() < deadline) {
-      if (this.child === null && this.stopping) {
-        throw new Error('Supervisor stopped before core became healthy.');
+      if (this.child !== child) {
+        // This generation was superseded (a newer start() replaced the child) or the child exited
+        // (a crash/stop nulled it). Abort promptly instead of polling a dead or foreign core for the
+        // full timeout — that is what let a crash during restart spawn overlapping waitForHealth loops.
+        throw new Error('Supervisor superseded before core became healthy.');
       }
       try {
         const res = await fetch(HEALTH_URL, {

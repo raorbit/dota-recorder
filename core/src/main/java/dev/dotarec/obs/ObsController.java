@@ -402,11 +402,19 @@ public class ObsController implements ObsRecorder {
             return;
         }
         try {
-            c.stopRecord(REQUEST_TIMEOUT_MS);
+            StopRecordResponse resp = c.stopRecord(REQUEST_TIMEOUT_MS);
+            if (resp != null && resp.isSuccessful()) {
+                // Confirmed stopped: safe to clear the flag.
+                health.setRecording(false);
+            }
+            // Otherwise the library returned null/unsuccessful (it returns null on TIMEOUT, it does not
+            // throw). OBS may still be recording — e.g. a late OUTPUT_STARTED raced this cleanup and
+            // flipped recording=true. Mirror the finalize path and do NOT clear the flag here, so the
+            // next match's corrective StopRecord fires instead of issuing a StartRecord OBS would reject.
         } catch (Exception e) {
+            // Same reasoning: an error means we can't confirm OBS stopped, so leave the flag as-is.
             log.debug("Ignoring error stopping unconfirmed recording: {}", e.toString());
         }
-        health.setRecording(false);
     }
 
     @Override

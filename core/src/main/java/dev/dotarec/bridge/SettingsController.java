@@ -108,6 +108,14 @@ public class SettingsController {
                     HttpStatus.BAD_REQUEST,
                     "retention cap must be > 0 GB (was " + patch.retentionCapGb() + ")");
         }
+        // A non-null-but-blank videoDir would be persisted as "" and survive until the next core
+        // restart's default backfill, during which OBS, thumbnails, and the archiver disagree about
+        // where recordings live. Reject it like the other storage-affecting fields rather than persist
+        // a blank the three subsystems each interpret differently.
+        if (patch.videoDir() != null && patch.videoDir().isBlank()) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST, "video directory must not be blank");
+        }
         if (patch.storageLocations() != null) {
             validateStorageLocations(patch.storageLocations(), patch.videoDir());
         }

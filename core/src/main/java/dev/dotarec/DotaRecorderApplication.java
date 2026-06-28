@@ -1,7 +1,8 @@
 package dev.dotarec;
 
-import org.springframework.boot.SpringApplication;
+import dev.dotarec.config.PortGuard;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.builder.SpringApplicationBuilder;
 
 /**
  * Entry point for the Dota 2 Recorder core service.
@@ -19,6 +20,12 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 public class DotaRecorderApplication {
 
     public static void main(String[] args) {
-        SpringApplication.run(DotaRecorderApplication.class, args);
+        // PortGuard listens for ApplicationStartingEvent, which fires before the Spring context (and
+        // its bean post-processors) exist, so it must be registered as a listener here — a plain
+        // @Component would be discovered far too late to see that event. Without this wiring its
+        // actionable "port already in use / orphaned core" message would never fire.
+        new SpringApplicationBuilder(DotaRecorderApplication.class)
+                .listeners(new PortGuard())
+                .run(args);
     }
 }
