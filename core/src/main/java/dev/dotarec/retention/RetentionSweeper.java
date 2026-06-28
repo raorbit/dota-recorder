@@ -135,6 +135,14 @@ public class RetentionSweeper {
                 if (protectedId != null && m.id() == protectedId) {
                     continue; // never delete the actively-recording match's file
                 }
+                if (!driveReachable(m.videoPath())) {
+                    // The file's drive is offline (e.g. an unplugged archive). We can't delete it, and
+                    // deleteFileQuietly would treat the unreachable path as "already gone" (deleteIfExists
+                    // returns false, exists() is false) and null the row — silently orphaning an intact
+                    // VOD. Skip it; its bytes are also excluded from the budget (totalStoredVideoBytes),
+                    // so an offline archive can neither drive eviction nor be cannibalized.
+                    continue;
+                }
                 long size = videoSizeBytes(m);
                 boolean videoGone = deleteFileQuietly(m.videoPath());
                 boolean thumbGone = deleteFileQuietly(m.thumbPath());
@@ -287,9 +295,34 @@ public class RetentionSweeper {
             if (m.videoPath() == null || m.videoPath().isBlank()) {
                 continue;
             }
+            // A VOD on an offline drive (unplugged archive) is not manageable budget: it can be neither
+            // moved nor deleted. Counting it would make total exceed the (now archive-excluded) budget
+            // and force eviction of OTHER drives' files — or orphan this one. Exclude it, symmetric with
+            // clampedCapBytes contributing 0 headroom for the same unreachable archive.
+            if (!driveReachable(m.videoPath())) {
+                continue;
+            }
             total += videoSizeBytes(m);
         }
         return total;
+    }
+
+    /**
+     * Whether the drive holding {@code filePath} is currently reachable — i.e. the file's parent
+     * directory exists. This separates a genuinely-deleted/missing file on a PRESENT drive (parent
+     * exists; safe to prune the row) from a file on an UNPLUGGED drive (parent gone; the row must be
+     * preserved, never orphaned). A blank or parent-less path is treated as unreachable.
+     */
+    private boolean driveReachable(String filePath) {
+        if (filePath == null || filePath.isBlank()) {
+            return false;
+        }
+        try {
+            Path parent = Path.of(filePath).getParent();
+            return parent != null && Files.isDirectory(parent);
+        } catch (RuntimeException e) {
+            return false;
+        }
     }
 
     private long videoSizeBytes(MatchSummary m) {

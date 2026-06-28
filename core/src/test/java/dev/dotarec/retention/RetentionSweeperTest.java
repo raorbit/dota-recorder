@@ -290,6 +290,37 @@ class RetentionSweeperTest {
     }
 
     @Test
+    void offlineArchiveResidentVodIsNotOrphanedWhileItsDriveIsUnreachable() throws Exception {
+        // An archived VOD lives on a drive that is currently UNPLUGGED (its directory does not exist),
+        // with its size persisted in the DB. A newer, larger VOD on the active drive pushes total over
+        // cap. The sweep must evict the reachable active VOD and MUST NOT orphan the offline archive's
+        // row (deleteFileQuietly would otherwise treat the unreachable path as "gone" and null it).
+        long gib = 1024L * 1024 * 1024;
+        settings.get().retentionCapGb = 1;
+
+        // Offline archive VOD: a path under a directory that does NOT exist (no file created), with a DB
+        // size snapshot so the old code would have counted it. Older than the active VOD.
+        Path offlineArchiveFile = videoDir.getParent().resolve("unplugged-archive").resolve("old.mp4");
+        long offlineId = matches.insert(new NewMatch(
+                null, "match", "enriched", "puck",
+                1, 2, 3, 400, 500, 10000, 120,
+                "win", 7, 22, null, null, 1800,
+                1_000L, offlineArchiveFile.toString(), null, 2 * gib, false, 1_000L, null));
+
+        // Active-drive VOD: a real 2 GiB file, newer, so eviction must target it.
+        long activeId = seedWithFiles("new.mp4", "new.jpg", 2 * gib, 2_000L, false);
+
+        RetentionSweeper.SweepResult result = sweeper.sweep(null);
+
+        // The reachable active VOD is evicted; the offline archive's row is preserved (not orphaned).
+        assertThat(result.deletedIds()).containsExactly(activeId);
+        assertThat(matches.findById(activeId).orElseThrow().videoPath()).isNull();
+        assertThat(matches.findById(offlineId).orElseThrow().videoPath())
+                .as("a VOD on an unplugged drive must never be orphaned by the sweep")
+                .isEqualTo(offlineArchiveFile.toString());
+    }
+
+    @Test
     void freeSpaceCheckNeverThrowsAndReturnsNullWhenHealthy() {
         // The temp video drive has plenty of space in CI; the check must not throw and (almost
         // always) reports healthy. We only assert it doesn't blow up and returns a String-or-null.
