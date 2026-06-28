@@ -1,6 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
-import type { MatchSummary, Marker, PauseSpan } from '../api/client';
-import { fetchMarkers, fetchMatch, fetchPauses, videoStreamUrl } from '../api/client';
+import type { MatchSummary, Marker, PauseSpan, Clip } from '../api/client';
+import {
+  fetchMarkers,
+  fetchMatch,
+  fetchPauses,
+  fetchClips,
+  createClip,
+  deleteClip,
+  clipStreamUrl,
+  videoStreamUrl,
+  StatusSocket,
+} from '../api/client';
 import { bucketLabelOf } from '../store/buckets';
 import { heroDisplayName } from '../data/heroes';
 import { useLibraryStore } from '../store/library';
@@ -61,6 +71,23 @@ function fmtPlayTime(seconds: number): string {
   return `${mm}:${String(ss).padStart(2, '0')}`;
 }
 
+// A clip's display label: its explicit `label`, else a kind-derived fallback
+// ("Rampage" for an auto/triggered clip, "Manual" otherwise). Mirrors the
+// triggerReason → human-name idea without inventing names for unknown triggers.
+function clipLabel(clip: Clip): string {
+  if (clip.label != null && clip.label.trim() !== '') return clip.label;
+  if (clip.kind === 'auto') {
+    return clip.triggerReason === 'rampage' ? 'Rampage' : (clip.triggerReason ?? 'Auto');
+  }
+  return 'Manual';
+}
+
+// A clip span's length as a compact +Ns badge (whole seconds, never negative).
+function clipDuration(clip: Clip): string {
+  const s = Math.max(0, Math.round(clip.endOffsetS - clip.startOffsetS));
+  return `${s}s`;
+}
+
 // The 300px video stage. A real <video> sits behind the existing placeholder /
 // score / clock / scrubber chrome. Markers are data-driven from GET
 // /matches/{id}/markers, positioned by video_offset_s / duration, and click-to-seek
@@ -90,6 +117,22 @@ export function VideoPlayer({ match }: VideoPlayerProps): React.JSX.Element {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
+  // Clips cut from this match's VOD, LOCAL to the player (like markers/pauses — not
+  // in the zustand store). Fetched per-selection and kept fresh by the clip.* socket.
+  const [clips, setClips] = useState<readonly Clip[]>([]);
+  // Live generation progress (clip.progress percent) keyed by clip id, so a
+  // generating clip can show a percentage rather than a bare spinner.
+  const [clipProgress, setClipProgress] = useState<Record<number, number>>({});
+  // The clip a play action pointed the <video> at, or null while playing the full
+  // VOD. Drives which src the media element loads.
+  const [activeClipId, setActiveClipId] = useState<number | null>(null);
+  // Clip-range mode: a scissors-armed overlay with draggable in/out handles over the
+  // scrub track. inS/outS are video offsets (seconds); null = not arming a clip.
+  const [clipRange, setClipRange] = useState<{ inS: number; outS: number } | null>(null);
+  const [creatingClip, setCreatingClip] = useState(false);
+  // Which handle is being dragged (pointer-move updates the range until release).
+  const dragHandleRef = useRef<'in' | 'out' | null>(null);
+
   const deleteMatch = useLibraryStore((s) => s.deleteMatch);
 
   const matchId = match?.id ?? null;
@@ -113,33 +156,97 @@ export function VideoPlayer({ match }: VideoPlayerProps): React.JSX.Element {
     setCurrentTimeS(0); // else the readout shows the previous match's position for a video-less row
     setConfirmDelete(false);
     setDeleting(false);
+    setClips([]);
+    setClipProgress({});
+    setActiveClipId(null);
+    setClipRange(null);
+    setCreatingClip(false);
 
     if (matchId === null) return;
 
     let cancelled = false;
     const id = matchId;
 
-    void Promise.allSettled([fetchMarkers(id), fetchMatch(id), fetchPauses(id)]).then(
-      ([markersRes, detailRes, pausesRes]) => {
-        if (cancelled) return; // a newer selection (or unmount) superseded this fetch
-        if (markersRes.status === 'fulfilled') setMarkers(markersRes.value);
-        if (detailRes.status === 'fulfilled') {
-          setDurationS(detailRes.value.durationS);
-          setRecordStartWall(detailRes.value.recordStartedWallMs);
-          // Only point at the stream when a file actually exists. A blank/null
-          // videoPath (pruned/seeded) leaves videoUrl null -> placeholder shows.
-          const path = detailRes.value.videoPath;
-          if (path != null && path.trim() !== '') setVideoUrl(videoStreamUrl(id));
-        }
-        // A failed /pauses (none, or seeded) just leaves the span list empty.
-        if (pausesRes.status === 'fulfilled') setPauses(pausesRes.value);
-      },
-    );
+    void Promise.allSettled([
+      fetchMarkers(id),
+      fetchMatch(id),
+      fetchPauses(id),
+      fetchClips(id),
+    ]).then(([markersRes, detailRes, pausesRes, clipsRes]) => {
+      if (cancelled) return; // a newer selection (or unmount) superseded this fetch
+      if (markersRes.status === 'fulfilled') setMarkers(markersRes.value);
+      if (detailRes.status === 'fulfilled') {
+        setDurationS(detailRes.value.durationS);
+        setRecordStartWall(detailRes.value.recordStartedWallMs);
+        // Only point at the stream when a file actually exists. A blank/null
+        // videoPath (pruned/seeded) leaves videoUrl null -> placeholder shows.
+        const path = detailRes.value.videoPath;
+        if (path != null && path.trim() !== '') setVideoUrl(videoStreamUrl(id));
+      }
+      // A failed /pauses (none, or seeded) just leaves the span list empty.
+      if (pausesRes.status === 'fulfilled') setPauses(pausesRes.value);
+      // A failed /clips (none, or seeded) just leaves the clips strip empty.
+      if (clipsRes.status === 'fulfilled') setClips(clipsRes.value);
+    });
 
     return () => {
       cancelled = true;
     };
   }, [matchId]);
+
+  // Live clip lifecycle for the open match: a dedicated StatusSocket (the shared one
+  // lives privately inside startLibrary) scoped to this matchId via onClipEvent.
+  // clip.created/clip.ready re-fetch the strip; clip.progress just updates the
+  // per-clip percent. Self-contained: the socket auto-reconnects and is closed on
+  // unmount / matchId change so there's no leak.
+  useEffect(() => {
+    if (matchId === null) return;
+
+    let cancelled = false;
+    const id = matchId;
+    const socket = new StatusSocket();
+
+    const refreshClips = (): void => {
+      void fetchClips(id)
+        .then((rows) => {
+          if (!cancelled) setClips(rows);
+        })
+        .catch(() => {
+          /* transient: the next clip.* frame (or a re-select) reconciles */
+        });
+    };
+
+    const off = socket.onClipEvent(id, (evt) => {
+      if (cancelled) return;
+      if (evt.type === 'clip.progress') {
+        const { clipId, percent } = evt.payload;
+        setClipProgress((prev) => ({ ...prev, [clipId]: percent }));
+        return;
+      }
+      // clip.created / clip.ready: refresh the strip so a new pending row appears and
+      // a finished one flips to ready (or failed) with its playable path.
+      refreshClips();
+    });
+
+    socket.connect();
+
+    return () => {
+      cancelled = true;
+      off();
+      socket.close();
+    };
+  }, [matchId]);
+
+  // After the <video> src swaps to a selected clip's stream, load + start it. Keyed on
+  // activeClipId so it fires once per selection, after React has rendered the new src
+  // (avoids playing the stale src). Null (back to full VOD) is a no-op here.
+  useEffect(() => {
+    if (activeClipId === null) return;
+    const v = videoRef.current;
+    if (!v) return;
+    v.load?.();
+    void v.play?.().catch(() => {});
+  }, [activeClipId]);
 
   const caption = match
     ? `${heroDisplayName(match.hero)} · ${bucketLabelOf(match)}`
@@ -235,14 +342,115 @@ export function VideoPlayer({ match }: VideoPlayerProps): React.JSX.Element {
     seekTo(fraction * d);
   }
 
+  // Enter clip-range mode: seed a window around the playhead (lead 2s, trail 8s),
+  // clamped to the recording. No-op without a playable video / known duration.
+  function enterClipMode(): void {
+    const v = videoRef.current;
+    const d = usableDuration(v);
+    if (!v || d === null) return;
+    const t = v.currentTime;
+    setClipRange({ inS: Math.max(0, t - 2), outS: Math.min(d, t + 8) });
+  }
+
+  function cancelClip(): void {
+    dragHandleRef.current = null;
+    setClipRange(null);
+  }
+
+  // Confirm the armed range: POST the cut, exit clip mode. The created row arrives via
+  // the immediate response (pending) and the clip.* socket flips it to ready; refresh
+  // the strip from the response so it shows up without waiting for the frame.
+  async function onConfirmClip(): Promise<void> {
+    if (matchId === null || clipRange === null) return;
+    const startOffsetS = Math.min(clipRange.inS, clipRange.outS);
+    const endOffsetS = Math.max(clipRange.inS, clipRange.outS);
+    if (endOffsetS - startOffsetS <= 0) return; // degenerate window — nothing to cut
+    setCreatingClip(true);
+    try {
+      const created = await createClip(matchId, { startOffsetS, endOffsetS });
+      setClips((prev) => [...prev, created]);
+      setClipRange(null);
+    } catch {
+      /* leave clip mode armed so the user can retry */
+    } finally {
+      setCreatingClip(false);
+    }
+  }
+
+  // Drag an in/out handle: convert the pointer x over the scrub track to a video
+  // offset and move that edge. The drag is tracked on the scrub element (pointer
+  // capture) so it keeps following past the handle's own bounds.
+  function onHandleDrag(e: React.PointerEvent<HTMLDivElement>): void {
+    const which = dragHandleRef.current;
+    if (which === null || clipRange === null) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    // Map against the media element's REAL duration — the same timebase the playhead,
+    // seek, and the offsets POSTed to ffmpeg use. The DB durationS estimate can disagree,
+    // which would otherwise land the cut on the wrong sub-range of the VOD.
+    const d = usableDuration(videoRef.current) ?? (durationS ?? 0);
+    const fraction = clamp01((e.clientX - rect.left) / rect.width);
+    const offset = fraction * d;
+    setClipRange((prev) =>
+      prev === null ? prev : which === 'in' ? { ...prev, inS: offset } : { ...prev, outS: offset },
+    );
+  }
+
+  function startHandleDrag(which: 'in' | 'out', e: React.PointerEvent<HTMLDivElement>): void {
+    e.stopPropagation(); // don't seek-by-click the track
+    dragHandleRef.current = which;
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+  }
+
+  function endHandleDrag(): void {
+    dragHandleRef.current = null;
+  }
+
+  // Play a ready clip: point the <video> at its stream. A clip whose file isn't ready
+  // yet has no playable src, so this is gated on status==='ready'. Playback itself is
+  // kicked by the activeClipId effect once the new src has rendered (setting src then
+  // calling play() synchronously would race the old src).
+  function playClip(clip: Clip): void {
+    if (clip.status !== 'ready') return;
+    setActiveClipId(clip.id);
+  }
+
+  // Return to the full match VOD (clears the clip src).
+  function playFullVod(): void {
+    setActiveClipId(null);
+  }
+
+  // Delete a clip (unlinks the .mp4, drops the row), then refresh the strip. If the
+  // deleted clip was playing, fall back to the full VOD.
+  async function onDeleteClip(clip: Clip): Promise<void> {
+    try {
+      await deleteClip(clip.id);
+      if (activeClipId === clip.id) setActiveClipId(null);
+      setClips((prev) => prev.filter((c) => c.id !== clip.id));
+    } catch {
+      /* leave the row; the next clip.* frame / re-select reconciles */
+    }
+  }
+
   const dur = durationS ?? 0;
   // The time readout prefers the actual loaded media duration (the DB value is a recorded estimate
   // that can disagree); falls back to the DB duration before metadata loads / on a no-file row.
   const readoutDur = mediaDurationS ?? dur;
+  // The clip-range overlay must align with the PLAYHEAD (media duration), not the DB
+  // estimate used for marker/pause placement — otherwise the handles drift from where
+  // the playhead sits and from the offset actually cut by ffmpeg.
+  const scrubDur = mediaDurationS ?? dur;
   // Only place bars when we have a usable positive duration; otherwise hide them
   // rather than pile every marker at 0 (a misleading stack). Seeded rows usually
   // carry a real durationS, so bars position even without a video file.
   const canPosition = dur > 0;
+
+  // Clip controls (scissors + range handles) only make sense over a real, playable
+  // VOD — disabled on a seeded / pruned no-file row.
+  const hasVideo = videoUrl !== null;
+  // The src the media element loads: a playing clip's stream when one is selected,
+  // else the full match VOD (or nothing on a no-file row).
+  const playSrc = activeClipId !== null ? clipStreamUrl(activeClipId) : (videoUrl ?? undefined);
 
   return (
     <div className="vp-stage">
@@ -257,7 +465,7 @@ export function VideoPlayer({ match }: VideoPlayerProps): React.JSX.Element {
       <video
         ref={videoRef}
         className="vp-video"
-        src={videoUrl ?? undefined}
+        src={playSrc}
         onTimeUpdate={handleTimeUpdate}
         onLoadedMetadata={handleDurationChange}
         onDurationChange={handleDurationChange}
@@ -282,7 +490,12 @@ export function VideoPlayer({ match }: VideoPlayerProps): React.JSX.Element {
       )}
 
       <div className="vp-controls">
-        <div className="vp-scrub" onClick={handleScrubClick}>
+        <div
+          className="vp-scrub"
+          onClick={handleScrubClick}
+          onPointerMove={clipRange !== null ? onHandleDrag : undefined}
+          onPointerUp={clipRange !== null ? endHandleDrag : undefined}
+        >
           <div className="vp-scrub-fill" style={{ width: `${progress}%` }} />
           <div className="vp-scrub-head" style={{ left: `${progress}%` }} />
           {/* Dimmed pause spans render BEHIND the markers/playhead (lower z-index,
@@ -349,6 +562,48 @@ export function VideoPlayer({ match }: VideoPlayerProps): React.JSX.Element {
                 />
               );
             })}
+          {/* Clip-range overlay: a highlighted span between the two draggable in/out
+              handles. Reuses the same offset/dur fraction math as markers. Only shown
+              while arming a clip with a positive duration. */}
+          {clipRange !== null &&
+            canPosition &&
+            (() => {
+              const lo = Math.min(clipRange.inS, clipRange.outS);
+              const hi = Math.max(clipRange.inS, clipRange.outS);
+              const inPct = Math.min(100, Math.max(0, (clipRange.inS / scrubDur) * 100));
+              const outPct = Math.min(100, Math.max(0, (clipRange.outS / scrubDur) * 100));
+              const loPct = Math.min(100, Math.max(0, (lo / scrubDur) * 100));
+              const hiPct = Math.min(100, Math.max(0, (hi / scrubDur) * 100));
+              return (
+                <>
+                  <div
+                    className="vp-clip-span"
+                    style={{ left: `${loPct}%`, width: `${Math.max(0, hiPct - loPct)}%` }}
+                    aria-hidden="true"
+                  />
+                  <div
+                    className="vp-clip-handle"
+                    data-edge="in"
+                    style={{ left: `${inPct}%` }}
+                    role="slider"
+                    tabIndex={0}
+                    aria-label="Clip start"
+                    onPointerDown={(e) => startHandleDrag('in', e)}
+                    onClick={(e) => e.stopPropagation()}
+                  />
+                  <div
+                    className="vp-clip-handle"
+                    data-edge="out"
+                    style={{ left: `${outPct}%` }}
+                    role="slider"
+                    tabIndex={0}
+                    aria-label="Clip end"
+                    onPointerDown={(e) => startHandleDrag('out', e)}
+                    onClick={(e) => e.stopPropagation()}
+                  />
+                </>
+              );
+            })()}
         </div>
 
         <div className="vp-controls-row">
@@ -376,6 +631,44 @@ export function VideoPlayer({ match }: VideoPlayerProps): React.JSX.Element {
             {fmtPlayTime(currentTimeS)} / {fmtPlayTime(readoutDur)}
           </span>
           <span className="vp-controls-spacer" />
+          {/* Clip control. Idle: a scissors glyph arms clip-range mode. While arming:
+              an inline confirm/cancel pair (POST the cut / exit). Disabled with no
+              playable video. */}
+          {match && clipRange === null && (
+            <span
+              className="vp-icon vp-clip"
+              role="button"
+              tabIndex={hasVideo ? 0 : -1}
+              aria-label="Clip"
+              aria-disabled={!hasVideo}
+              title={hasVideo ? 'Clip a moment' : 'No video to clip'}
+              data-disabled={!hasVideo}
+              onClick={() => hasVideo && enterClipMode()}
+              onKeyDown={keyActivate(() => hasVideo && enterClipMode())}
+            >
+              ✂
+            </span>
+          )}
+          {clipRange !== null && (
+            <span className="vp-clip-actions">
+              <button
+                type="button"
+                className="vp-clip-confirm"
+                onClick={() => void onConfirmClip()}
+                disabled={creatingClip}
+              >
+                {creatingClip ? 'Clipping…' : 'Clip'}
+              </button>
+              <button
+                type="button"
+                className="vp-clip-cancel"
+                onClick={cancelClip}
+                disabled={creatingClip}
+              >
+                Cancel
+              </button>
+            </span>
+          )}
           <span
             className="vp-icon"
             role="button"
@@ -401,6 +694,69 @@ export function VideoPlayer({ match }: VideoPlayerProps): React.JSX.Element {
           )}
         </div>
       </div>
+
+      {/* Per-match clips strip under the player. One row per clip: its label +
+          duration, a status indicator (generating spinner / ready / failed), a play
+          action that points the <video> at the clip stream, and a delete action.
+          Hidden when the match has no clips. */}
+      {match && clips.length > 0 && (
+        <div className="vp-clips" aria-label="Clips">
+          {activeClipId !== null && (
+            <span
+              className="vp-clip-back"
+              role="button"
+              tabIndex={0}
+              title="Back to full recording"
+              onClick={playFullVod}
+              onKeyDown={keyActivate(playFullVod)}
+            >
+              ← Full VOD
+            </span>
+          )}
+          {clips.map((clip) => {
+            const pct = clipProgress[clip.id];
+            return (
+              <div
+                className="vp-clip-item"
+                key={clip.id}
+                data-status={clip.status}
+                data-active={activeClipId === clip.id}
+              >
+                <span
+                  className="vp-clip-play"
+                  role="button"
+                  tabIndex={clip.status === 'ready' ? 0 : -1}
+                  aria-label={`Play clip ${clipLabel(clip)}`}
+                  aria-disabled={clip.status !== 'ready'}
+                  onClick={() => playClip(clip)}
+                  onKeyDown={keyActivate(() => playClip(clip))}
+                >
+                  ▶
+                </span>
+                <span className="vp-clip-label">{clipLabel(clip)}</span>
+                <span className="vp-clip-dur">{clipDuration(clip)}</span>
+                <span className="vp-clip-status" data-status={clip.status}>
+                  {clip.status === 'ready' && '●'}
+                  {clip.status === 'failed' && '⚠'}
+                  {(clip.status === 'pending' || clip.status === 'generating') &&
+                    (pct != null ? `${Math.round(pct)}%` : '⟳')}
+                </span>
+                <span
+                  className="vp-icon vp-clip-del"
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`Delete clip ${clipLabel(clip)}`}
+                  title="Delete clip"
+                  onClick={() => void onDeleteClip(clip)}
+                  onKeyDown={keyActivate(() => void onDeleteClip(clip))}
+                >
+                  🗑
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {confirmDelete && (
         <div className="vp-confirm" role="alertdialog" aria-label="Confirm delete recording">

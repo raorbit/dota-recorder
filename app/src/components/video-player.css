@@ -193,6 +193,150 @@
   flex: 1;
 }
 
+/* --- clip control (scissors) + its inline confirm/cancel --- */
+.vp-clip:hover {
+  color: var(--gold);
+}
+.vp-clip[data-disabled='true'] {
+  opacity: 0.4;
+  cursor: default;
+}
+.vp-clip-actions {
+  display: flex;
+  gap: 8px;
+}
+.vp-clip-confirm,
+.vp-clip-cancel {
+  padding: 4px 12px;
+  border-radius: var(--radius-panel);
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: 12px;
+  cursor: pointer;
+}
+.vp-clip-confirm {
+  border: none;
+  background: var(--gold);
+  color: #1a1206;
+}
+.vp-clip-cancel {
+  border: 1px solid var(--border-strong);
+  background: transparent;
+  color: var(--text-secondary);
+}
+.vp-clip-confirm:disabled,
+.vp-clip-cancel:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* --- clip-range overlay on the scrub track --- */
+/* The highlighted in→out span. Sits above pause spans, below the playhead. */
+.vp-clip-span {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  background: rgba(217, 164, 65, 0.28);
+  border: 1px solid var(--gold);
+  border-radius: 2px;
+  pointer-events: none;
+  z-index: 1;
+}
+/* The two draggable in/out handles. */
+.vp-clip-handle {
+  position: absolute;
+  top: -5px;
+  width: 10px;
+  height: 16px;
+  margin-left: -5px;
+  border-radius: 2px;
+  background: var(--gold);
+  border: 1px solid #1a1206;
+  cursor: ew-resize;
+  touch-action: none;
+  z-index: 3;
+}
+.vp-clip-handle:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 1px;
+}
+
+/* --- per-match clips strip, overlaid just above the controls scrim --- */
+.vp-clips {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 64px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 16px;
+  overflow-x: auto;
+  background: linear-gradient(transparent, rgba(8, 9, 11, 0.55));
+}
+.vp-clip-back {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.vp-clip-back:hover {
+  color: var(--text);
+}
+.vp-clip-item {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: var(--radius-panel);
+  background: rgba(20, 22, 28, 0.85);
+  border: 1px solid var(--border-row);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.vp-clip-item[data-active='true'] {
+  border-color: var(--gold);
+}
+.vp-clip-play {
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 11px;
+}
+.vp-clip-play[aria-disabled='true'] {
+  opacity: 0.4;
+  cursor: default;
+}
+.vp-clip-label {
+  font-family: var(--font-display);
+  font-weight: 600;
+  color: var(--text);
+}
+.vp-clip-dur {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.vp-clip-status {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.vp-clip-status[data-status='ready'] {
+  color: var(--win);
+}
+.vp-clip-status[data-status='failed'] {
+  color: var(--loss);
+}
+.vp-clip-del {
+  font-size: 12px;
+}
+.vp-clip-del:hover {
+  color: var(--loss);
+}
+
 /* Delete control + its two-step confirm overlay. The trash glyph turns red on hover; the
    confirm dims the stage so a permanent delete reads as deliberate, not a stray tap. */
 .vp-delete:hover {
