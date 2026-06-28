@@ -3,13 +3,17 @@ import {
   fetchAudioInputs,
   fetchScenePreview,
   fetchSettings,
+  fetchStorageUsage,
   updateSettings,
   type AudioInputOption,
   type AudioSource,
   type AudioSourceKind,
+  type DriveUsage,
   type ScenePreview,
   type Settings,
   type SettingsPatch,
+  type StorageLocation,
+  type StorageUsage,
 } from '../../api/client';
 import type { StatusSnapshot } from '../../api/client';
 import './recording-settings.css';
@@ -75,8 +79,25 @@ const FORMAT_PRESETS: ReadonlyArray<{ readonly value: string; readonly label: st
   { value: 'fragmented_mp4', label: 'MP4 (fragmented)' },
 ];
 
-const RETENTION_MIN = 10;
-const RETENTION_MAX = 500;
+// Floor for any drive cap (GB). There is no ceiling anymore — caps are free-form numbers,
+// bounded only by the drive's real capacity (which the UI surfaces as a warning).
+const CAP_MIN_GB = 10;
+
+// Human-readable size from a byte count (null -> em dash). TB once past 1024 GB.
+function fmtSize(bytes: number | null | undefined): string {
+  if (bytes === null || bytes === undefined) return '—';
+  const gb = bytes / 1024 ** 3;
+  return gb >= 1024 ? `${(gb / 1024).toFixed(1)} TB` : `${Math.round(gb)} GB`;
+}
+
+// True when a configured cap can't be reached because the drive is too small: the cap
+// exceeds what's physically attainable for our VODs (bytes we already store there + free
+// space). Only meaningful once the drive has been saved and stat'd (freeBytes known).
+function capExceedsDrive(capGb: number, usage: DriveUsage | undefined): boolean {
+  if (!usage || usage.freeBytes === null) return false;
+  const reachableBytes = usage.usedBytes + usage.freeBytes;
+  return capGb * 1024 ** 3 > reachableBytes;
+}
 
 // The three audio-source kinds offered by the "Add source" chooser, with a label
 // and the single-glyph icon shown in each row's kind chip (also via [data-kind]).
@@ -121,6 +142,11 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
   const [videoDir, setVideoDir] = useState('');
   const [retentionGb, setRetentionGb] = useState(50);
   const [accountId, setAccountId] = useState('');
+
+  // Archive drives (tiered storage) and the live per-drive disk usage that backs the
+  // free/total readout + the cap-exceeds-drive warning. usage is keyed by path at render.
+  const [storageLocations, setStorageLocations] = useState<StorageLocation[]>([]);
+  const [usage, setUsage] = useState<StorageUsage | null>(null);
 
   // Video controls (mirror `resolution`: saved now, applied on the next OBS launch).
   // encoderChoice maps 'auto' <-> '' (blank sentinel re-arms the GPU probe at boot).
@@ -170,6 +196,7 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
         setVideoDir(s.videoDir);
         setRetentionGb(s.retentionCapGb);
         setAccountId(s.accountId !== null ? String(s.accountId) : '');
+        setStorageLocations(s.storageLocations);
         setAudioSources(s.audioSources);
         setFps(s.fps);
         setQuality(s.quality);
@@ -220,6 +247,22 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
     };
   }, []);
 
+  // Per-drive disk usage backs the free/total readout and the cap-exceeds-drive warning.
+  // Fetched on mount and re-fetched after a save (so a newly added drive gets stat'd).
+  const refreshUsage = (): void => {
+    void (async (): Promise<void> => {
+      try {
+        setUsage(await fetchStorageUsage());
+      } catch {
+        /* leave the prior usage; the readout degrades to em dashes */
+      }
+    })();
+  };
+
+  useEffect(() => {
+    refreshUsage();
+  }, []);
+
   // Refetch one kind's picker options on demand (e.g. when adding an application
   // source, whose process list is volatile). Best-effort; failures keep the cache.
   const refreshInputs = (kind: AudioSourceKind): void => {
@@ -244,7 +287,8 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
       quality !== settings.quality ||
       recFormat !== settings.format ||
       (encoderChoice === 'auto' ? '' : encoderChoice) !== settings.encoder ||
-      JSON.stringify(audioSources) !== JSON.stringify(settings.audioSources));
+      JSON.stringify(audioSources) !== JSON.stringify(settings.audioSources) ||
+      JSON.stringify(storageLocations) !== JSON.stringify(settings.storageLocations));
 
   // The output folder only governs WHERE NEW recordings are written; existing VODs keep their stored
   // paths and stay where they are. Surface that as a reminder once the folder is actually changed.
@@ -315,6 +359,46 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
     setSaveState('idle');
   };
 
+  // ── Archive-drive mutators (tiered storage). Same immutable-edit + reset-saveState
+  // shape as the audio-source mutators above. ──
+
+  const addDrive = (): void => {
+    setStorageLocations((prev) => [
+      ...prev,
+      { id: crypto.randomUUID(), path: '', capGb: 500 },
+    ]);
+    setSaveState('idle');
+  };
+
+  const removeDrive = (i: number): void => {
+    setStorageLocations((prev) => prev.filter((_, idx) => idx !== i));
+    setSaveState('idle');
+  };
+
+  const setDriveCap = (i: number, capGb: number): void => {
+    setStorageLocations((prev) =>
+      prev.map((d, idx) => (idx === i ? { ...d, capGb } : d)),
+    );
+    setSaveState('idle');
+  };
+
+  const setDrivePath = (i: number, path: string): void => {
+    setStorageLocations((prev) =>
+      prev.map((d, idx) => (idx === i ? { ...d, path } : d)),
+    );
+    setSaveState('idle');
+  };
+
+  const onBrowseDrive = async (i: number): Promise<void> => {
+    const picked = await window.dotarec?.selectFolder();
+    if (picked) {
+      setStorageLocations((prev) =>
+        prev.map((d, idx) => (idx === i ? { ...d, path: picked } : d)),
+      );
+      setSaveState('idle');
+    }
+  };
+
   const onSave = async (): Promise<void> => {
     setSaveState('saving');
     setError(null);
@@ -330,6 +414,8 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
         : { accountId: Number(trimmedAccount) }),
       // FULL-LIST REPLACE: always send the complete current array.
       audioSources,
+      // FULL-LIST REPLACE too. Drop drives with a blank path (a just-added, unfilled row).
+      storageLocations: storageLocations.filter((d) => d.path.trim() !== ''),
       fps,
       quality,
       format: recFormat,
@@ -344,12 +430,15 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
       setVideoDir(updated.videoDir);
       setRetentionGb(updated.retentionCapGb);
       setAccountId(updated.accountId !== null ? String(updated.accountId) : '');
+      setStorageLocations(updated.storageLocations);
       setAudioSources(updated.audioSources);
       setFps(updated.fps);
       setQuality(updated.quality);
       setRecFormat(updated.format);
       setEncoderChoice(updated.encoder ? updated.encoder : 'auto');
       setSaveState('saved');
+      // Stat any newly added drive so its free/total + warning appear right after saving.
+      refreshUsage();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to save settings.');
       setSaveState('error');
@@ -357,6 +446,7 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
   };
 
   const status = recorderStatusLabel(obs);
+  const activeUsage = usage?.drives.find((u) => u.role === 'active');
   const encoderToken = settings?.encoder ?? '';
   const resOptions = RES_PRESETS.some((p) => p.value === resolution)
     ? RES_PRESETS
@@ -594,23 +684,140 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
                 <label className="rec-label" htmlFor="rec-retention">
                   Max storage
                 </label>
-                <p className="rec-desc">Oldest unstarred recordings are removed first.</p>
+                <p className="rec-desc">
+                  Disk budget for the recording drive. Oldest unstarred recordings are removed
+                  first (across all drives).
+                </p>
               </div>
-              <div className="rec-control rec-slider">
+              <div className="rec-control rec-capfield">
                 <input
                   id="rec-retention"
-                  className="rec-range"
-                  type="range"
-                  min={RETENTION_MIN}
-                  max={RETENTION_MAX}
+                  className="rec-input rec-capinput"
+                  type="number"
+                  min={CAP_MIN_GB}
                   step={10}
                   value={retentionGb}
                   onChange={(e) => {
-                    setRetentionGb(Number(e.target.value));
+                    const v = Number(e.target.value);
+                    setRetentionGb(Number.isFinite(v) ? v : 0);
                     setSaveState('idle');
                   }}
                 />
-                <span className="rec-rangeval">{retentionGb} GB</span>
+                <span className="rec-capunit">GB</span>
+                {activeUsage && (
+                  <span className="rec-capfree">
+                    {fmtSize(activeUsage.freeBytes)} free of {fmtSize(activeUsage.totalBytes)}
+                  </span>
+                )}
+              </div>
+            </div>
+            {capExceedsDrive(retentionGb, activeUsage) && (
+              <p className="rec-note rec-note-warn" role="status">
+                <span className="rec-note-icon" aria-hidden="true">
+                  !
+                </span>
+                Cap {retentionGb} GB exceeds this drive — it will fill before the cap is reached.
+              </p>
+            )}
+            {usage && (
+              <p className="rec-note" role="status">
+                <span className="rec-note-icon" aria-hidden="true">
+                  i
+                </span>
+                Storing {fmtSize(usage.totalBytes)} of recordings across all drives —{' '}
+                {fmtSize(usage.starredBytes)} starred (never auto-deleted).
+              </p>
+            )}
+          </section>
+
+          <section className="rec-card" aria-label="Archive drives">
+            <h3 className="rec-sec">Archive drives</h3>
+            <p className="rec-desc aud-intro">
+              Finished recordings are moved off the recording drive onto these drives, filling each
+              up to its cap. The newest matches stay on the fast recording drive. Leave empty to keep
+              everything on the recording drive.
+            </p>
+
+            {storageLocations.map((loc, i) => {
+              const u = usage?.drives.find((x) => x.role === 'archive' && x.path === loc.path);
+              const warn = capExceedsDrive(loc.capGb, u);
+              return (
+                <div className="rec-row drv-row" key={loc.id}>
+                  <div className="rec-rowlabel drv-path">
+                    <div className="rec-control rec-path">
+                      <input
+                        className="rec-input rec-pathinput"
+                        type="text"
+                        value={loc.path}
+                        autoComplete="off"
+                        spellCheck={false}
+                        placeholder="D:\dota-archive"
+                        aria-label="Archive drive folder"
+                        onChange={(e) => setDrivePath(i, e.target.value)}
+                      />
+                      <button
+                        type="button"
+                        className="rec-browse"
+                        onClick={() => void onBrowseDrive(i)}
+                      >
+                        Browse
+                      </button>
+                    </div>
+                    {u && (
+                      <p className="rec-desc drv-free">
+                        {fmtSize(u.usedBytes)} used · {fmtSize(u.freeBytes)} free of{' '}
+                        {fmtSize(u.totalBytes)}
+                      </p>
+                    )}
+                    {warn && (
+                      <p className="rec-note rec-note-warn" role="status">
+                        <span className="rec-note-icon" aria-hidden="true">
+                          !
+                        </span>
+                        Cap {loc.capGb} GB exceeds this drive — it will fill before the cap is
+                        reached.
+                      </p>
+                    )}
+                  </div>
+                  <div className="rec-control drv-control">
+                    <div className="rec-capfield">
+                      <input
+                        className="rec-input rec-capinput"
+                        type="number"
+                        min={CAP_MIN_GB}
+                        step={10}
+                        aria-label="Drive cap in GB"
+                        value={loc.capGb}
+                        onChange={(e) => {
+                          const v = Number(e.target.value);
+                          setDriveCap(i, Number.isFinite(v) ? v : 0);
+                        }}
+                      />
+                      <span className="rec-capunit">GB</span>
+                    </div>
+                    <button
+                      type="button"
+                      className="aud-remove"
+                      aria-label="Remove drive"
+                      title="Remove drive"
+                      onClick={() => removeDrive(i)}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+
+            <div className="rec-row aud-addrow">
+              <div className="rec-rowlabel">
+                <span className="rec-label">Add a drive</span>
+                <p className="rec-desc">Use a larger drive to archive older recordings.</p>
+              </div>
+              <div className="rec-control aud-add">
+                <button type="button" className="rec-browse aud-add-kind" onClick={addDrive}>
+                  + Add drive
+                </button>
               </div>
             </div>
           </section>

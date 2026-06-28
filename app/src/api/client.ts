@@ -114,6 +114,17 @@ export interface AudioSource {
 // The OBS connection is app-managed and no longer part of this surface; only the
 // recording knobs are exposed. Writes go through PUT /settings as a partial patch
 // (see SettingsPatch).
+// One archive storage location (a slower/larger drive). FROZEN wire shape, serialized
+// identically by the core (Java record) and here. `id` is a stable UUID used as the
+// React key; `path` is the absolute archive directory; `capGb` is that drive's disk
+// budget in GiB. On PUT, storageLocations is a FULL-LIST REPLACE (like audioSources):
+// [] = single-drive (no archives), [..] = replace the whole list.
+export interface StorageLocation {
+  readonly id: string;
+  readonly path: string;
+  readonly capGb: number;
+}
+
 export interface Settings {
   readonly resolution: string;
   readonly encoder: string;
@@ -129,6 +140,29 @@ export interface Settings {
   readonly fps: number;
   readonly quality: string;
   readonly format: string;
+  // Archive drives recordings are moved onto after recording (tiered storage). Empty =
+  // single-drive: everything stays in videoDir under retentionCapGb.
+  readonly storageLocations: StorageLocation[];
+}
+
+// Per-drive disk usage from GET /storage/usage, used to show real free/total space and
+// warn when a configured cap exceeds the drive's capacity. `role` is 'active' (the
+// recording drive) or 'archive'. free/total are null when the drive can't be stat'd.
+export interface DriveUsage {
+  readonly role: 'active' | 'archive';
+  readonly path: string;
+  readonly capBytes: number;
+  readonly usedBytes: number;
+  readonly freeBytes: number | null;
+  readonly totalBytes: number | null;
+}
+
+// GET /storage/usage: per-drive rows plus library-wide totals. `totalBytes` is every
+// stored VOD; `starredBytes` is the starred subset (never auto-deleted by retention).
+export interface StorageUsage {
+  readonly drives: DriveUsage[];
+  readonly totalBytes: number;
+  readonly starredBytes: number;
 }
 
 // A partial update to Settings. Every field is optional so the renderer can PATCH
@@ -253,6 +287,12 @@ export function fetchStatus(): Promise<StatusSnapshot> {
 
 export function fetchSettings(): Promise<Settings> {
   return getJson<Settings>('/settings');
+}
+
+// Per-drive disk usage for the storage settings UI (real free/total space + computed
+// used bytes per configured drive). Polled alongside the settings form.
+export function fetchStorageUsage(): Promise<StorageUsage> {
+  return getJson<StorageUsage>('/storage/usage');
 }
 
 // A single polled screenshot of the OBS "Dota" scene. `dataUri` is a ready-to-use
