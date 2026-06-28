@@ -11,5 +11,7 @@
     "noEmit": false,
     "sourceMap": true
   },
-  "include": ["electron"]
+  "include": ["electron"],
+  "//": "Test files are excluded here so build:electron never emits them into electron-dist and the production typecheck stays vitest-type-free; they are type-checked via tsconfig.test.json instead.",
+  "exclude": ["electron/**/*.test.ts"]
 }
