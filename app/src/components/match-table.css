@@ -84,6 +84,16 @@
   background: linear-gradient(135deg, #2a3142, #1a1e29);
 }
 
+/* Hero portrait: same box as the placeholder chip, cropped to fill. */
+.mt-hero-icon {
+  width: 30px;
+  height: 20px;
+  flex: 0 0 30px;
+  border-radius: 4px;
+  object-fit: cover;
+  background: linear-gradient(135deg, #2a3142, #1a1e29);
+}
+
 .mt-hero-name {
   font-weight: 600;
   font-size: 14px;

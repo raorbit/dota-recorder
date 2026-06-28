@@ -1,6 +1,7 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { useLibraryStore, type ResultFilter } from '../store/library';
 import { bucketLabelOf, matchesBucket } from '../store/buckets';
+import { heroDisplayName, heroIconUrl } from '../data/heroes';
 import type { MatchSummary } from '../api/client';
 import './match-table.css';
 
@@ -18,7 +19,7 @@ function matchesSearch(match: MatchSummary, query: string): boolean {
   const q = query.trim().toLowerCase();
   if (q === '') return true;
   return (
-    (match.hero ?? '').toLowerCase().includes(q) ||
+    heroDisplayName(match.hero).toLowerCase().includes(q) ||
     bucketLabelOf(match).toLowerCase().includes(q) ||
     String(match.id).includes(q) ||
     (match.dotaMatchId !== null && String(match.dotaMatchId).includes(q))
@@ -44,6 +45,26 @@ interface RowProps {
   readonly selected: boolean;
   readonly onSelect: (id: number) => void;
   readonly onToggleStar: (id: number, starred: boolean) => void;
+}
+
+// Hero portrait with graceful fallback: shows the CDN icon, degrading to the plain chip
+// placeholder when there's no hero or the image can't load (e.g. offline / unknown hero).
+function HeroIcon({ hero }: { readonly hero: string | null }): React.JSX.Element {
+  const url = heroIconUrl(hero);
+  const [failed, setFailed] = useState(false);
+  if (url === null || failed) {
+    return <span className="mt-hero-chip" aria-hidden="true" />;
+  }
+  return (
+    <img
+      className="mt-hero-icon"
+      src={url}
+      alt=""
+      aria-hidden="true"
+      loading="lazy"
+      onError={() => setFailed(true)}
+    />
+  );
 }
 
 function MatchRow({ match, selected, onSelect, onToggleStar }: RowProps): React.JSX.Element {
@@ -82,8 +103,8 @@ function MatchRow({ match, selected, onSelect, onToggleStar }: RowProps): React.
         >
           {match.starred ? '★' : '☆'}
         </button>
-        <span className="mt-hero-chip" aria-hidden="true" />
-        <span className="mt-hero-name">{match.hero || 'Unknown hero'}</span>
+        <HeroIcon hero={match.hero} />
+        <span className="mt-hero-name">{heroDisplayName(match.hero)}</span>
       </div>
 
       <div className="mt-cell mt-result" data-result={hasResult ? match.result : 'none'}>

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { MatchSummary, Marker, PauseSpan } from '../api/client';
 import { fetchMarkers, fetchMatch, fetchPauses, videoStreamUrl } from '../api/client';
 import { bucketLabelOf } from '../store/buckets';
+import { heroDisplayName } from '../data/heroes';
 import { useLibraryStore } from '../store/library';
 import './video-player.css';
 
@@ -128,7 +129,7 @@ export function VideoPlayer({ match }: VideoPlayerProps): React.JSX.Element {
   }, [matchId]);
 
   const caption = match
-    ? `${match.hero || 'Unknown hero'} · ${bucketLabelOf(match)}`
+    ? `${heroDisplayName(match.hero)} · ${bucketLabelOf(match)}`
     : 'Storm Spirit · Mid · 38:12';
 
   // Seek the <video> to a marker's video offset. Harmless no-op on an empty /
