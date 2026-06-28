@@ -16,11 +16,16 @@ import {
   BRIDGE_TOKEN_HEADER,
   HEALTH_URL,
   bundledJavawPath,
+  ffmpegPath,
   obsDir,
   obsSourceDir,
   obsVersion,
   resolveCoreJar,
 } from './paths';
+
+// Env var the core (FfmpegLocator) reads as a fallback for the bundled ffmpeg path;
+// must stay identical to FfmpegLocator.FFMPEG_PATH_ENV in the core.
+const FFMPEG_PATH_ENV = 'DOTAREC_FFMPEG_PATH';
 
 export interface SupervisorOptions {
   /** Total time to wait for /health before giving up. */
@@ -73,10 +78,15 @@ export class JvmSupervisor {
     // ObsConfigWriter knows where to materialize/launch OBS from. source-dir is
     // omitted in dev when no bundled OBS is present (core skips the first-run copy).
     const source = obsSourceDir();
+    // Bundled ffmpeg path, threaded into the core as a system property (preferred) AND env
+    // (belt-and-suspenders) so the core's FfmpegLocator resolves it without ffmpeg on PATH.
+    // Omitted in dev when no bundled ffmpeg is present (the core falls back to "ffmpeg" on PATH).
+    const ffmpeg = ffmpegPath();
     const jvmArgs = [
       `-Dapp.obs.dir=${obsDir()}`,
       ...(source ? [`-Dapp.obs.source-dir=${source}`] : []),
       `-Dapp.obs.version=${obsVersion()}`,
+      ...(ffmpeg ? [`-Dapp.ffmpeg.path=${ffmpeg}`] : []),
       // Pass our pid so the core's parent-death watchdog can self-exit if Electron dies hard and the
       // Job Object reaper was unavailable (koffi failed to load) — freeing :3223/:3224 and the
       // websocket port for the next launch instead of orphaning the JVM.
@@ -85,14 +95,17 @@ export class JvmSupervisor {
       jar,
     ];
 
+    // Hand the core its bridge token out-of-band (env, not argv) so it can enforce the shared
+    // secret on the loopback API (absent token -> core runs auth-disabled), and the bundled ffmpeg
+    // path as a belt-and-suspenders fallback to the -Dapp.ffmpeg.path system property above.
+    const env: NodeJS.ProcessEnv = { ...process.env };
+    if (this.bridgeToken) env[BRIDGE_TOKEN_ENV] = this.bridgeToken;
+    if (ffmpeg) env[FFMPEG_PATH_ENV] = ffmpeg;
+
     const child = spawn(javaw, jvmArgs, {
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
-      // Hand the core its bridge token out-of-band (env, not argv) so it can enforce
-      // the shared secret on the loopback API. Absent token -> core runs auth-disabled.
-      env: this.bridgeToken
-        ? { ...process.env, [BRIDGE_TOKEN_ENV]: this.bridgeToken }
-        : process.env,
+      env,
     });
     this.child = child;
 

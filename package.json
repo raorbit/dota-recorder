@@ -14,8 +14,9 @@
     "typecheck": "npm --prefix app run typecheck",
     "build:all": "npm run build:core && npm run build:app && npm run build:electron",
     "fetch:obs": "node scripts/fetch-obs.mjs",
+    "fetch:ffmpeg": "node scripts/fetch-ffmpeg.mjs",
     "gsi:replay": "node scripts/gsi-replay.mjs",
-    "dist": "npm run fetch:obs && npm run build:all && electron-builder --win nsis --x64"
+    "dist": "npm run fetch:obs && npm run fetch:ffmpeg && npm run build:all && electron-builder --win nsis --x64"
   },
   "devDependencies": {
     "concurrently": "^9.1.2",
