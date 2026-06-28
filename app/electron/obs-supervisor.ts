@@ -36,6 +36,16 @@ export interface ObsSupervisorOptions {
   readonly bridgeToken?: string;
   /** Called with each line of OBS stdout/stderr (for the log file). */
   readonly onLog?: (line: string) => void;
+  /**
+   * Called when OBS exits WITHOUT a stop() request (a crash). The supervisor has already cleared its
+   * child handle, so the caller can relaunch a fresh ObsSupervisor in response.
+   */
+  readonly onUnexpectedExit?: (info: ObsExitInfo) => void;
+}
+
+export interface ObsExitInfo {
+  readonly code: number | null;
+  readonly signal: NodeJS.Signals | null;
 }
 
 export class ObsSupervisor {
@@ -50,6 +60,7 @@ export class ObsSupervisor {
   private readonly healthTimeoutMs: number;
   private readonly bridgeToken: string | undefined;
   private readonly onLog: (line: string) => void;
+  private readonly onUnexpectedExit: ((info: ObsExitInfo) => void) | undefined;
 
   constructor(opts: ObsSupervisorOptions) {
     this.obsDir = opts.obsDir;
@@ -61,6 +72,7 @@ export class ObsSupervisor {
     this.healthTimeoutMs = opts.healthTimeoutMs ?? 30_000;
     this.bridgeToken = opts.bridgeToken;
     this.onLog = opts.onLog ?? ((line) => console.log(`[obs] ${line}`));
+    this.onUnexpectedExit = opts.onUnexpectedExit;
   }
 
   /** Spawn obs64.exe with the exact portable arg list and resolve once OBS is healthy. */
@@ -115,10 +127,12 @@ export class ObsSupervisor {
     this.child.stdout?.on('data', (buf: Buffer) => this.emitLines(buf));
     this.child.stderr?.on('data', (buf: Buffer) => this.emitLines(buf));
     this.child.on('exit', (code, signal) => {
+      // Clear the handle FIRST so the crash callback can relaunch cleanly.
+      this.child = null;
       if (!this.stopping) {
         this.onLog(`OBS exited unexpectedly (code=${code ?? 'null'} signal=${signal ?? 'null'})`);
+        this.onUnexpectedExit?.({ code, signal });
       }
-      this.child = null;
     });
 
     await this.waitForObs();

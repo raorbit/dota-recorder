@@ -29,6 +29,17 @@ export interface SupervisorOptions {
   readonly bridgeToken?: string;
   /** Called with each line of core stdout/stderr (for the log file later). */
   readonly onLog?: (line: string) => void;
+  /**
+   * Called when the core exits WITHOUT a stop() request — i.e. it crashed. The supervisor has
+   * already cleared its child handle by the time this fires, so calling start() again from inside
+   * the callback (a restart) is safe.
+   */
+  readonly onUnexpectedExit?: (info: ExitInfo) => void;
+}
+
+export interface ExitInfo {
+  readonly code: number | null;
+  readonly signal: NodeJS.Signals | null;
 }
 
 export class JvmSupervisor {
@@ -37,11 +48,13 @@ export class JvmSupervisor {
   private readonly healthTimeoutMs: number;
   private readonly bridgeToken: string | undefined;
   private readonly onLog: (line: string) => void;
+  private readonly onUnexpectedExit: ((info: ExitInfo) => void) | undefined;
 
   constructor(opts: SupervisorOptions = {}) {
     this.healthTimeoutMs = opts.healthTimeoutMs ?? 30_000;
     this.bridgeToken = opts.bridgeToken;
     this.onLog = opts.onLog ?? ((line) => console.log(`[core] ${line}`));
+    this.onUnexpectedExit = opts.onUnexpectedExit;
   }
 
   /** Spawn the JVM core and resolve once GET /health reports ok. */
@@ -64,6 +77,10 @@ export class JvmSupervisor {
       `-Dapp.obs.dir=${obsDir()}`,
       ...(source ? [`-Dapp.obs.source-dir=${source}`] : []),
       `-Dapp.obs.version=${obsVersion()}`,
+      // Pass our pid so the core's parent-death watchdog can self-exit if Electron dies hard and the
+      // Job Object reaper was unavailable (koffi failed to load) — freeing :3223/:3224 and the
+      // websocket port for the next launch instead of orphaning the JVM.
+      `-Dapp.parent-pid=${process.pid}`,
       '-jar',
       jar,
     ];
@@ -86,10 +103,12 @@ export class JvmSupervisor {
     this.child.stdout?.on('data', (buf: Buffer) => this.emitLines(buf));
     this.child.stderr?.on('data', (buf: Buffer) => this.emitLines(buf));
     this.child.on('exit', (code, signal) => {
+      // Clear the handle FIRST so onUnexpectedExit can safely restart via start().
+      this.child = null;
       if (!this.stopping) {
         this.onLog(`core exited unexpectedly (code=${code ?? 'null'} signal=${signal ?? 'null'})`);
+        this.onUnexpectedExit?.({ code, signal });
       }
-      this.child = null;
     });
 
     await this.waitForHealth();
