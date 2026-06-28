@@ -1,5 +1,7 @@
 package dev.dotarec.data;
 
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
 import javax.sql.DataSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -18,8 +20,14 @@ import java.nio.file.Paths;
  * SQLite {@link DataSource} for the local metadata DB.
  *
  * <p>The four required pragmas are baked into {@link SQLiteConfig} so they are applied on
- * EVERY connection the pool hands out (sqlite-jdbc applies the SQLiteConfig per physical
- * connection): busy_timeout=5000, journal_mode=WAL, synchronous=NORMAL, foreign_keys=ON.
+ * EVERY physical connection (sqlite-jdbc applies the SQLiteConfig per physical connection):
+ * busy_timeout=5000, journal_mode=WAL, synchronous=NORMAL, foreign_keys=ON.
+ *
+ * <p>The {@link SQLiteDataSource} is wrapped in a small {@link HikariDataSource} pool: during a
+ * recording the GSI feed drives ~10Hz journal writes, and an unpooled source would open/close a
+ * physical SQLite file handle (re-running the pragmas) on every call. A warm 1–2 connection pool
+ * reuses connections instead. SQLite is single-writer, so the pool stays intentionally tiny; WAL +
+ * busy_timeout already serialize the rare concurrent writer (the scheduled enrich/retention jobs).
  *
  * <p>DB path resolution: the {@code app.db-path} property wins if set (the core-skeleton
  * module's AppPaths can supply it); otherwise it defaults to
@@ -52,10 +60,18 @@ public class DataSourceConfig {
         config.setSynchronous(SQLiteConfig.SynchronousMode.NORMAL);
         config.enforceForeignKeys(true);
 
-        SQLiteDataSource ds = new SQLiteDataSource(config);
-        ds.setUrl("jdbc:sqlite:" + dbPath.toAbsolutePath());
-        log.info("SQLite data source at {}", dbPath.toAbsolutePath());
-        return ds;
+        SQLiteDataSource sqlite = new SQLiteDataSource(config);
+        sqlite.setUrl("jdbc:sqlite:" + dbPath.toAbsolutePath());
+
+        HikariConfig hikari = new HikariConfig();
+        hikari.setDataSource(sqlite);
+        hikari.setPoolName("dota-sqlite");
+        // SQLite is single-writer; a tiny pool warms a connection for the ~10Hz journal-write hot path
+        // without inviting writer contention. The pragmas live in SQLiteConfig, so each pooled physical
+        // connection still gets WAL/busy_timeout/foreign_keys when sqlite-jdbc opens it.
+        hikari.setMaximumPoolSize(2);
+        log.info("SQLite data source at {} (pooled, max 2)", dbPath.toAbsolutePath());
+        return new HikariDataSource(hikari);
     }
 
     private Path resolveDbPath() {
