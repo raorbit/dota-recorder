@@ -33,6 +33,11 @@ jobs:
         with:
           node-version: '20'
 
+      # The electron typecheck (tsc -p app/tsconfig.electron.json) resolves the `electron` types from
+      # the ROOT node_modules -- electron is a root devDependency, not an app/ one -- so install both.
+      - name: Install root deps
+        run: npm ci
+
       - name: Install renderer deps
         run: npm --prefix app ci
 
