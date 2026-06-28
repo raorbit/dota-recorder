@@ -56,9 +56,12 @@ public class ObsController implements ObsRecorder {
      * How long to wait for OBS to confirm {@code OUTPUT_STARTED} after it accepts StartRecord, before
      * treating the start as failed (a phantom/black recording). Comfortably above OBS's
      * STARTING-&gt;STARTED encoder warm-up latency, yet bounded so a wedged OBS cannot hang the FSM
-     * thread indefinitely.
+     * thread indefinitely. Live validation showed a hardware-NVENC cold start (first record after OBS
+     * launch, under scene-capture contention) can land right at ~8s, so the 8s bound raced the
+     * confirmation and spuriously aborted a recording that had in fact started; 15s gives headroom
+     * for the cold start while still bounding a genuinely wedged OBS.
      */
-    private static final long START_CONFIRM_TIMEOUT_MS = 8_000L;
+    private static final long START_CONFIRM_TIMEOUT_MS = 15_000L;
 
     private final SettingsStore settings;
     private final ObsHealth health;
