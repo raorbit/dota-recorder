@@ -44,6 +44,9 @@ public class SettingsController {
     private static final Set<String> ALLOWED_QUALITY = Set.of("Stream", "HQ", "Lossless", "Small");
     private static final Set<String> ALLOWED_FORMAT =
             Set.of("hybrid_mp4", "fragmented_mp4", "mkv", "mov");
+    // Audio sources are also OBS-affecting: an unknown kind makes reconcile skip the source, which can
+    // leave isReady() false ("records nothing"). Validate it like the other OBS-affecting fields.
+    private static final Set<String> ALLOWED_AUDIO_KIND = Set.of("application", "output", "input");
 
     private final SettingsStore store;
     private final ObsController obsController;
@@ -79,6 +82,22 @@ public class SettingsController {
             throw new ResponseStatusException(
                     HttpStatus.BAD_REQUEST,
                     "invalid format: " + patch.format() + " (allowed: " + ALLOWED_FORMAT + ")");
+        }
+        if (patch.audioSources() != null) {
+            for (SettingsStore.AudioSource s : patch.audioSources()) {
+                if (s == null || !ALLOWED_AUDIO_KIND.contains(s.kind())) {
+                    throw new ResponseStatusException(
+                            HttpStatus.BAD_REQUEST,
+                            "invalid audio source kind: "
+                                    + (s == null ? "null" : s.kind())
+                                    + " (allowed: " + ALLOWED_AUDIO_KIND + ")");
+                }
+                if (s.volume() < 0 || s.volume() > 100) {
+                    throw new ResponseStatusException(
+                            HttpStatus.BAD_REQUEST,
+                            "invalid audio source volume: " + s.volume() + " (0..100)");
+                }
+            }
         }
         // Atomic read-copy-mutate: only the user-facing fields are overlaid (non-null), so the
         // app-managed OBS fields (host/port/password) carry forward untouched rather than being

@@ -229,6 +229,31 @@ class SettingsControllerTest {
     }
 
     @Test
+    void putSettings_rejectsUnknownAudioSourceKind() {
+        SettingsPatch patch =
+                new SettingsPatch(
+                        null, null, null, null, null, null,
+                        List.of(new AudioSource("x", "bogus", "t", "L", 100, false)),
+                        null, null, null);
+        assertThatThrownBy(() -> controller.putSettings(patch))
+                .isInstanceOf(ResponseStatusException.class);
+        // Rejected before persist: still the seeded Dota default, list not replaced.
+        assertThat(store.get().audioSources).hasSize(1);
+    }
+
+    @Test
+    void putSettings_rejectsOutOfRangeAudioVolume() {
+        SettingsPatch patch =
+                new SettingsPatch(
+                        null, null, null, null, null, null,
+                        List.of(new AudioSource("x", "output", "default", "L", 150, false)),
+                        null, null, null);
+        assertThatThrownBy(() -> controller.putSettings(patch))
+                .isInstanceOf(ResponseStatusException.class);
+        assertThat(store.get().audioSources).hasSize(1);
+    }
+
+    @Test
     void getSettings_audioSourcesAlwaysNonEmptyOnFreshInstall() {
         // The fresh-install seed: exactly one Dota application-capture source so a fresh install
         // records the game's audio out of the box.
