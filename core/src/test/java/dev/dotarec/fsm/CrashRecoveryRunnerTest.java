@@ -213,6 +213,32 @@ class CrashRecoveryRunnerTest {
     }
 
     @Test
+    void importsUnreferencedMkvAndMovFilesAsGsiOnlyRows() throws Exception {
+        // A crash mid-record on a non-mp4 container (RecFormat2=mkv/mov) leaves an orphan file. The
+        // scan recognizes the recording-extension allow-list, not just .mp4, so these are adopted.
+        Path orphanMkv = videoDir.resolve("orphan.mkv");
+        Path orphanMov = videoDir.resolve("orphan.mov");
+        Files.writeString(orphanMkv, "mkv bytes");
+        Files.writeString(orphanMov, "mov bytes");
+
+        runner.run(null);
+
+        assertThat(matches.findAll())
+                .filteredOn(row -> orphanMkv.toString().equals(row.videoPath()))
+                .singleElement()
+                .satisfies(
+                        row -> {
+                            assertThat(row.enrichmentState()).isEqualTo("gsi_only");
+                            assertThat(row.fileSizeBytes()).isEqualTo(Files.size(orphanMkv));
+                            assertThat(row.playedAt()).isNotNull();
+                        });
+        assertThat(matches.findAll())
+                .filteredOn(row -> orphanMov.toString().equals(row.videoPath()))
+                .singleElement()
+                .satisfies(row -> assertThat(row.enrichmentState()).isEqualTo("gsi_only"));
+    }
+
+    @Test
     void recoveryDropsStaleJournalWhenDotaMatchAlreadyFinalized() {
         // First recovery finalizes Dota match 99 into a matches row (UNIQUE dota_match_id).
         journal.open(sessionRow("session-a", 99L));
