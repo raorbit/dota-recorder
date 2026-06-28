@@ -63,6 +63,9 @@ asarUnpack:
   - "**/node_modules/koffi/**"
 
 win:
+  # Brand red-diamond icon (multi-size .ico) for the exe, taskbar, and installer.
+  # Regenerate with `node scripts/gen-icon.mjs` if the brand changes.
+  icon: build-resources/icon.ico
   target:
     - target: nsis
       arch:
