@@ -69,6 +69,10 @@ export function VideoPlayer({ match }: VideoPlayerProps): React.JSX.Element {
   // pause loop renders nothing rather than guessing.
   const [recordStartWall, setRecordStartWall] = useState<number | null>(null);
   const [durationS, setDurationS] = useState<number | null>(null);
+  // The loaded <video>'s REAL duration, once known. Used for the time readout so it reflects the
+  // actual file rather than the DB's recorded estimate (they can disagree). Marker/pause positioning
+  // still uses the DB durationS so bars place even on a seeded/no-file row.
+  const [mediaDurationS, setMediaDurationS] = useState<number | null>(null);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [progress, setProgress] = useState(0); // playhead %, driven by timeupdate
   const [currentTimeS, setCurrentTimeS] = useState(0); // playhead seconds, for the time readout
@@ -95,6 +99,7 @@ export function VideoPlayer({ match }: VideoPlayerProps): React.JSX.Element {
     setPauses([]);
     setRecordStartWall(null);
     setDurationS(null);
+    setMediaDurationS(null);
     setVideoUrl(null);
     setProgress(0);
     setCurrentTimeS(0); // else the readout shows the previous match's position for a video-less row
@@ -145,6 +150,13 @@ export function VideoPlayer({ match }: VideoPlayerProps): React.JSX.Element {
     } catch {
       /* empty/seeded video: setting currentTime is a harmless no-op */
     }
+  }
+
+  // Capture the media element's real duration once it (or a fresh src) reports one. Falls back to
+  // null for a seeded/empty player so the readout uses the DB estimate instead.
+  function handleDurationChange(): void {
+    const v = videoRef.current;
+    setMediaDurationS(v && Number.isFinite(v.duration) && v.duration > 0 ? v.duration : null);
   }
 
   // Live playhead from the media element. duration unknown (seeded empty video)
@@ -215,6 +227,9 @@ export function VideoPlayer({ match }: VideoPlayerProps): React.JSX.Element {
   }
 
   const dur = durationS ?? 0;
+  // The time readout prefers the actual loaded media duration (the DB value is a recorded estimate
+  // that can disagree); falls back to the DB duration before metadata loads / on a no-file row.
+  const readoutDur = mediaDurationS ?? dur;
   // Only place bars when we have a usable positive duration; otherwise hide them
   // rather than pile every marker at 0 (a misleading stack). Seeded rows usually
   // carry a real durationS, so bars position even without a video file.
@@ -235,6 +250,8 @@ export function VideoPlayer({ match }: VideoPlayerProps): React.JSX.Element {
         className="vp-video"
         src={videoUrl ?? undefined}
         onTimeUpdate={handleTimeUpdate}
+        onLoadedMetadata={handleDurationChange}
+        onDurationChange={handleDurationChange}
         onPlay={() => setPlaying(true)}
         onPause={() => setPlaying(false)}
         onVolumeChange={(e) => setMuted(e.currentTarget.muted)}
@@ -347,7 +364,7 @@ export function VideoPlayer({ match }: VideoPlayerProps): React.JSX.Element {
             {muted ? '🔇' : '🔊'}
           </span>
           <span className="vp-time">
-            {fmtPlayTime(currentTimeS)} / {fmtPlayTime(dur)}
+            {fmtPlayTime(currentTimeS)} / {fmtPlayTime(readoutDur)}
           </span>
           <span className="vp-controls-spacer" />
           <span
