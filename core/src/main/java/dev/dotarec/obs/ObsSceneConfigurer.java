@@ -13,8 +13,12 @@ import io.obswebsocket.community.client.message.response.inputs.SetInputVolumeRe
 import io.obswebsocket.community.client.message.response.scenes.CreateSceneResponse;
 import io.obswebsocket.community.client.message.response.scenes.GetSceneListResponse;
 import io.obswebsocket.community.client.message.response.scenes.SetCurrentProgramSceneResponse;
+import io.obswebsocket.community.client.message.response.sceneitems.GetSceneItemIdResponse;
+import io.obswebsocket.community.client.message.response.sceneitems.SetSceneItemTransformResponse;
 import io.obswebsocket.community.client.model.Input;
 import io.obswebsocket.community.client.model.Scene;
+import io.obswebsocket.community.client.model.SceneItem;
+import dev.dotarec.obs.setup.ObsConfigWriter;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -58,6 +62,17 @@ public class ObsSceneConfigurer {
     static final String GAME_CAPTURE_INPUT = "Game Capture";
     static final String GAME_CAPTURE_KIND = "game_capture";
 
+    /**
+     * OBS bounds type that scales a source to fit inside its bounds box, preserving aspect ratio. We
+     * give the game-capture item a bounds box the size of the whole canvas so any game render
+     * resolution is scaled to fit (see {@link #fitGameCaptureToCanvas}).
+     */
+    static final String BOUNDS_SCALE_INNER = "OBS_BOUNDS_SCALE_INNER";
+    /** OBS alignment bitmask: top-left (TOP|LEFT). The position anchor sits at the canvas origin. */
+    static final int ALIGN_TOP_LEFT = 5;
+    /** OBS alignment: centered (0). Centers the fitted source within its canvas-sized bounds box. */
+    static final int ALIGN_CENTER = 0;
+
     /** OBS WASAPI input-kind ids (verified from the bundled OBS 32.x win-wasapi.dll). Public so the
      * audio enumeration endpoint shares one source of truth instead of re-declaring the literals. */
     public static final String KIND_APPLICATION = "wasapi_process_output_capture";
@@ -89,6 +104,7 @@ public class ObsSceneConfigurer {
         }
         ensureScene(controller);
         ensureGameCaptureInput(controller);
+        fitGameCaptureToCanvas(controller);
         reconcileAudioInputs(controller);
         ensureProgramScene(controller);
         log.info("OBS scene '{}' is fully configured and active", SCENE_NAME);
@@ -139,6 +155,57 @@ public class ObsSceneConfigurer {
         log.info(
                 "Created game capture input '{}' with capture_mode=any_fullscreen",
                 GAME_CAPTURE_INPUT);
+    }
+
+    /**
+     * Scales the game-capture scene item to fit the OBS canvas. Game Capture brings the source in at
+     * the game's native render resolution and OBS places a new scene item unscaled at the top-left, so
+     * a game rendering larger than the canvas (e.g. Dota at 4K into a 1920x1080 canvas) is cropped to
+     * the top-left region -- the "only a quarter of the screen is recorded" bug. A {@code
+     * SCALE_INNER} bounds box spanning the whole canvas makes OBS scale the source to fit (down or up),
+     * preserving aspect ratio, for any game/display resolution without us having to know it up front.
+     *
+     * <p>Idempotent and non-fatal: re-applied on every connect (so a pre-existing, untransformed
+     * "Game Capture" is corrected too), and a failure warns rather than throwing -- a cropped
+     * recording still beats aborting scene config and recording nothing.
+     */
+    private void fitGameCaptureToCanvas(OBSRemoteController controller) {
+        int[] canvas = ObsConfigWriter.parseResolution(settings.get().resolution);
+        GetSceneItemIdResponse id =
+                controller.getSceneItemId(SCENE_NAME, GAME_CAPTURE_INPUT, 0, REQUEST_TIMEOUT_MS);
+        if (id == null || !id.isSuccessful() || id.getSceneItemId() == null) {
+            log.warn(
+                    "Could not resolve scene-item id for '{}'; skipping fit-to-canvas (capture may be"
+                            + " cropped)",
+                    GAME_CAPTURE_INPUT);
+            return;
+        }
+        // Bounds box = whole canvas, scale-inner = fit preserving aspect; position the box at the
+        // origin (top-left anchor) and center the fitted source inside it. Leave scale/size null so
+        // OBS derives them from the bounds.
+        SceneItem.Transform transform =
+                SceneItem.Transform.builder()
+                        .positionX(0f)
+                        .positionY(0f)
+                        .alignment(ALIGN_TOP_LEFT)
+                        .boundsType(BOUNDS_SCALE_INNER)
+                        .boundsAlignment(ALIGN_CENTER)
+                        .boundsWidth((float) canvas[0])
+                        .boundsHeight((float) canvas[1])
+                        .build();
+        SetSceneItemTransformResponse resp =
+                controller.setSceneItemTransform(
+                        SCENE_NAME, id.getSceneItemId(), transform, REQUEST_TIMEOUT_MS);
+        if (resp == null || !resp.isSuccessful()) {
+            log.warn(
+                    "Failed to fit '{}' to the {}x{} canvas; capture may be cropped",
+                    GAME_CAPTURE_INPUT,
+                    canvas[0],
+                    canvas[1]);
+            return;
+        }
+        log.info(
+                "Fit game capture to {}x{} canvas (bounds scale-inner)", canvas[0], canvas[1]);
     }
 
     /**
