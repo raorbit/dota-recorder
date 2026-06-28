@@ -58,10 +58,11 @@ public class ObsSceneConfigurer {
     static final String GAME_CAPTURE_INPUT = "Game Capture";
     static final String GAME_CAPTURE_KIND = "game_capture";
 
-    /** OBS WASAPI input-kind ids (verified from the bundled OBS 32.x win-wasapi.dll). */
-    static final String KIND_APPLICATION = "wasapi_process_output_capture";
-    static final String KIND_OUTPUT = "wasapi_output_capture";
-    static final String KIND_INPUT = "wasapi_input_capture";
+    /** OBS WASAPI input-kind ids (verified from the bundled OBS 32.x win-wasapi.dll). Public so the
+     * audio enumeration endpoint shares one source of truth instead of re-declaring the literals. */
+    public static final String KIND_APPLICATION = "wasapi_process_output_capture";
+    public static final String KIND_OUTPUT = "wasapi_output_capture";
+    public static final String KIND_INPUT = "wasapi_input_capture";
 
     /** App-owned prefix for every input we create, so reconcile can diff/clean only our inputs. */
     static final String OWNED_PREFIX = "dotarec:";
@@ -148,9 +149,11 @@ public class ObsSceneConfigurer {
      * skipped (audio degrades, recording still works); only a missing input list returns early.
      *
      * <p>Public so {@code SettingsController} can drive a live apply after a settings PUT without a
-     * reconnect; also called from {@link #ensureSceneReady}.
+     * reconnect; also called from {@link #ensureSceneReady}. {@code synchronized} so a settings-PUT
+     * reconcile and the connect-edge reconfigure (different threads) can't interleave their
+     * create/setSettings/remove sequences against the same OBS inputs.
      */
-    public void reconcileAudioInputs(OBSRemoteController controller) {
+    public synchronized void reconcileAudioInputs(OBSRemoteController controller) {
         if (controller == null) {
             return;
         }
@@ -173,6 +176,18 @@ public class ObsSceneConfigurer {
             String obsKind = kindToObsKind(s.kind());
             if (obsKind == null) {
                 log.warn("Audio source '{}' has unknown kind '{}'; skipping", name, s.kind());
+                continue;
+            }
+            if (!isEffectiveSource(s)) {
+                // Unconfigured (an application capture with no window picked yet): creating it would
+                // make an input that captures nothing but still counts toward readiness (isReady -> a
+                // silent recording). Skip it and remove any stale input from when it was configured.
+                if (existingOwned.containsKey(name)) {
+                    RemoveInputResponse rm = controller.removeInput(name, REQUEST_TIMEOUT_MS);
+                    if (rm != null && rm.isSuccessful()) {
+                        log.info("Removed audio input '{}' (source has no target)", name);
+                    }
+                }
                 continue;
             }
             boolean exists = existingOwned.containsKey(name);
@@ -258,6 +273,18 @@ public class ObsSceneConfigurer {
     /** The app-owned OBS input name for a source: {@code "dotarec:" + id}. */
     static String ownedInputName(AudioSource s) {
         return OWNED_PREFIX + s.id();
+    }
+
+    /**
+     * True when a source would actually capture something. An {@code application} source needs a chosen
+     * window (a blank target matches no process); {@code output}/{@code input} coerce a blank target to
+     * the system default, so they are always effective.
+     */
+    static boolean isEffectiveSource(AudioSource s) {
+        if ("application".equals(s.kind())) {
+            return s.target() != null && !s.target().isBlank();
+        }
+        return true;
     }
 
     /**

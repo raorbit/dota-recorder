@@ -129,11 +129,11 @@ public class AudioController {
         }
         switch (kind) {
             case "application":
-                return "wasapi_process_output_capture";
+                return ObsSceneConfigurer.KIND_APPLICATION;
             case "output":
-                return "wasapi_output_capture";
+                return ObsSceneConfigurer.KIND_OUTPUT;
             case "input":
-                return "wasapi_input_capture";
+                return ObsSceneConfigurer.KIND_INPUT;
             default:
                 return null;
         }
