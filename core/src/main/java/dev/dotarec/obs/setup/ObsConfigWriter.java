@@ -269,7 +269,7 @@ public class ObsConfigWriter {
     }
 
     /** Parses {@code "1920x1080"} -> {@code {1920, 1080}}; falls back to 1080p on anything odd. */
-    static int[] parseResolution(String resolution) {
+    public static int[] parseResolution(String resolution) {
         if (resolution != null) {
             String[] parts = resolution.toLowerCase().split("x", 2);
             if (parts.length == 2) {
