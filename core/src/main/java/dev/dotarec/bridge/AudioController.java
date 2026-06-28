@@ -2,6 +2,7 @@ package dev.dotarec.bridge;
 
 import com.google.gson.JsonObject;
 import dev.dotarec.obs.ObsController;
+import dev.dotarec.obs.ObsSceneConfigurer;
 import io.obswebsocket.community.client.OBSRemoteController;
 import io.obswebsocket.community.client.message.response.inputs.CreateInputResponse;
 import io.obswebsocket.community.client.message.response.inputs.GetInputPropertiesListPropertyItemsResponse;
@@ -34,7 +35,7 @@ public class AudioController {
 
     private static final Logger log = LoggerFactory.getLogger(AudioController.class);
 
-    private static final String SCENE_NAME = "Dota";
+    private static final String SCENE_NAME = ObsSceneConfigurer.SCENE_NAME;
     /**
      * Prefix for the hidden helper input each enumeration call creates and removes. A fresh UUID is
      * appended per call so concurrent enumerations (the settings UI primes application/output/input in

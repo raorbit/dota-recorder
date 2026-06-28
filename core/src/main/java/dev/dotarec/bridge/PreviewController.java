@@ -2,6 +2,7 @@ package dev.dotarec.bridge;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 import dev.dotarec.obs.ObsController;
+import dev.dotarec.obs.ObsSceneConfigurer;
 import io.obswebsocket.community.client.OBSRemoteController;
 import io.obswebsocket.community.client.message.response.sources.GetSourceScreenshotResponse;
 import org.slf4j.Logger;
@@ -30,8 +31,8 @@ public class PreviewController {
 
     private static final Logger log = LoggerFactory.getLogger(PreviewController.class);
 
-    /** A scene is a valid screenshot source; the "Dota" scene mirrors AudioController.SCENE_NAME. */
-    private static final String SCENE_NAME = "Dota";
+    /** A scene is a valid screenshot source; reuse the canonical scene name so a rename can't drift. */
+    private static final String SCENE_NAME = ObsSceneConfigurer.SCENE_NAME;
     private static final String IMAGE_FORMAT = "jpg";
     /** 16:9 preview; OBS scales the scene into it. Width/height range 8..4096 per the v5 spec. */
     private static final int PREVIEW_WIDTH = 480;
