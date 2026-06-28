@@ -565,3 +565,77 @@
   align-items: center;
   gap: 6px;
 }
+
+/* Storage caps: numeric GB field + unit + a free-space readout */
+.rec-capfield {
+  gap: 8px;
+}
+
+.rec-capinput {
+  min-width: 96px;
+  width: 96px;
+  text-align: right;
+  font-family: var(--font-mono);
+}
+
+.rec-capunit {
+  flex: 0 0 auto;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.rec-capfree {
+  flex: 0 0 auto;
+  margin-left: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* Warning variant of the inline note (cap exceeds the drive's real capacity) */
+.rec-note-warn {
+  color: var(--gold);
+}
+
+/* Visible, slightly emphasized "Warning:" prefix on warning notes. Carries the
+   meaning for screen readers and low-vision users so the note isn't colour-only
+   (the leading ! icon is aria-hidden). */
+.rec-note-label {
+  font-weight: 600;
+}
+
+/* Archive-drive rows: path + free readout on the left, cap + remove on the right */
+.drv-row {
+  align-items: flex-start;
+}
+
+.drv-path {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.drv-path .rec-path {
+  min-width: 0;
+  width: 100%;
+}
+
+.drv-free {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.drv-control {
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.drv-control .rec-capfield {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}

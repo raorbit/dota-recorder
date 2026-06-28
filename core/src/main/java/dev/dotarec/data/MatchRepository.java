@@ -283,6 +283,27 @@ public class MatchRepository {
         }
     }
 
+    /**
+     * Repoints a row's {@code video_path}/{@code thumb_path} after the archiver relocates the files
+     * to another drive. Unlike {@link #nullVideoPath} this KEEPS {@code file_size_bytes} (the bytes
+     * didn't change, only the location), so retention accounting stays correct post-move.
+     *
+     * @param thumbPath the new thumbnail path, or null to leave the row with no thumbnail
+     * @return rows updated (0 if no such match)
+     */
+    public int updateVideoPath(long id, String videoPath, String thumbPath) {
+        String sql = "UPDATE matches SET video_path = ?, thumb_path = ? WHERE id = ?";
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, videoPath);
+            ps.setString(2, thumbPath);
+            ps.setLong(3, id);
+            return ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to update video path for match " + id, e);
+        }
+    }
+
     // ---- insert / seed -----------------------------------------------------
 
     /**

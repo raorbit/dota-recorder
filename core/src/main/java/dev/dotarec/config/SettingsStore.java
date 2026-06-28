@@ -48,8 +48,24 @@ public class SettingsStore {
          * subset hybrid_mp4/fragmented_mp4/mkv/mov. Applied on the next OBS launch.
          */
         public String format = "hybrid_mp4";
-        /** Disk budget in GiB for the VOD retention/pruning policy. */
+        /**
+         * Disk budget in GiB for the active recording drive (the {@link #videoDir} that OBS writes
+         * to). This is location 0 of the tiered-storage fill order; finished VODs linger on the fast
+         * drive up to this cap before the archiver relocates the oldest to an archive drive.
+         */
         public int retentionCapGb = 50;
+        /**
+         * Optional ordered list of <em>archive</em> storage locations (typically larger/slower HDDs).
+         * After a recording finalizes the archiver moves the oldest VODs off {@link #videoDir} into
+         * these drives in list order, filling each up to its own {@code capGb}. Combined with the
+         * active drive they form one ordered, capped location list; eviction (when every drive is
+         * full) deletes the globally-oldest non-starred recording wherever it lives.
+         *
+         * <p>Defaults to {@code null} (NOT empty) like {@link #audioSources}: {@link #load} backfills
+         * an empty list only on a genuinely fresh/legacy field, so an explicit empty list the user
+         * saved (no archive drives) is durable. Empty = single-drive behavior, exactly as before.
+         */
+        public List<StorageLocation> storageLocations;
         /** OBS WebSocket host; loopback-only for this single-user local app. */
         public String obsHost = "127.0.0.1";
         /**
@@ -113,6 +129,9 @@ public class SettingsStore {
             // would silently drop audioSources on every copy-on-write update(). Null-safe: the field
             // defaults to null pre-seed, though copy() is only ever called on post-load settings.
             c.audioSources = audioSources == null ? null : new ArrayList<>(audioSources);
+            // Deep-copy the archive-location list (records are immutable, element sharing is safe);
+            // omitting this would silently drop storageLocations on every copy-on-write update().
+            c.storageLocations = storageLocations == null ? null : new ArrayList<>(storageLocations);
             return c;
         }
     }
@@ -127,6 +146,15 @@ public class SettingsStore {
      */
     public record AudioSource(
             String id, String kind, String target, String label, int volume, boolean muted) {}
+
+    /**
+     * One archive storage location. FROZEN wire shape — serialized identically by core (Jackson) and
+     * the renderer (TS). {@code id} is a stable client-or-core-generated UUID used as the React key;
+     * {@code path} is the absolute directory recordings are moved into; {@code capGb} is the disk
+     * budget for THAT drive in GiB (a placement budget, capped further by the drive's real free
+     * space — a cap larger than the disk never overfills it).
+     */
+    public record StorageLocation(String id, String path, int capGb) {}
 
     private static final Logger log = LoggerFactory.getLogger(SettingsStore.class);
 
@@ -199,6 +227,11 @@ public class SettingsStore {
                                             "Dota 2",
                                             100,
                                             false)));
+        }
+        // Backfill an empty archive list on a fresh/legacy field. Empty = single-drive behavior, so a
+        // settings.json predating storageLocations keeps recording exactly as before.
+        if (loaded.storageLocations == null) {
+            loaded.storageLocations = new ArrayList<>();
         }
         return loaded;
     }

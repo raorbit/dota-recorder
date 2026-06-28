@@ -4,6 +4,11 @@ server:
   # Windows Defender Firewall "Allow access?" prompt entirely.
   port: 3224
   address: 127.0.0.1
+  # Include the ResponseStatusException reason in the JSON error body so the settings UI can show
+  # the exact validation message inline (e.g. "retention cap must be > 0 GB"). Safe here because the
+  # bridge is loopback-only and app-internal — there is no untrusted client to leak details to.
+  error:
+    include-message: always
 
 spring:
   application:

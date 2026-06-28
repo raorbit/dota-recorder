@@ -344,6 +344,103 @@ class CrashRecoveryRunnerTest {
         assertThat(journal.findUnfinished()).isEmpty();
     }
 
+    @Test
+    void relinksStrandedArchiveFileToOriginalRowWhenItsVideoIsMissing() throws Exception {
+        Path archiveDir = configureArchive("hdd");
+        // The row's recorded path no longer exists on disk: an interrupted cross-store move consumed the
+        // source (atomic rename) before the repoint committed, so the row points at nothing.
+        long id = insertMatch(videoDir.resolve("gone.mp4").toString(), null, 2_048L);
+        // The relocated copy survived on the archive drive under its id-prefixed name, unreferenced.
+        Path stranded = archiveDir.resolve(id + "-gone.mp4");
+        Files.writeString(stranded, "the real recording bytes");
+
+        runner.run(null);
+
+        // No duplicate row: the ORIGINAL row is re-linked to the recovered archive copy.
+        assertThat(matches.findAll()).hasSize(1);
+        assertThat(matches.findById(id).orElseThrow().videoPath()).isEqualTo(stranded.toString());
+        assertThat(Files.exists(stranded)).isTrue();
+    }
+
+    @Test
+    void relinkAlsoRecoversTheArchivedThumbnail() throws Exception {
+        Path archiveDir = configureArchive("hdd");
+        long id = insertMatch(videoDir.resolve("gone.mp4").toString(), null, 2_048L);
+        Path stranded = archiveDir.resolve(id + "-gone.mp4");
+        Files.writeString(stranded, "bytes");
+        // The move also relocated the thumbnail under <archive>/thumbs/<id>-...; recovery finds it.
+        Path strandedThumb =
+                Files.createDirectories(archiveDir.resolve("thumbs")).resolve(id + "-gone.jpg");
+        Files.writeString(strandedThumb, "thumb");
+
+        runner.run(null);
+
+        MatchSummary row = matches.findById(id).orElseThrow();
+        assertThat(row.videoPath()).isEqualTo(stranded.toString());
+        assertThat(row.thumbPath()).isEqualTo(strandedThumb.toString());
+    }
+
+    @Test
+    void dropsRedundantArchiveLeftoverWhenRowAlreadyIntact() throws Exception {
+        Path archiveDir = configureArchive("hdd");
+        // The row still points at an existing file on the active drive (the move copied across but
+        // crashed before repointing, so the original is intact) ...
+        Path keep = videoDir.resolve("keep.mp4");
+        Files.writeString(keep, "intact recording");
+        long id = insertMatch(keep.toString(), null, Files.size(keep));
+        // ... while a redundant copy from the interrupted move sits on the archive drive.
+        Path leftover = archiveDir.resolve(id + "-keep.mp4");
+        Files.writeString(leftover, "redundant copy");
+
+        runner.run(null);
+
+        // The redundant leftover is removed (disk reclaimed); the row is untouched; no duplicate row.
+        assertThat(Files.exists(leftover)).isFalse();
+        assertThat(matches.findAll()).hasSize(1);
+        assertThat(matches.findById(id).orElseThrow().videoPath()).isEqualTo(keep.toString());
+    }
+
+    @Test
+    void importsUnprefixedArchiveOrphanAsGsiOnlyRow() throws Exception {
+        Path archiveDir = configureArchive("hdd");
+        // A recording on the archive drive with no id prefix (a user-placed file, or one whose row was
+        // deleted) has nothing to re-link to, so it is adopted as a standalone gsi_only row.
+        Path orphan = archiveDir.resolve("manual.mp4");
+        Files.writeString(orphan, "loose recording");
+
+        runner.run(null);
+
+        assertThat(matches.findAll())
+                .filteredOn(row -> orphan.toString().equals(row.videoPath()))
+                .singleElement()
+                .satisfies(row -> assertThat(row.enrichmentState()).isEqualTo("gsi_only"));
+    }
+
+    /** Adds an archive storage location at {@code <tmp>/<name>} and returns its directory. */
+    private Path configureArchive(String name) throws Exception {
+        Path archiveDir = Files.createDirectories(dir.resolve(name));
+        settings.update(
+                s -> {
+                    if (s.storageLocations == null) {
+                        s.storageLocations = new java.util.ArrayList<>();
+                    }
+                    s.storageLocations.add(
+                            new SettingsStore.StorageLocation(name, archiveDir.toString(), 100));
+                    return s;
+                });
+        return archiveDir;
+    }
+
+    /** Inserts a minimal finalized match row pointing at {@code videoPath} and returns its id. */
+    private long insertMatch(String videoPath, String thumbPath, long fileSizeBytes) {
+        return matches.insert(
+                new NewMatch(
+                        null, "match", "enriched", "npc_dota_hero_puck",
+                        null, null, null, null, null, null, null,
+                        null, null, null, null, null, null,
+                        1_000L, videoPath, thumbPath, fileSizeBytes, false, 1_000L, null));
+    }
+
     private RecordingSessionRow sessionRow(String id, Long dotaMatchId) {
         return new RecordingSessionRow(
                 id,
