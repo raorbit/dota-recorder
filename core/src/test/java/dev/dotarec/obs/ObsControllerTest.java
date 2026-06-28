@@ -220,6 +220,61 @@ class ObsControllerTest {
     }
 
     @Test
+    void isReady_withOnlyMutedAudioSource_doesNotRequireAudioInput() {
+        // A muted source yields no live audio track (reconcile creates the input but mutes it), so it
+        // can never satisfy hasDesktopAudio(). Gating on it would wedge isReady() false forever and
+        // silently disable recording — muting your only source should give video-only, not nothing.
+        ObsHealth health = new ObsHealth();
+        SettingsStore settings = mock(SettingsStore.class);
+        SettingsStore.Settings s = new SettingsStore.Settings();
+        s.audioSources =
+                List.of(new AudioSource("a", "application", "::dota2.exe", "Dota", 100, true)); // muted
+        when(settings.get()).thenReturn(s);
+
+        ObsController controller =
+                new ObsController(settings, health, new ObsEvents(health), sceneConfigurer());
+        OBSRemoteController obs = mock(OBSRemoteController.class);
+        GetCurrentProgramSceneResponse scene = mock(GetCurrentProgramSceneResponse.class);
+        when(scene.isSuccessful()).thenReturn(true);
+        when(scene.getCurrentProgramSceneName()).thenReturn("Dota");
+        when(obs.getCurrentProgramScene(anyLong())).thenReturn(scene);
+        ReflectionTestUtils.setField(controller, "controller", obs);
+        health.setConnected(true);
+
+        assertThat(controller.isReady())
+                .as("a muted-only audio config must record video-only, not be wedged not-ready")
+                .isTrue();
+        verify(obs, never()).getInputList(nullable(String.class), anyLong());
+    }
+
+    @Test
+    void isReady_withOnlyIneffectiveAudioSource_doesNotRequireAudioInput() {
+        // An application capture with no window picked (blank target) is ineffective: reconcile skips
+        // it, so no live input ever exists. The gate must treat it as video-only, not wedge not-ready.
+        ObsHealth health = new ObsHealth();
+        SettingsStore settings = mock(SettingsStore.class);
+        SettingsStore.Settings s = new SettingsStore.Settings();
+        s.audioSources =
+                List.of(new AudioSource("a", "application", "", "Unpicked", 100, false)); // blank target
+        when(settings.get()).thenReturn(s);
+
+        ObsController controller =
+                new ObsController(settings, health, new ObsEvents(health), sceneConfigurer());
+        OBSRemoteController obs = mock(OBSRemoteController.class);
+        GetCurrentProgramSceneResponse scene = mock(GetCurrentProgramSceneResponse.class);
+        when(scene.isSuccessful()).thenReturn(true);
+        when(scene.getCurrentProgramSceneName()).thenReturn("Dota");
+        when(obs.getCurrentProgramScene(anyLong())).thenReturn(scene);
+        ReflectionTestUtils.setField(controller, "controller", obs);
+        health.setConnected(true);
+
+        assertThat(controller.isReady())
+                .as("an ineffective-only audio config must record video-only, not be wedged not-ready")
+                .isTrue();
+        verify(obs, never()).getInputList(nullable(String.class), anyLong());
+    }
+
+    @Test
     void ensureConnected_whenConnectFailsWithoutReadyEvent_failsFastAndSkipsProtocolCheck() {
         ObsHealth health = new ObsHealth();
         SettingsStore settings = mock(SettingsStore.class);
