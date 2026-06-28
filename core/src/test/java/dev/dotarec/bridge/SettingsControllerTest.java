@@ -492,6 +492,24 @@ class SettingsControllerTest {
     }
 
     @Test
+    void putSettings_rejectsBlankVideoDir() {
+        // A cleared Output folder field arrives as a blank string. Persisting it would leave OBS,
+        // thumbnails, and the archiver disagreeing about where recordings live, so reject it (400)
+        // rather than store a blank that each subsystem interprets differently.
+        assertThatThrownBy(
+                        () ->
+                                controller.putSettings(
+                                        new SettingsPatch(
+                                                null, null, null, "   ", null, null, null, null, null,
+                                                null, null)))
+                .isInstanceOfSatisfying(
+                        ResponseStatusException.class,
+                        e -> assertThat(e.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST));
+        // The store keeps its default (non-blank) videoDir, not a partially-applied blank.
+        assertThat(store.get().videoDir).isNotBlank();
+    }
+
+    @Test
     void putSettings_acceptsDistinctPositiveStorageLocationsAndRoundTrips() {
         // The happy path: distinct, non-nested archive paths with positive caps, plus a positive
         // active cap, are accepted (200) and round-trip through the store.

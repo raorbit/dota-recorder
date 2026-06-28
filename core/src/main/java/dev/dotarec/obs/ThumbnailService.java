@@ -1,5 +1,6 @@
 package dev.dotarec.obs;
 
+import dev.dotarec.config.AppPaths;
 import dev.dotarec.config.SettingsStore;
 import io.obswebsocket.community.client.OBSRemoteController;
 import io.obswebsocket.community.client.message.response.scenes.GetCurrentProgramSceneResponse;
@@ -39,10 +40,12 @@ public class ThumbnailService implements ThumbnailCapturer {
 
     private final ObsController obs;
     private final SettingsStore settings;
+    private final AppPaths paths;
 
-    public ThumbnailService(ObsController obs, SettingsStore settings) {
+    public ThumbnailService(ObsController obs, SettingsStore settings, AppPaths paths) {
         this.obs = obs;
         this.settings = settings;
+        this.paths = paths;
     }
 
     /**
@@ -98,7 +101,9 @@ public class ThumbnailService implements ThumbnailCapturer {
 
     private Path videoDir() {
         String dir = settings.get().videoDir;
-        return Path.of(dir);
+        // Mirror ObsConfigWriter's blank-fallback to the default video dir, so a blank/absent setting
+        // can't drop the thumbnail into Path.of("") (the OBS process working directory).
+        return (dir == null || dir.isBlank()) ? paths.videoDir() : Path.of(dir);
     }
 
     private void ensureParent(Path file) {

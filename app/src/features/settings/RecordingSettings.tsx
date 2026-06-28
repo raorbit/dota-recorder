@@ -454,6 +454,15 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
     }
     setDriveErrors({});
 
+    // The output folder must not be blank: the core 400s a blank videoDir (OBS, thumbnails, and the
+    // archiver would otherwise disagree about where recordings live), so surface a clear message here
+    // instead of letting an empty field round-trip into a server error.
+    if (videoDir.trim() === '') {
+      setError('Choose an output folder for recordings.');
+      setSaveState('error');
+      return;
+    }
+
     setSaveState('saving');
     setError(null);
 
