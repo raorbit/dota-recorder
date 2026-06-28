@@ -92,6 +92,20 @@ function clampCapGb(value: number): number {
   return Math.round(value);
 }
 
+// Bounds for the auto-clip padding (seconds). The core CLAMPS values outside this range
+// to [1,60] (it does not 400); we also clamp client-side on blur/save so the field shows
+// the value that will actually take effect (a cleared field reads as 0).
+const PADDING_MIN_S = 1;
+const PADDING_MAX_S = 60;
+
+// Coerce the padding field's raw value into the bounded integer the backend accepts:
+// blank/NaN/<1 snaps up to PADDING_MIN_S, anything past PADDING_MAX_S clamps down, and
+// fractions are rounded. Used to reflect a sane value back (onBlur) and sanitize the PUT.
+function clampPadding(value: number): number {
+  if (!Number.isFinite(value) || value < PADDING_MIN_S) return PADDING_MIN_S;
+  return Math.min(Math.round(value), PADDING_MAX_S);
+}
+
 // Human-readable size from a byte count (null -> em dash). TB once past 1024 GB.
 function fmtSize(bytes: number | null | undefined): string {
   if (bytes === null || bytes === undefined) return '—';
@@ -164,6 +178,11 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
   const [recFormat, setRecFormat] = useState('hybrid_mp4');
   const [encoderChoice, setEncoderChoice] = useState('auto');
 
+  // Auto-clip controls. autoClipOnRampage gates the rampage clipper; clipPaddingSeconds
+  // is the lead/trail padding (clamped to [1,60] on blur/save like the storage caps).
+  const [autoClipOnRampage, setAutoClipOnRampage] = useState(false);
+  const [clipPaddingSeconds, setClipPaddingSeconds] = useState(8);
+
   // Latest polled OBS scene-preview frame (null = no frame / OBS down → placeholder).
   const [preview, setPreview] = useState<ScenePreview | null>(null);
 
@@ -215,6 +234,8 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
         setQuality(s.quality);
         setRecFormat(s.format);
         setEncoderChoice(s.encoder ? s.encoder : 'auto');
+        setAutoClipOnRampage(s.autoClipOnRampage);
+        setClipPaddingSeconds(s.clipPaddingSeconds);
         setLoadState('ready');
         // Prime each kind's options once the form is up.
         void loadInputs('application');
@@ -300,6 +321,8 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
       quality !== settings.quality ||
       recFormat !== settings.format ||
       (encoderChoice === 'auto' ? '' : encoderChoice) !== settings.encoder ||
+      autoClipOnRampage !== settings.autoClipOnRampage ||
+      clipPaddingSeconds !== settings.clipPaddingSeconds ||
       JSON.stringify(audioSources) !== JSON.stringify(settings.audioSources) ||
       JSON.stringify(storageLocations) !== JSON.stringify(settings.storageLocations));
 
@@ -487,6 +510,10 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
       format: recFormat,
       // 'auto' <-> '' (blank): the blank sentinel re-arms the GPU probe on the next boot.
       encoder: encoderChoice === 'auto' ? '' : encoderChoice,
+      autoClipOnRampage,
+      // Clamp to [1,60]: a cleared field reads as 0; the core clamps too, but clamping here
+      // keeps the UI honest about the value that will take effect.
+      clipPaddingSeconds: clampPadding(clipPaddingSeconds),
     };
 
     try {
@@ -502,6 +529,8 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
       setQuality(updated.quality);
       setRecFormat(updated.format);
       setEncoderChoice(updated.encoder ? updated.encoder : 'auto');
+      setAutoClipOnRampage(updated.autoClipOnRampage);
+      setClipPaddingSeconds(updated.clipPaddingSeconds);
       setSaveState('saved');
       // Stat any newly added drive so its free/total + warning appear right after saving.
       refreshUsage();
@@ -700,6 +729,68 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
                     </option>
                   ))}
                 </select>
+              </div>
+            </div>
+          </section>
+
+          <section className="rec-card">
+            <h3 className="rec-sec">Auto-clip</h3>
+            <div className="rec-row">
+              <div className="rec-rowlabel">
+                <span className="rec-label" id="rec-autoclip-label">
+                  Auto-clip on rampage
+                </span>
+                <p className="rec-desc">
+                  Automatically cut a short clip whenever you get a rampage.
+                </p>
+              </div>
+              <div className="rec-control">
+                <button
+                  type="button"
+                  className="rec-switch"
+                  role="switch"
+                  aria-checked={autoClipOnRampage}
+                  aria-labelledby="rec-autoclip-label"
+                  data-on={autoClipOnRampage ? 'true' : 'false'}
+                  onClick={() => {
+                    setAutoClipOnRampage((v) => !v);
+                    setSaveState('idle');
+                  }}
+                >
+                  <span className="rec-switch-knob" aria-hidden="true" />
+                </button>
+              </div>
+            </div>
+            <div className="rec-row">
+              <div className="rec-rowlabel">
+                <label className="rec-label" htmlFor="rec-clip-padding">
+                  Clip padding
+                </label>
+                <p className="rec-desc">
+                  Seconds of lead-in and trail kept around each auto-clip.
+                </p>
+              </div>
+              <div className="rec-control rec-capfield">
+                <input
+                  id="rec-clip-padding"
+                  className="rec-input rec-capinput"
+                  type="number"
+                  min={PADDING_MIN_S}
+                  max={PADDING_MAX_S}
+                  step={1}
+                  value={clipPaddingSeconds}
+                  onChange={(e) => {
+                    // Keep the raw value while typing (so the field can be cleared and
+                    // retyped); NaN is held as 0 and clamped to [1,60] on blur/save.
+                    const v = Number(e.target.value);
+                    setClipPaddingSeconds(Number.isFinite(v) ? v : 0);
+                    setSaveState('idle');
+                  }}
+                  // Reflect a sensible value once the user leaves the field: a cleared/
+                  // out-of-range value snaps into [1,60] rather than persisting (and sending) it.
+                  onBlur={() => setClipPaddingSeconds((v) => clampPadding(v))}
+                />
+                <span className="rec-capunit">s</span>
               </div>
             </div>
           </section>
