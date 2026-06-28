@@ -110,6 +110,11 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   // was open, and refresh the bucket badges. Rethrows so the caller can surface a failure.
   deleteMatch: async (id) => {
     await apiDeleteMatch(id);
+    // Invalidate any load() already in flight: it may have fetched the list BEFORE this delete
+    // committed server-side, so when it resolves its `token !== loadToken` guard now drops the stale
+    // result instead of resurrecting the just-deleted row. A coalesced match.* frame fires load()
+    // every ~200ms, so this race is real, not theoretical.
+    loadToken++;
     set((s) => ({
       matches: s.matches.filter((m) => m.id !== id),
       selectedMatchId: s.selectedMatchId === id ? null : s.selectedMatchId,
