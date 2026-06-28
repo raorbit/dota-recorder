@@ -192,3 +192,55 @@
 .vp-controls-spacer {
   flex: 1;
 }
+
+/* Delete control + its two-step confirm overlay. The trash glyph turns red on hover; the
+   confirm dims the stage so a permanent delete reads as deliberate, not a stray tap. */
+.vp-delete:hover {
+  color: var(--loss);
+}
+
+.vp-confirm {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  background: rgba(7, 8, 9, 0.82);
+}
+.vp-confirm-text {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 16px;
+  color: var(--text);
+}
+.vp-confirm-actions {
+  display: flex;
+  gap: 10px;
+}
+.vp-confirm-del,
+.vp-confirm-cancel {
+  padding: 8px 18px;
+  border-radius: var(--radius-panel);
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+}
+.vp-confirm-del {
+  border: none;
+  background: var(--loss);
+  color: #fff;
+}
+.vp-confirm-cancel {
+  border: 1px solid var(--border-strong);
+  background: transparent;
+  color: var(--text-secondary);
+}
+.vp-confirm-del:disabled,
+.vp-confirm-cancel:disabled {
+  opacity: 0.6;
+  cursor: default;
+}

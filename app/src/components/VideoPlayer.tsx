@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { MatchSummary, Marker, PauseSpan } from '../api/client';
 import { fetchMarkers, fetchMatch, fetchPauses, videoStreamUrl } from '../api/client';
 import { bucketLabelOf } from '../store/buckets';
+import { useLibraryStore } from '../store/library';
 import './video-player.css';
 
 interface VideoPlayerProps {
@@ -72,6 +73,11 @@ export function VideoPlayer({ match }: VideoPlayerProps): React.JSX.Element {
   const [currentTimeS, setCurrentTimeS] = useState(0); // playhead seconds, for the time readout
   const [playing, setPlaying] = useState(false);
   const [muted, setMuted] = useState(false);
+  // Two-step delete: the first click arms a confirm bar so a permanent delete can't fire on one tap.
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  const deleteMatch = useLibraryStore((s) => s.deleteMatch);
 
   const matchId = match?.id ?? null;
 
@@ -90,6 +96,8 @@ export function VideoPlayer({ match }: VideoPlayerProps): React.JSX.Element {
     setDurationS(null);
     setVideoUrl(null);
     setProgress(0);
+    setConfirmDelete(false);
+    setDeleting(false);
 
     if (matchId === null) return;
 
@@ -179,6 +187,19 @@ export function VideoPlayer({ match }: VideoPlayerProps): React.JSX.Element {
       fn();
     }
   };
+
+  // Confirmed delete: removes the row + .mp4/thumbnail. On success the store clears the
+  // selection, so this view falls back to the library (no local cleanup needed); on failure
+  // the confirm bar stays open so the user can retry.
+  async function onConfirmDelete(): Promise<void> {
+    if (!match) return;
+    setDeleting(true);
+    try {
+      await deleteMatch(match.id);
+    } catch {
+      setDeleting(false);
+    }
+  }
 
   // Click anywhere on the scrub track to seek by fraction. No-op without a finite
   // media duration.
@@ -337,8 +358,45 @@ export function VideoPlayer({ match }: VideoPlayerProps): React.JSX.Element {
           >
             ⛶
           </span>
+          {match && (
+            <span
+              className="vp-icon vp-delete"
+              role="button"
+              tabIndex={0}
+              aria-label="Delete recording"
+              title="Delete recording"
+              onClick={() => setConfirmDelete(true)}
+              onKeyDown={keyActivate(() => setConfirmDelete(true))}
+            >
+              🗑
+            </span>
+          )}
         </div>
       </div>
+
+      {confirmDelete && (
+        <div className="vp-confirm" role="alertdialog" aria-label="Confirm delete recording">
+          <span className="vp-confirm-text">Delete this recording permanently?</span>
+          <div className="vp-confirm-actions">
+            <button
+              type="button"
+              className="vp-confirm-del"
+              onClick={() => void onConfirmDelete()}
+              disabled={deleting}
+            >
+              {deleting ? 'Deleting…' : 'Delete'}
+            </button>
+            <button
+              type="button"
+              className="vp-confirm-cancel"
+              onClick={() => setConfirmDelete(false)}
+              disabled={deleting}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

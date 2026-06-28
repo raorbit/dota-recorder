@@ -15,6 +15,7 @@ import {
   fetchBucketCounts,
   fetchStatus,
   setStarred,
+  deleteMatch as apiDeleteMatch,
   StatusSocket,
   type MatchSummary,
   type BucketCounts,
@@ -60,6 +61,7 @@ export interface LibraryState {
   readonly selectMatch: (id: number | null) => void;
   readonly setStatus: (status: Status | null) => void;
   readonly toggleStar: (id: number, starred: boolean) => Promise<void>;
+  readonly deleteMatch: (id: number) => Promise<void>;
   readonly load: () => Promise<void>;
 }
 
@@ -99,6 +101,22 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       await setStarred(id, starred);
     } catch {
       set({ matches: prev });
+    }
+  },
+
+  // Permanently delete a match (row + markers/pauses + .mp4 + thumbnail). Pessimistic:
+  // delete server-side FIRST, then drop it from the list and clear the selection if it
+  // was open, and refresh the bucket badges. Rethrows so the caller can surface a failure.
+  deleteMatch: async (id) => {
+    await apiDeleteMatch(id);
+    set((s) => ({
+      matches: s.matches.filter((m) => m.id !== id),
+      selectedMatchId: s.selectedMatchId === id ? null : s.selectedMatchId,
+    }));
+    try {
+      set({ counts: await fetchBucketCounts() });
+    } catch {
+      /* leave the stale badge; the next load() reconciles */
     }
   },
 

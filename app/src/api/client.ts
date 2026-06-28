@@ -228,6 +228,18 @@ async function postJson<TResult>(path: string): Promise<TResult> {
   return (await res.json()) as TResult;
 }
 
+// DELETE returning no body (204/200). Wider timeout: the core also unlinks the .mp4 + thumbnail.
+async function delVoid(path: string): Promise<void> {
+  const res = await fetch(`${bridgeBase()}${path}`, {
+    method: 'DELETE',
+    headers: { ...authHeaders() },
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!res.ok) {
+    throw new Error(`DELETE ${path} failed: ${res.status} ${res.statusText}`);
+  }
+}
+
 export function fetchHealth(): Promise<Health> {
   return getJson<Health>('/health');
 }
@@ -402,6 +414,12 @@ export function fetchBucketCounts(): Promise<BucketCounts> {
 // Toggles the star on a match (PATCH /matches/{id}) and returns the updated row.
 export function setStarred(id: number, starred: boolean): Promise<MatchDetail> {
   return patchJson<{ starred: boolean }, MatchDetail>(`/matches/${id}`, { starred });
+}
+
+// Permanently deletes a match (DELETE /matches/{id}): the row + its markers/pauses
+// (FK cascade) and the .mp4 + thumbnail on disk. No undo.
+export function deleteMatch(id: number): Promise<void> {
+  return delVoid(`/matches/${id}`);
 }
 
 export type StatusListener = (status: Status) => void;
