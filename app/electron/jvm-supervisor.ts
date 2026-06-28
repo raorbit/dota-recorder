@@ -85,7 +85,7 @@ export class JvmSupervisor {
       jar,
     ];
 
-    this.child = spawn(javaw, jvmArgs, {
+    const child = spawn(javaw, jvmArgs, {
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
       // Hand the core its bridge token out-of-band (env, not argv) so it can enforce
@@ -94,24 +94,28 @@ export class JvmSupervisor {
         ? { ...process.env, [BRIDGE_TOKEN_ENV]: this.bridgeToken }
         : process.env,
     });
+    this.child = child;
 
-    if (this.child.pid !== undefined) {
+    if (child.pid !== undefined) {
       // Tie the child's lifetime to this process: the OS reaps it on hard crash.
-      assignJob.assign(this.child.pid);
+      assignJob.assign(child.pid);
     }
 
-    this.child.stdout?.on('data', (buf: Buffer) => this.emitLines(buf));
-    this.child.stderr?.on('data', (buf: Buffer) => this.emitLines(buf));
-    this.child.on('exit', (code, signal) => {
-      // Clear the handle FIRST so onUnexpectedExit can safely restart via start().
-      this.child = null;
+    child.stdout?.on('data', (buf: Buffer) => this.emitLines(buf));
+    child.stderr?.on('data', (buf: Buffer) => this.emitLines(buf));
+    child.on('exit', (code, signal) => {
+      // Only clear the handle if THIS child is still current — a newer start() (e.g. a crash-triggered
+      // restart) may already have replaced it. Clearing it FIRST lets onUnexpectedExit restart cleanly.
+      if (this.child === child) {
+        this.child = null;
+      }
       if (!this.stopping) {
         this.onLog(`core exited unexpectedly (code=${code ?? 'null'} signal=${signal ?? 'null'})`);
         this.onUnexpectedExit?.({ code, signal });
       }
     });
 
-    await this.waitForHealth();
+    await this.waitForHealth(child);
   }
 
   /** Graceful-then-forceful shutdown of the JVM tree. */
@@ -164,14 +168,17 @@ export class JvmSupervisor {
     }
   }
 
-  private async waitForHealth(): Promise<void> {
+  private async waitForHealth(child: ChildProcess): Promise<void> {
     const deadline = Date.now() + this.healthTimeoutMs;
     let delay = 200;
     let lastError: unknown = null;
 
     while (Date.now() < deadline) {
-      if (this.child === null && this.stopping) {
-        throw new Error('Supervisor stopped before core became healthy.');
+      if (this.child !== child) {
+        // This generation was superseded (a newer start() replaced the child) or the child exited
+        // (a crash/stop nulled it). Abort promptly instead of polling a dead or foreign core for the
+        // full timeout — that is what let a crash during restart spawn overlapping waitForHealth loops.
+        throw new Error('Supervisor superseded before core became healthy.');
       }
       try {
         const res = await fetch(HEALTH_URL, {
