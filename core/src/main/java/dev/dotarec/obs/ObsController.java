@@ -262,10 +262,10 @@ public class ObsController implements ObsRecorder {
 
     @Override
     public boolean isReady() {
-        // Connected + a program scene is active + at least one desktop-audio input exists. These are
-        // read-only existence checks: they prove a scene/source is CONFIGURED, not that pixels are
-        // non-black -- but they catch the common "green GSI, OBS records nothing" failure (no scene,
-        // no audio device) before the FSM arms a recording.
+        // Connected + a program scene is active + (when audio is configured) at least one live
+        // app-owned audio input exists. These are read-only existence checks: they prove a
+        // scene/source is CONFIGURED, not that pixels are non-black -- but they catch the common
+        // "green GSI, OBS records nothing" failure (no scene, no audio device) before the FSM arms.
         if (!health.isConnected()) {
             return false;
         }
@@ -275,10 +275,41 @@ public class ObsController implements ObsRecorder {
         }
         try {
             boolean sceneOk = refreshSceneActive();
-            boolean audioOk = hasDesktopAudio(c);
+            // Only gate on audio when the user configured a source that will actually yield a live
+            // audio track. An empty list -- OR a list whose every source is muted/ineffective -- is a
+            // deliberate "record video only" choice; gating there would make isReady() permanently
+            // false and silently disable ALL recording (the FSM never arms).
+            boolean audioOk = !expectsLiveAudio() || hasDesktopAudio(c);
             return sceneOk && audioOk;
         } catch (Exception e) {
             log.warn("OBS readiness check failed: {}", e.toString());
+            return false;
+        }
+    }
+
+    /**
+     * Whether the user has at least one audio source that {@link ObsSceneConfigurer} will reconcile
+     * into a LIVE (effective and un-muted) OBS input. Gating on mere list non-emptiness would wedge
+     * isReady() false forever for a muted-only or ineffective-only config (e.g. an application capture
+     * with no window picked, or the user's only source muted) and silently disable all recording --
+     * the exact failure the audio gate exists to catch. Mirrors reconcileAudioInputs's create rules
+     * (reuses kindToObsKind + isEffectiveSource, skips muted) so the gate can't drift from what
+     * actually produces a live input -- including a forward-compat/hand-edited unknown kind.
+     */
+    private boolean expectsLiveAudio() {
+        try {
+            var sources = settings.get().audioSources;
+            if (sources == null) {
+                return false;
+            }
+            return sources.stream()
+                    .anyMatch(
+                            s ->
+                                    ObsSceneConfigurer.kindToObsKind(s.kind()) != null
+                                            && ObsSceneConfigurer.isEffectiveSource(s)
+                                            && !s.muted());
+        } catch (RuntimeException e) {
+            // Settings unreadable: don't let that wedge readiness — treat as no audio gate.
             return false;
         }
     }

@@ -71,7 +71,19 @@ export interface LibraryState {
 // store state) so it never triggers a re-render.
 let loadToken = 0;
 
-export const useLibraryStore = create<LibraryState>((set, get) => ({
+export const useLibraryStore = create<LibraryState>((set, get) => {
+  // Invalidate any load() already in flight so its (possibly pre-mutation) result can't clobber a
+  // local mutation that just changed the list — e.g. resurrect a just-deleted row, or revert a
+  // just-applied star. The in-flight load() sees the bumped token and bails at its `token !==
+  // loadToken` guard. Crucially, that early bail happens BEFORE load() restores loadState, so we
+  // must settle a dangling 'loading' here too (the caller already holds authoritative data);
+  // otherwise the table stays wedged on the "Loading recordings…" spinner with every row hidden.
+  const invalidatePendingLoad = (): void => {
+    loadToken++;
+    if (get().loadState === 'loading') set({ loadState: 'ready' });
+  };
+
+  return {
   matches: [],
   counts: EMPTY_COUNTS,
   status: null,
@@ -96,10 +108,16 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   // optimistic flip and the on-failure revert are functional per-row updates (not a
   // whole-array snapshot) so a list reload landing during the in-flight PATCH — a
   // coalesced match.* event fires load() every ~200ms — isn't clobbered on revert.
+  // Once the PATCH commits, invalidate any in-flight load(): one whose GET ran before the commit
+  // would otherwise resolve afterward with the pre-flip star state and clobber the optimistic flip
+  // via its whole-array replace. (A load that resolves in the brief flip->commit window can still
+  // flicker the flip, but the 200ms coalesced reload reconciles it — inherent to optimistic UI over
+  // polling; deleteMatch's guard is tighter because the server delete completes first.)
   toggleStar: async (id, starred) => {
     set((s) => ({ matches: s.matches.map((m) => (m.id === id ? { ...m, starred } : m)) }));
     try {
       await setStarred(id, starred);
+      invalidatePendingLoad();
     } catch {
       set((s) => ({ matches: s.matches.map((m) => (m.id === id ? { ...m, starred: !starred } : m)) }));
     }
@@ -110,6 +128,10 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   // was open, and refresh the bucket badges. Rethrows so the caller can surface a failure.
   deleteMatch: async (id) => {
     await apiDeleteMatch(id);
+    // A coalesced match.* frame fires load() every ~200ms, so a load() that fetched the list BEFORE
+    // this delete committed server-side may still be in flight; invalidate it so it can't resurrect
+    // the just-deleted row (and so it doesn't leave the table wedged on the spinner).
+    invalidatePendingLoad();
     set((s) => ({
       matches: s.matches.filter((m) => m.id !== id),
       selectedMatchId: s.selectedMatchId === id ? null : s.selectedMatchId,
@@ -154,7 +176,8 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       selectedMatchId: stillPresent ? selectedMatchId : null,
     });
   },
-}));
+  };
+});
 
 // Maps a raw status snapshot to the flattened Status the store keeps. (toStatus is
 // private to the client module; re-derive the same shape here.)
