@@ -214,6 +214,32 @@ async function getJson<T>(path: string): Promise<T> {
   return (await res.json()) as T;
 }
 
+// Pulls the most human-readable message out of a non-ok response body. The core
+// runs with server.error.include-message=always, so a validation 400 carries a JSON
+// body with a "message" field (e.g. "cap must be > 0") — surface that verbatim
+// instead of the opaque "400 Bad Request" status text. Falls back to a plain-text
+// body, then to null when there's nothing useful (so the caller can use status text).
+// Reads the body only once: try JSON, and reuse the buffered text if that fails.
+async function errorBodyMessage(res: Response): Promise<string | null> {
+  let raw: string;
+  try {
+    raw = await res.text();
+  } catch {
+    return null; // body already consumed / unreadable — nothing to add
+  }
+  const text = raw.trim();
+  if (text === '') return null;
+  try {
+    const parsed = JSON.parse(text) as { message?: unknown };
+    if (typeof parsed.message === 'string' && parsed.message.trim() !== '') {
+      return parsed.message;
+    }
+  } catch {
+    /* not JSON — fall through to the raw text below */
+  }
+  return text;
+}
+
 async function putJson<TBody, TResult>(path: string, body: TBody): Promise<TResult> {
   const res = await fetch(`${bridgeBase()}${path}`, {
     method: 'PUT',
@@ -226,7 +252,10 @@ async function putJson<TBody, TResult>(path: string, body: TBody): Promise<TResu
     signal: AbortSignal.timeout(5_000),
   });
   if (!res.ok) {
-    throw new Error(`PUT ${path} failed: ${res.status} ${res.statusText}`);
+    // Prefer the core's validation message (body.message) over the bare status text so
+    // the user sees "cap must be > 0", not "PUT /settings failed: 400 Bad Request".
+    const detail = await errorBodyMessage(res);
+    throw new Error(detail ?? `PUT ${path} failed: ${res.status} ${res.statusText}`);
   }
   return (await res.json()) as TResult;
 }

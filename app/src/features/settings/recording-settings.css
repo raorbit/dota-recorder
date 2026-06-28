@@ -597,6 +597,13 @@
   color: var(--gold);
 }
 
+/* Visible, slightly emphasized "Warning:" prefix on warning notes. Carries the
+   meaning for screen readers and low-vision users so the note isn't colour-only
+   (the leading ! icon is aria-hidden). */
+.rec-note-label {
+  font-weight: 600;
+}
+
 /* Archive-drive rows: path + free readout on the left, cap + remove on the right */
 .drv-row {
   align-items: flex-start;

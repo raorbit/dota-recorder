@@ -83,6 +83,15 @@ const FORMAT_PRESETS: ReadonlyArray<{ readonly value: string; readonly label: st
 // bounded only by the drive's real capacity (which the UI surfaces as a warning).
 const CAP_MIN_GB = 10;
 
+// Coerce a cap field's raw value into the positive integer the backend accepts. The core
+// now rejects <=0 (a cleared field yields Number('')===0), so we never send a non-positive
+// or fractional cap: blank/NaN/<=0 snaps up to CAP_MIN_GB and any fraction is rounded. Used
+// both to reflect a sane value back into the field (onBlur) and to sanitize what we PUT.
+function clampCapGb(value: number): number {
+  if (!Number.isFinite(value) || value < CAP_MIN_GB) return CAP_MIN_GB;
+  return Math.round(value);
+}
+
 // Human-readable size from a byte count (null -> em dash). TB once past 1024 GB.
 function fmtSize(bytes: number | null | undefined): string {
   if (bytes === null || bytes === undefined) return '—';
@@ -170,6 +179,10 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
 
   const [saveState, setSaveState] = useState<SaveState>('idle');
   const [error, setError] = useState<string | null>(null);
+  // Per-archive-row validation messages, keyed by the row's stable id. A non-empty map
+  // blocks the save (we never drop an invalid row silently) and renders an inline note
+  // under the offending drive. Cleared on a clean save / re-edit.
+  const [driveErrors, setDriveErrors] = useState<Record<string, string>>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -362,6 +375,19 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
   // ── Archive-drive mutators (tiered storage). Same immutable-edit + reset-saveState
   // shape as the audio-source mutators above. ──
 
+  // Drop the inline validation note for one row once the user edits it, so a re-typed
+  // path/cap re-arms the (blocked) save instead of leaving a stale "enter a folder" note.
+  const clearDriveError = (id: string): void => {
+    setDriveErrors((prev) => {
+      if (!(id in prev)) return prev;
+      const rest: Record<string, string> = {};
+      for (const [key, msg] of Object.entries(prev)) {
+        if (key !== id) rest[key] = msg;
+      }
+      return rest;
+    });
+  };
+
   const addDrive = (): void => {
     setStorageLocations((prev) => [
       ...prev,
@@ -371,35 +397,63 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
   };
 
   const removeDrive = (i: number): void => {
+    const removed = storageLocations[i];
     setStorageLocations((prev) => prev.filter((_, idx) => idx !== i));
+    if (removed) clearDriveError(removed.id);
     setSaveState('idle');
   };
 
   const setDriveCap = (i: number, capGb: number): void => {
+    const edited = storageLocations[i];
     setStorageLocations((prev) =>
       prev.map((d, idx) => (idx === i ? { ...d, capGb } : d)),
     );
+    if (edited) clearDriveError(edited.id);
     setSaveState('idle');
   };
 
   const setDrivePath = (i: number, path: string): void => {
+    const edited = storageLocations[i];
     setStorageLocations((prev) =>
       prev.map((d, idx) => (idx === i ? { ...d, path } : d)),
     );
+    if (edited) clearDriveError(edited.id);
     setSaveState('idle');
   };
 
   const onBrowseDrive = async (i: number): Promise<void> => {
     const picked = await window.dotarec?.selectFolder();
     if (picked) {
+      const edited = storageLocations[i];
       setStorageLocations((prev) =>
         prev.map((d, idx) => (idx === i ? { ...d, path: picked } : d)),
       );
+      if (edited) clearDriveError(edited.id);
       setSaveState('idle');
     }
   };
 
   const onSave = async (): Promise<void> => {
+    // Validate the archive rows BEFORE flipping into 'saving'. We never silently drop a
+    // just-added, half-filled drive (the old behaviour filtered blank-path rows out while
+    // still reporting "Saved"); instead we block the save and flag the offending row so the
+    // user can finish or remove it. Cap is checked here too (clampCapGb fixes the wire value,
+    // but a cleared field reads as 0 in the UI and we want an explicit message, not a silent bump).
+    const nextDriveErrors: Record<string, string> = {};
+    for (const d of storageLocations) {
+      if (d.path.trim() === '') {
+        nextDriveErrors[d.id] = 'Enter a folder for this archive drive.';
+      } else if (!Number.isFinite(d.capGb) || d.capGb <= 0) {
+        nextDriveErrors[d.id] = 'Cap must be greater than 0.';
+      }
+    }
+    if (Object.keys(nextDriveErrors).length > 0) {
+      setDriveErrors(nextDriveErrors);
+      setSaveState('idle'); // not an 'error' state — the form is just incomplete, not failed
+      return;
+    }
+    setDriveErrors({});
+
     setSaveState('saving');
     setError(null);
 
@@ -407,15 +461,18 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
     const patch: SettingsPatch = {
       resolution: resolution.trim(),
       videoDir: videoDir.trim(),
-      retentionCapGb: retentionGb,
+      // Clamp to a positive integer: a cleared Max-storage field is Number('')===0, and the
+      // core now 400s on <=0 — guard it client-side so we never send a non-positive cap.
+      retentionCapGb: clampCapGb(retentionGb),
       // null means "leave unchanged" on the wire, so a blanked field clears via an explicit flag.
       ...(trimmedAccount === ''
         ? { clearAccountId: true }
         : { accountId: Number(trimmedAccount) }),
       // FULL-LIST REPLACE: always send the complete current array.
       audioSources,
-      // FULL-LIST REPLACE too. Drop drives with a blank path (a just-added, unfilled row).
-      storageLocations: storageLocations.filter((d) => d.path.trim() !== ''),
+      // FULL-LIST REPLACE too. All rows are validated non-blank above; clamp each cap to a
+      // positive integer so a momentarily-cleared cap field can't slip a 0 onto the wire.
+      storageLocations: storageLocations.map((d) => ({ ...d, capGb: clampCapGb(d.capGb) })),
       fps,
       quality,
       format: recFormat,
@@ -664,6 +721,7 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
                 <button
                   type="button"
                   className="rec-browse"
+                  aria-label="Browse for the output folder"
                   onClick={() => void onBrowse()}
                 >
                   Browse
@@ -698,10 +756,15 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
                   step={10}
                   value={retentionGb}
                   onChange={(e) => {
+                    // Keep the raw value while typing (so the field can be cleared and
+                    // retyped); NaN is held as 0 and snapped to the floor on blur/save.
                     const v = Number(e.target.value);
                     setRetentionGb(Number.isFinite(v) ? v : 0);
                     setSaveState('idle');
                   }}
+                  // Reflect a sensible value once the user leaves the field: a cleared/<=0
+                  // cap snaps up to the floor rather than persisting (and later sending) 0.
+                  onBlur={() => setRetentionGb((v) => clampCapGb(v))}
                 />
                 <span className="rec-capunit">GB</span>
                 {activeUsage && (
@@ -712,11 +775,16 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
               </div>
             </div>
             {capExceedsDrive(retentionGb, activeUsage) && (
-              <p className="rec-note rec-note-warn" role="status">
+              // role="alert" (assertive): a cap that can't be reached is an actionable
+              // problem the user should hear immediately, not a passive status. The visible
+              // "Warning:" prefix carries the meaning without relying on the gold colour
+              // (the icon is aria-hidden, so it's the prefix that reaches a screen reader).
+              <p className="rec-note rec-note-warn" role="alert">
                 <span className="rec-note-icon" aria-hidden="true">
                   !
                 </span>
-                Cap {retentionGb} GB exceeds this drive — it will fill before the cap is reached.
+                <strong className="rec-note-label">Warning:</strong> Cap {retentionGb} GB exceeds
+                this drive — it will fill before the cap is reached.
               </p>
             )}
             {usage && (
@@ -741,6 +809,11 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
             {storageLocations.map((loc, i) => {
               const u = usage?.drives.find((x) => x.role === 'archive' && x.path === loc.path);
               const warn = capExceedsDrive(loc.capGb, u);
+              const rowError = driveErrors[loc.id];
+              // Distinct accessible names so a screen-reader user can tell the (otherwise
+              // identical) per-drive controls apart: prefer the entered path, fall back to
+              // the 1-based row number for a still-blank drive.
+              const driveName = loc.path.trim() !== '' ? loc.path.trim() : `drive ${i + 1}`;
               return (
                 <div className="rec-row drv-row" key={loc.id}>
                   <div className="rec-rowlabel drv-path">
@@ -752,12 +825,13 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
                         autoComplete="off"
                         spellCheck={false}
                         placeholder="D:\dota-archive"
-                        aria-label="Archive drive folder"
+                        aria-label={`Folder for archive ${driveName}`}
                         onChange={(e) => setDrivePath(i, e.target.value)}
                       />
                       <button
                         type="button"
                         className="rec-browse"
+                        aria-label={`Browse for archive ${driveName} folder`}
                         onClick={() => void onBrowseDrive(i)}
                       >
                         Browse
@@ -770,12 +844,24 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
                       </p>
                     )}
                     {warn && (
-                      <p className="rec-note rec-note-warn" role="status">
+                      // role="alert" + visible "Warning:" prefix — same rationale as the
+                      // Max-storage warning above (assertive, not colour-only).
+                      <p className="rec-note rec-note-warn" role="alert">
                         <span className="rec-note-icon" aria-hidden="true">
                           !
                         </span>
-                        Cap {loc.capGb} GB exceeds this drive — it will fill before the cap is
-                        reached.
+                        <strong className="rec-note-label">Warning:</strong> Cap {loc.capGb} GB
+                        exceeds this drive — it will fill before the cap is reached.
+                      </p>
+                    )}
+                    {rowError && (
+                      // Save was blocked because this row is blank/invalid (FIX ii); keep the
+                      // row visible and tell the user what to fix instead of silently dropping it.
+                      <p className="rec-note rec-note-warn" role="alert">
+                        <span className="rec-note-icon" aria-hidden="true">
+                          !
+                        </span>
+                        <strong className="rec-note-label">Warning:</strong> {rowError}
                       </p>
                     )}
                   </div>
@@ -786,19 +872,22 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
                         type="number"
                         min={CAP_MIN_GB}
                         step={10}
-                        aria-label="Drive cap in GB"
+                        aria-label={`Cap in GB for archive ${driveName}`}
                         value={loc.capGb}
                         onChange={(e) => {
+                          // Keep the raw value while typing; clamp on blur/save so a
+                          // momentarily-cleared field can't persist (or send) 0.
                           const v = Number(e.target.value);
                           setDriveCap(i, Number.isFinite(v) ? v : 0);
                         }}
+                        onBlur={() => setDriveCap(i, clampCapGb(loc.capGb))}
                       />
                       <span className="rec-capunit">GB</span>
                     </div>
                     <button
                       type="button"
                       className="aud-remove"
-                      aria-label="Remove drive"
+                      aria-label={`Remove archive ${driveName}`}
                       title="Remove drive"
                       onClick={() => removeDrive(i)}
                     >
