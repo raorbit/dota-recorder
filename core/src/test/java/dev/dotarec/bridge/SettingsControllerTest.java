@@ -1,6 +1,7 @@
 package dev.dotarec.bridge;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -19,6 +20,8 @@ import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
 
 /**
  * Unit tests for {@link SettingsController}. The OBS connection (host/port/password) is app-managed
@@ -105,6 +108,54 @@ class SettingsControllerTest {
         assertThat(store.get().fps).isEqualTo(30);
         assertThat(store.get().quality).isEqualTo("Stream");
         assertThat(store.get().format).isEqualTo("mkv");
+    }
+
+    @Test
+    void putSettings_rejectsInvalidFps() {
+        // A garbage fps would write a broken OBS [Video] FPSCommon -> abort every match. Reject it.
+        assertThatThrownBy(
+                        () ->
+                                controller.putSettings(
+                                        new SettingsPatch(
+                                                null, null, null, null, null, null, null, 144, null,
+                                                null)))
+                .isInstanceOfSatisfying(
+                        ResponseStatusException.class,
+                        e -> assertThat(e.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST));
+
+        // The store is left untouched (default 60fps), not partially mutated.
+        assertThat(store.get().fps).isEqualTo(60);
+    }
+
+    @Test
+    void putSettings_rejectsInvalidQuality() {
+        assertThatThrownBy(
+                        () ->
+                                controller.putSettings(
+                                        new SettingsPatch(
+                                                null, null, null, null, null, null, null, null,
+                                                "garbage", null)))
+                .isInstanceOfSatisfying(
+                        ResponseStatusException.class,
+                        e -> assertThat(e.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST));
+
+        assertThat(store.get().quality).isEqualTo("HQ");
+    }
+
+    @Test
+    void putSettings_rejectsInvalidFormat() {
+        // RecFormat2=avi is exactly the kind of bad value that broke OUTPUT_STARTED on this branch.
+        assertThatThrownBy(
+                        () ->
+                                controller.putSettings(
+                                        new SettingsPatch(
+                                                null, null, null, null, null, null, null, null, null,
+                                                "avi")))
+                .isInstanceOfSatisfying(
+                        ResponseStatusException.class,
+                        e -> assertThat(e.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST));
+
+        assertThat(store.get().format).isEqualTo("hybrid_mp4");
     }
 
     @Test

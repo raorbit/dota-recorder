@@ -7,12 +7,15 @@ import dev.dotarec.config.SettingsStore.Settings;
 import dev.dotarec.obs.ObsController;
 import dev.dotarec.obs.setup.ObsConfigWriter;
 import java.util.List;
+import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.server.ResponseStatusException;
 
 /**
  * Settings endpoint consumed by the Electron settings UI over the loopback bridge.
@@ -34,6 +37,14 @@ public class SettingsController {
 
     private static final Logger log = LoggerFactory.getLogger(SettingsController.class);
 
+    // Supported recording-control values, mirroring the renderer's pickers (RecordingSettings.tsx).
+    // A bad fps/quality/format writes a broken OBS profile, which reproduces the "no OUTPUT_STARTED ->
+    // every match aborts" failure this branch fixed -- so reject (400) rather than silently persist.
+    private static final Set<Integer> ALLOWED_FPS = Set.of(30, 60);
+    private static final Set<String> ALLOWED_QUALITY = Set.of("Stream", "HQ", "Lossless", "Small");
+    private static final Set<String> ALLOWED_FORMAT =
+            Set.of("hybrid_mp4", "fragmented_mp4", "mkv", "mov");
+
     private final SettingsStore store;
     private final ObsController obsController;
     private final ObsConfigWriter obsConfigWriter;
@@ -52,7 +63,24 @@ public class SettingsController {
 
     @PutMapping("/settings")
     public SettingsView putSettings(@RequestBody SettingsPatch patch) {
-        // Atomic read-copy-mutate: only the four user-facing fields are overlaid (non-null), so the
+        // Validate the recording-control fields BEFORE persisting. Each is a partial patch, so only a
+        // field the body actually carries (non-null) is checked. A garbage value would write a broken
+        // OBS profile and abort every match, so reject with 400 rather than clamp.
+        if (patch.fps() != null && !ALLOWED_FPS.contains(patch.fps())) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST, "invalid fps: " + patch.fps() + " (allowed: " + ALLOWED_FPS + ")");
+        }
+        if (patch.quality() != null && !ALLOWED_QUALITY.contains(patch.quality())) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "invalid quality: " + patch.quality() + " (allowed: " + ALLOWED_QUALITY + ")");
+        }
+        if (patch.format() != null && !ALLOWED_FORMAT.contains(patch.format())) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "invalid format: " + patch.format() + " (allowed: " + ALLOWED_FORMAT + ")");
+        }
+        // Atomic read-copy-mutate: only the user-facing fields are overlaid (non-null), so the
         // app-managed OBS fields (host/port/password) carry forward untouched rather than being
         // reset to defaults.
         store.update(

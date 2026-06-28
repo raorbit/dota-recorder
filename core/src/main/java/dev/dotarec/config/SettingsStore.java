@@ -4,9 +4,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.function.UnaryOperator;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 /**
@@ -115,7 +119,11 @@ public class SettingsStore {
     public record AudioSource(
             String id, String kind, String target, String label, int volume, boolean muted) {}
 
+    private static final Logger log = LoggerFactory.getLogger(SettingsStore.class);
+
     private static final String FILE_NAME = "settings.json";
+    private static final String TMP_SUFFIX = ".tmp";
+    private static final String BAK_SUFFIX = ".bak";
 
     private final Path file;
     private final ObjectMapper mapper;
@@ -128,15 +136,19 @@ public class SettingsStore {
     }
 
     private Settings load(AppPaths paths) {
-        Settings loaded;
-        if (Files.isReadable(file)) {
-            try {
-                loaded = mapper.readValue(file.toFile(), Settings.class);
-            } catch (IOException e) {
-                // Corrupt/partial file: fall back to defaults rather than crash.
-                loaded = new Settings();
+        Settings loaded = readOrNull(file);
+        if (loaded == null) {
+            // Primary file missing or corrupt (e.g. a crash truncated it mid-write). Try the one-deep
+            // backup that save() rolls before each replace -- it holds the last good settings, so the
+            // user's gsiAuthToken / obsPassword / accountId survive a torn write -- before falling back
+            // to fresh defaults.
+            Path bak = file.resolveSibling(FILE_NAME + BAK_SUFFIX);
+            loaded = readOrNull(bak);
+            if (loaded != null) {
+                log.warn("settings.json unreadable; recovered from {}", bak.getFileName());
             }
-        } else {
+        }
+        if (loaded == null) {
             loaded = new Settings();
         }
         if (loaded.videoDir == null || loaded.videoDir.isBlank()) {
@@ -182,15 +194,50 @@ public class SettingsStore {
         return loaded;
     }
 
+    /** Reads and parses a settings file, or {@code null} when it is absent, unreadable, or corrupt. */
+    private Settings readOrNull(Path path) {
+        if (!Files.isReadable(path)) {
+            return null;
+        }
+        try {
+            return mapper.readValue(path.toFile(), Settings.class);
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
     /** Current in-memory settings. */
     public synchronized Settings get() {
         return settings;
     }
 
-    /** Replaces settings and persists them to {@code settings.json}. */
+    /**
+     * Replaces settings and persists them to {@code settings.json} ATOMICALLY: serialize to a sibling
+     * {@code .tmp}, roll the previous good file to a one-deep {@code .bak}, then atomic-move the temp
+     * over the real file. A crash mid-write can only leave the (discardable) temp or the intact old
+     * file behind -- never a truncated {@code settings.json} that {@link #load} would silently replace
+     * with defaults, dropping the user's gsiAuthToken / obsPassword / accountId. Mirrors the DB
+     * pre-migration backup pattern (MigrationRunner).
+     */
     public synchronized void save(Settings updated) {
+        Path tmp = file.resolveSibling(FILE_NAME + TMP_SUFFIX);
+        Path bak = file.resolveSibling(FILE_NAME + BAK_SUFFIX);
         try {
-            mapper.writeValue(file.toFile(), updated);
+            mapper.writeValue(tmp.toFile(), updated);
+            // Roll a one-deep backup of the last good file before clobbering it (overwritten each save).
+            if (Files.exists(file)) {
+                Files.copy(file, bak, StandardCopyOption.REPLACE_EXISTING);
+            }
+            try {
+                Files.move(
+                        tmp,
+                        file,
+                        StandardCopyOption.ATOMIC_MOVE,
+                        StandardCopyOption.REPLACE_EXISTING);
+            } catch (AtomicMoveNotSupportedException e) {
+                // Rare (same-dir NTFS supports atomic move); fall back to a plain replace.
+                Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING);
+            }
             this.settings = updated;
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to write settings: " + file, e);

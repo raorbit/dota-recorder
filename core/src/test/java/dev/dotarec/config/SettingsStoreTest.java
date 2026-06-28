@@ -3,6 +3,7 @@ package dev.dotarec.config;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.dotarec.config.SettingsStore.AudioSource;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -123,6 +124,57 @@ class SettingsStoreTest {
         assertThat(seed.volume()).isEqualTo(100);
         assertThat(seed.muted()).isFalse();
         assertThat(seed.id()).isNotBlank();
+    }
+
+    @Test
+    void save_isAtomic_leavesNoLeftoverTempAndFileParses(@TempDir Path dir) throws Exception {
+        SettingsStore store = new SettingsStore(paths(dir));
+        store.update(s -> { s.resolution = "1280x720"; return s; });
+        // A second save exercises the replace path (the file already exists).
+        store.update(s -> { s.resolution = "2560x1440"; return s; });
+
+        Path file = dir.resolve("settings.json");
+        // No discardable temp left behind, and the file still parses cleanly into a fresh store.
+        assertThat(Files.exists(dir.resolve("settings.json.tmp"))).isFalse();
+        assertThat(new SettingsStore(paths(dir)).get().resolution).isEqualTo("2560x1440");
+        assertThat(Files.isReadable(file)).isTrue();
+    }
+
+    @Test
+    void save_writesOneDeepBakOfPreviousVersion(@TempDir Path dir) throws Exception {
+        SettingsStore store = new SettingsStore(paths(dir));
+        store.update(s -> { s.resolution = "AAA-version"; return s; }); // version A
+        store.update(s -> { s.resolution = "BBB-version"; return s; }); // version B
+
+        // The .bak holds the version that was on disk BEFORE the latest save (A), not the current (B).
+        Path bak = dir.resolve("settings.json.bak");
+        assertThat(Files.isReadable(bak)).isTrue();
+        assertThat(Files.readString(bak)).contains("AAA-version").doesNotContain("BBB-version");
+        // The live file is the latest version.
+        assertThat(new SettingsStore(paths(dir)).get().resolution).isEqualTo("BBB-version");
+    }
+
+    @Test
+    void load_recoversFromBakWhenPrimaryCorrupt(@TempDir Path dir) throws Exception {
+        // Establish a good .bak by saving twice (the first save's content rolls into .bak on the
+        // second), with a recoverable secret in the backed-up version.
+        SettingsStore store = new SettingsStore(paths(dir));
+        store.update(
+                s -> {
+                    s.gsiAuthToken = "secret-token";
+                    s.accountId = 96828122L;
+                    return s;
+                });
+        store.update(s -> { s.resolution = "1280x720"; return s; });
+
+        // The most recent save wrote the secret into .bak (the prior on-disk version held it). Now
+        // truncate the primary settings.json so it fails to parse.
+        Files.writeString(dir.resolve("settings.json"), "{ this is not valid json");
+
+        // A new store over the same dir must recover the secret from .bak, not fall back to defaults.
+        SettingsStore reloaded = new SettingsStore(paths(dir));
+        assertThat(reloaded.get().gsiAuthToken).isEqualTo("secret-token");
+        assertThat(reloaded.get().accountId).isEqualTo(96828122L);
     }
 
     @Test
