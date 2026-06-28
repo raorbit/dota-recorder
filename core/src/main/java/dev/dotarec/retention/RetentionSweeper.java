@@ -208,9 +208,13 @@ public class RetentionSweeper {
      * <p>Each location's contribution is CLAMPED to {@code min(configuredCap, drive's real total
      * capacity)}. A cap larger than the disk would otherwise inflate the global budget above what the
      * disks can physically hold — so {@code totalStored} could never reach it and eviction would be
-     * disabled entirely, letting the active drive grow unbounded. Clamping keeps the budget honest. If
-     * a drive can't be stat'd (unplugged/not yet created), we fall back to its raw configured cap —
-     * you can't clamp what you can't measure, and under-counting is safer than aborting the sweep.
+     * disabled entirely, letting the active drive grow unbounded. Clamping keeps the budget honest.
+     *
+     * <p>When a drive can't be stat'd the contribution depends on WHICH drive: the ACTIVE drive keeps
+     * its raw configured cap (a not-yet-created videoDir on first run must not collapse the budget and
+     * over-evict), but an ARCHIVE drive contributes ZERO — a disconnected archive holds no countable
+     * files, so crediting its full cap as imaginary headroom would let the active drive grow toward an
+     * unreachable global budget and fill the disk.
      */
     private long capBytes() {
         int activeCapGb;
@@ -229,11 +233,11 @@ public class RetentionSweeper {
         }
         // Location 0 (active drive) is clamped too: a 500 GiB cap on a 256 GiB SSD must not pretend
         // there's 500 GiB of budget there.
-        long sumBytes = clampedCapBytes(videoDir, activeCapGb);
+        long sumBytes = clampedCapBytes(videoDir, activeCapGb, true);
         if (archives != null) {
             for (SettingsStore.StorageLocation loc : archives) {
                 if (loc != null && loc.capGb() > 0) {
-                    sumBytes += clampedCapBytes(loc.path(), loc.capGb());
+                    sumBytes += clampedCapBytes(loc.path(), loc.capGb(), false);
                 }
             }
         }
@@ -241,28 +245,34 @@ public class RetentionSweeper {
     }
 
     /**
-     * A single location's budget in bytes, clamped to the drive's physical total capacity. Falls back
-     * to the raw configured cap when the directory is blank/unparseable or can't be stat'd.
+     * A single location's budget in bytes, clamped to the drive's physical total capacity. When the
+     * location can't be measured (blank/unparseable path, or the drive is unplugged), the ACTIVE drive
+     * keeps its raw configured cap but an ARCHIVE drive contributes ZERO — see {@link #capBytes()}.
      */
-    private long clampedCapBytes(String dir, int capGb) {
+    private long clampedCapBytes(String dir, int capGb, boolean active) {
         long capBytes = (long) capGb * BYTES_PER_GB;
+        // What an unmeasurable location contributes: the active drive stays lenient (raw cap) so a
+        // first-run videoDir that doesn't exist yet can't disable eviction; an archive offers nothing.
+        long unmeasured = active ? capBytes : 0L;
         if (dir == null || dir.isBlank()) {
-            return capBytes;
+            return unmeasured;
         }
         Path path;
         try {
             path = Path.of(dir);
         } catch (RuntimeException e) {
-            return capBytes;
+            return unmeasured;
         }
         try {
             long total = totalSpace.totalBytes(path);
             return Math.min(capBytes, total);
         } catch (IOException | RuntimeException e) {
-            // Can't measure (drive unplugged / dir not yet created): keep the raw cap rather than
-            // clamp to zero, which would make the global budget collapse and over-evict.
-            log.debug("Total-space probe failed for {}; using raw cap: {}", path, e.toString());
-            return capBytes;
+            // Can't measure (drive unplugged / dir not yet created). An unplugged ARCHIVE must add no
+            // headroom (else the active drive grows toward a budget it can never reach and fills up);
+            // the ACTIVE drive keeps its raw cap rather than collapsing the budget and over-evicting.
+            log.debug("Total-space probe failed for {} (active={}); contributing {} bytes",
+                    path, active, unmeasured);
+            return unmeasured;
         }
     }
 

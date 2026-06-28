@@ -253,6 +253,43 @@ class RetentionSweeperTest {
     }
 
     @Test
+    void unstattableArchiveDriveContributesZeroHeadroom_soEvictionStillFires() throws Exception {
+        long gib = 1024L * 1024 * 1024;
+        // Active drive cap 1 GiB (physically 1 GiB, injected). A 500 GiB archive is configured but
+        // UNPLUGGED, so its probe throws. The archive must contribute ZERO budget (not its raw 500 GiB),
+        // leaving the effective budget at the active 1 GiB so an over-budget active VOD is still pruned.
+        settings.get().retentionCapGb = 1;
+        Path unpluggedArchive = videoDir.getParent().resolve("unplugged-archive");
+        settings.get().storageLocations =
+                new ArrayList<>(List.of(new StorageLocation("a", unpluggedArchive.toString(), 500)));
+
+        Map<String, Long> totalByDir = new HashMap<>();
+        totalByDir.put(videoDir.toAbsolutePath().normalize().toString(), gib);
+        RetentionSweeper.TotalSpaceProbe probe =
+                d -> {
+                    Long t = totalByDir.get(d.toAbsolutePath().normalize().toString());
+                    if (t == null) {
+                        // The unplugged archive (never put in the map) fails to stat, just like a real one.
+                        throw new java.io.IOException("drive unplugged: " + d);
+                    }
+                    return t;
+                };
+        RetentionSweeper sweeper =
+                new RetentionSweeper(matches, settings, events, new StorageMaintenanceLock(), probe);
+
+        long oldest = seedWithFiles("old.mp4", "old.jpg", 3 * gib / 2, 1_000L, false);
+        long newer = seedWithFiles("new.mp4", "new.jpg", gib / 2, 2_000L, false);
+
+        RetentionSweeper.SweepResult result = sweeper.sweep(null);
+
+        // Budget is the active 1 GiB only — the disconnected archive added no imaginary headroom.
+        assertThat(result.capBytes()).as("unplugged archive contributes 0 headroom").isEqualTo(gib);
+        assertThat(result.deletedIds()).containsExactly(oldest);
+        assertThat(Files.exists(videoDir.resolve("old.mp4"))).isFalse();
+        assertThat(matches.findById(newer).orElseThrow().videoPath()).isNotNull();
+    }
+
+    @Test
     void freeSpaceCheckNeverThrowsAndReturnsNullWhenHealthy() {
         // The temp video drive has plenty of space in CI; the check must not throw and (almost
         // always) reports healthy. We only assert it doesn't blow up and returns a String-or-null.
