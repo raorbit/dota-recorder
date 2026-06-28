@@ -225,9 +225,15 @@ public class ObsConfigWriter {
                 (s.videoDir == null || s.videoDir.isBlank())
                         ? paths.videoDir().toString()
                         : s.videoDir;
+        // OBS stores SimpleOutput.FilePath in Qt QSettings INI form, where a single backslash is an
+        // escape character -- a Windows path written with single backslashes (C:\Users\...) is
+        // mangled on read (\U, \r, ... become bogus escapes), so OBS rejects it as a "bad output
+        // path" and recording never starts (no OUTPUT_STARTED -> every match aborts). OBS itself
+        // writes this key with forward slashes; match that so the path round-trips intact.
+        String recPathIni = recPath.replace('\\', '/');
         String ini =
                 loadTemplate(PROFILE_TEMPLATE)
-                        .replace("@REC_PATH@", recPath)
+                        .replace("@REC_PATH@", recPathIni)
                         .replace("@REC_ENCODER@", encoder)
                         .replace("@BASE_CX@", Integer.toString(res[0]))
                         .replace("@BASE_CY@", Integer.toString(res[1]))

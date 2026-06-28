@@ -84,10 +84,14 @@ export class ObsSupervisor {
     // Scope the managed websocket port to loopback before OBS binds it (issue #14).
     await this.scopePortToLoopback();
 
-    // OBS resolves portable data relative to its own dir, so spawn with cwd set
-    // to the OBS dir to keep --portable config/logs alongside the binary.
+    // OBS resolves its `data/` tree relative to the working directory (it probes
+    // `data/...` and `../../data/...`), so cwd MUST be bin/64bit where obs64.exe lives —
+    // launching from the install root makes every data asset (theme included) fail to load,
+    // OBS aborts with a fatal "Failed to load theme" before binding the websocket. Portable
+    // config/logs still land under the root: portable mode resolves those via the exe path
+    // (`../../config`), not cwd, so they stay alongside the binary regardless.
     this.child = spawn(obs64Path, args, {
-      cwd: this.obsDir,
+      cwd: path.join(this.obsDir, 'bin', '64bit'),
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     });

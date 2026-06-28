@@ -78,7 +78,10 @@ class ObsConfigWriterTest {
                 .contains("RecEncoder=nvenc")
                 .contains("BaseCX=2560")
                 .contains("BaseCY=1440")
-                .contains("FilePath=" + settings.get().videoDir);
+                // FilePath is written with forward slashes: OBS stores it in Qt QSettings INI form
+                // where a single backslash is an escape char, so a raw Windows path would be mangled
+                // on read ("bad output path", recording never starts). See ObsConfigWriter.writeProfile.
+                .contains("FilePath=" + settings.get().videoDir.replace('\\', '/'));
         // Probed encoder token is persisted so the UI can reflect it.
         assertThat(settings.get().encoder).isEqualTo("nvenc");
     }
