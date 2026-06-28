@@ -43,3 +43,6 @@ jobs:
 
       - name: Renderer + Electron typecheck
         run: npm --prefix app run typecheck
+
+      - name: App unit tests (electron supervisors)
+        run: npm --prefix app run test
