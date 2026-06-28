@@ -91,6 +91,9 @@ async function launchObs(): Promise<void> {
       obsDir: launchArgs.obsDir,
       port: launchArgs.port,
       password: launchArgs.password,
+      collection: launchArgs.collection,
+      profile: launchArgs.profile,
+      scene: launchArgs.scene,
       bridgeToken,
       onLog: (line) => logLine(`[obs] ${line}`),
     });
@@ -106,9 +109,14 @@ async function launchObs(): Promise<void> {
  * Returns the OBS dir + websocket port/password the core generated. Throws if the
  * core never becomes ready within the retry budget.
  */
-async function pollLaunchArgs(
-  maxRetries = 30,
-): Promise<{ obsDir: string; port: number; password: string }> {
+async function pollLaunchArgs(maxRetries = 30): Promise<{
+  obsDir: string;
+  port: number;
+  password: string;
+  collection: string;
+  profile: string;
+  scene: string;
+}> {
   for (let i = 0; i < maxRetries; i++) {
     if (shuttingDown) break;
     try {
@@ -117,11 +125,33 @@ async function pollLaunchArgs(
         headers: { [BRIDGE_TOKEN_HEADER]: bridgeToken },
       });
       if (res.ok) {
-        const a = (await res.json()) as { obsDir?: string; port?: number; password?: string };
+        const a = (await res.json()) as {
+          obsDir?: string;
+          port?: number;
+          password?: string;
+          collection?: string;
+          profile?: string;
+          scene?: string;
+        };
         // 200 only once config is fully written; still guard against a blank password
-        // so we never launch OBS with auth effectively disabled.
-        if (a.obsDir && typeof a.port === 'number' && a.password) {
-          return { obsDir: a.obsDir, port: a.port, password: a.password };
+        // so we never launch OBS with auth effectively disabled. The collection/profile/scene
+        // names come from the core (its single source of truth), not re-hardcoded here.
+        if (
+          a.obsDir &&
+          typeof a.port === 'number' &&
+          a.password &&
+          a.collection &&
+          a.profile &&
+          a.scene
+        ) {
+          return {
+            obsDir: a.obsDir,
+            port: a.port,
+            password: a.password,
+            collection: a.collection,
+            profile: a.profile,
+            scene: a.scene,
+          };
         }
       }
       // 409 (not ready) or an incomplete body — fall through and retry.

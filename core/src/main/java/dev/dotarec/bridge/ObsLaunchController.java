@@ -2,7 +2,9 @@ package dev.dotarec.bridge;
 
 import dev.dotarec.config.AppPaths;
 import dev.dotarec.config.SettingsStore;
+import dev.dotarec.obs.ObsSceneConfigurer;
 import dev.dotarec.obs.setup.ObsConfigReadiness;
+import dev.dotarec.obs.setup.ObsLayout;
 import java.util.Map;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -13,7 +15,8 @@ import org.springframework.web.bind.annotation.RestController;
  *
  * <p>Contract: {@code GET /obs/launch-args} returns {@code 409 Conflict} until
  * {@link ObsConfigReadiness} is flipped (the core is still writing OBS config), then {@code 200 OK}
- * with {@code { obsDir, port, password }}. Electron polls this in a retry loop and only spawns
+ * with {@code { obsDir, port, password, collection, profile, scene }}. Electron polls this in a retry
+ * loop and only spawns
  * {@code obs64.exe} from {@code obsDir} on the configured websocket port/password once it sees 200,
  * so it can never launch OBS against a half-written portable config.
  */
@@ -44,11 +47,17 @@ public class ObsLaunchController {
             // OBS with auth effectively off); treat as not-ready and let the supervisor retry.
             return ResponseEntity.status(409).build();
         }
+        // The scene-collection / profile / scene names are owned by the core (it creates them over
+        // obs-websocket), so hand them to the supervisor instead of having it re-hardcode the strings:
+        // a rename here can't then silently launch OBS into a collection/scene the core never made.
         Map<String, Object> body =
                 Map.of(
                         "obsDir", paths.obsDir().toAbsolutePath().toString(),
                         "port", s.obsPort,
-                        "password", s.obsPassword);
+                        "password", s.obsPassword,
+                        "collection", ObsLayout.SCENE_COLLECTION,
+                        "profile", ObsLayout.PROFILE_NAME,
+                        "scene", ObsSceneConfigurer.SCENE_NAME);
         return ResponseEntity.ok(body);
     }
 }

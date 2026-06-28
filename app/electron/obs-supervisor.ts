@@ -25,6 +25,11 @@ export interface ObsSupervisorOptions {
   readonly port: number;
   /** obs-websocket password the core handed us from /obs/launch-args. */
   readonly password: string;
+  /** OBS scene-collection / profile / scene names — owned by the core (it creates them), passed
+   * through /obs/launch-args so the launch args don't re-hardcode strings that could drift. */
+  readonly collection: string;
+  readonly profile: string;
+  readonly scene: string;
   /** Total time to wait for the core to report OBS healthy before giving up. */
   readonly healthTimeoutMs?: number;
   /** Per-launch bridge token, sent on the /status poll the readiness check makes. */
@@ -39,6 +44,9 @@ export class ObsSupervisor {
   private readonly obsDir: string;
   private readonly port: number;
   private readonly password: string;
+  private readonly collection: string;
+  private readonly profile: string;
+  private readonly scene: string;
   private readonly healthTimeoutMs: number;
   private readonly bridgeToken: string | undefined;
   private readonly onLog: (line: string) => void;
@@ -47,6 +55,9 @@ export class ObsSupervisor {
     this.obsDir = opts.obsDir;
     this.port = opts.port;
     this.password = opts.password;
+    this.collection = opts.collection;
+    this.profile = opts.profile;
+    this.scene = opts.scene;
     this.healthTimeoutMs = opts.healthTimeoutMs ?? 30_000;
     this.bridgeToken = opts.bridgeToken;
     this.onLog = opts.onLog ?? ((line) => console.log(`[obs] ${line}`));
@@ -69,11 +80,11 @@ export class ObsSupervisor {
       '--disable-updater',
       '--disable-missing-files-check',
       '--collection',
-      'DotaRecorder',
+      this.collection,
       '--profile',
-      'DotaRecorder',
+      this.profile,
       '--scene',
-      'Dota',
+      this.scene,
       '--websocket_port',
       String(this.port),
       '--websocket_password',
