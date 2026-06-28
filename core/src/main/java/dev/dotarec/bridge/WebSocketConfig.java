@@ -5,7 +5,6 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.task.TaskExecutor;
 import org.springframework.scheduling.annotation.EnableAsync;
-import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.web.socket.config.annotation.EnableWebSocket;
 import org.springframework.web.socket.config.annotation.WebSocketConfigurer;
@@ -18,14 +17,13 @@ import org.springframework.web.socket.config.annotation.WebSocketHandlerRegistry
  * recorded' events over WebSocket". The handler is exposed at {@code /ws} on the bridge
  * connector (127.0.0.1:3224).
  *
- * <p>Also enables {@code @Async} (Enricher) and {@code @Scheduled} (RetentionSweeper,
- * EnrichmentQueue) here so the main application class need not carry those annotations, and
- * defines the bounded {@code enrichExecutor} the enricher runs on.
+ * <p>Also enables {@code @Async} (Enricher) here and defines the bounded {@code enrichExecutor} the
+ * enricher runs on. {@code @Scheduled} is enabled separately by {@link dev.dotarec.config.SchedulingConfig}
+ * (gated behind {@code app.scheduling.enabled} so tests can disable the background jobs).
  */
 @Configuration
 @EnableWebSocket
 @EnableAsync
-@EnableScheduling
 public class WebSocketConfig implements WebSocketConfigurer {
 
     private final StatusWebSocket statusWebSocket;
