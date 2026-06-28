@@ -25,6 +25,22 @@ public class SettingsStore {
         public String resolution = "1920x1080";
         /** Blank = auto: the OBS config writer probes the GPU (HW encoder, x264 fallback). */
         public String encoder = "";
+        /**
+         * Recording frame rate written into OBS {@code [Video] FPSCommon} (FPSType stays 0, "Common
+         * FPS"). An integer OBS common value (UI offers 30/60). Applied on the next OBS launch, like
+         * {@link #resolution}.
+         */
+        public int fps = 60;
+        /**
+         * OBS Simple-output {@code RecQuality} (case-sensitive). One of Stream/Small/HQ/Lossless; the
+         * UI picker offers Stream/HQ/Lossless. Applied on the next OBS launch.
+         */
+        public String quality = "HQ";
+        /**
+         * OBS Simple-output {@code RecFormat2} (the recording container). The UI offers the crash-safe
+         * subset hybrid_mp4/fragmented_mp4/mkv/mov. Applied on the next OBS launch.
+         */
+        public String format = "hybrid_mp4";
         /** Disk budget in GiB for the VOD retention/pruning policy. */
         public int retentionCapGb = 50;
         /** OBS WebSocket host; loopback-only for this single-user local app. */
@@ -70,6 +86,9 @@ public class SettingsStore {
             Settings c = new Settings();
             c.resolution = resolution;
             c.encoder = encoder;
+            c.fps = fps;
+            c.quality = quality;
+            c.format = format;
             c.retentionCapGb = retentionCapGb;
             c.obsHost = obsHost;
             c.obsPort = obsPort;
@@ -131,6 +150,17 @@ public class SettingsStore {
         // Port 0 means "absent / never set"; restore our managed port rather than bind to 0.
         if (loaded.obsPort <= 0) {
             loaded.obsPort = 4466;
+        }
+        // A legacy settings.json predating fps/quality/format deserializes them to 0/null; backfill
+        // the defaults so writeProfile() never substitutes "0"/null into the OBS profile.
+        if (loaded.fps <= 0) {
+            loaded.fps = 60;
+        }
+        if (loaded.quality == null || loaded.quality.isBlank()) {
+            loaded.quality = "HQ";
+        }
+        if (loaded.format == null || loaded.format.isBlank()) {
+            loaded.format = "hybrid_mp4";
         }
         // Fresh install (or a legacy settings.json predating audioSources, which deserializes to
         // null/empty): seed one Dota application-capture source so a fresh install records the game's

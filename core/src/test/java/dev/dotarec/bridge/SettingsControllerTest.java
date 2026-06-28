@@ -13,6 +13,7 @@ import dev.dotarec.config.AppPaths;
 import dev.dotarec.config.SettingsStore;
 import dev.dotarec.config.SettingsStore.AudioSource;
 import dev.dotarec.obs.ObsController;
+import dev.dotarec.obs.setup.ObsConfigWriter;
 import java.nio.file.Path;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
@@ -40,7 +41,10 @@ class SettingsControllerTest {
         // OBS not connected in unit tests: reconcileAudioOnDemand is a no-op, so the PUT never 500s.
         ObsController obsController = mock(ObsController.class);
         when(obsController.ensureConnected()).thenReturn(false);
-        controller = new SettingsController(store, obsController);
+        // applyProfile() is a best-effort profile re-write after a PUT; mock it so the test never
+        // touches the OBS dir on disk and the swallowed try/catch is exercised cleanly.
+        ObsConfigWriter obsConfigWriter = mock(ObsConfigWriter.class);
+        controller = new SettingsController(store, obsController, obsConfigWriter);
     }
 
     @Test
@@ -60,7 +64,10 @@ class SettingsControllerTest {
                         "retentionCapGb",
                         "videoDir",
                         "accountId",
-                        "audioSources");
+                        "audioSources",
+                        "fps",
+                        "quality",
+                        "format");
     }
 
     @Test
@@ -68,7 +75,8 @@ class SettingsControllerTest {
         SettingsView updated =
                 controller.putSettings(
                         new SettingsPatch(
-                                "1280x720", "x264", 80, "D:/clips", 96828122L, null, null));
+                                "1280x720", "x264", 80, "D:/clips", 96828122L, null, null, null,
+                                null, null));
 
         assertThat(updated.resolution()).isEqualTo("1280x720");
         assertThat(updated.encoder()).isEqualTo("x264");
@@ -85,6 +93,44 @@ class SettingsControllerTest {
     }
 
     @Test
+    void putSettings_roundTripsVideoControls() {
+        SettingsView updated =
+                controller.putSettings(
+                        new SettingsPatch(
+                                null, null, null, null, null, null, null, 30, "Stream", "mkv"));
+
+        assertThat(updated.fps()).isEqualTo(30);
+        assertThat(updated.quality()).isEqualTo("Stream");
+        assertThat(updated.format()).isEqualTo("mkv");
+        assertThat(store.get().fps).isEqualTo(30);
+        assertThat(store.get().quality).isEqualTo("Stream");
+        assertThat(store.get().format).isEqualTo("mkv");
+    }
+
+    @Test
+    void putSettings_partialFpsPatch_leavesQualityFormatResolutionUnchanged() {
+        // Seed non-default video controls, then PUT only fps.
+        store.update(
+                s -> {
+                    s.quality = "Lossless";
+                    s.format = "mov";
+                    s.resolution = "2560x1440";
+                    return s;
+                });
+
+        SettingsView updated =
+                controller.putSettings(
+                        new SettingsPatch(
+                                null, null, null, null, null, null, null, 30, null, null));
+
+        assertThat(updated.fps()).isEqualTo(30);
+        // The omitted fields are left exactly as they were.
+        assertThat(store.get().quality).isEqualTo("Lossless");
+        assertThat(store.get().format).isEqualTo("mov");
+        assertThat(store.get().resolution).isEqualTo("2560x1440");
+    }
+
+    @Test
     void putSettings_preservesAppManagedObsPassword() {
         // Seed an app-generated, non-default password through the store.
         store.update(
@@ -95,7 +141,9 @@ class SettingsControllerTest {
                 });
 
         // PUT an unrelated, user-facing field only.
-        controller.putSettings(new SettingsPatch("1280x720", null, null, null, null, null, null));
+        controller.putSettings(
+                new SettingsPatch(
+                        "1280x720", null, null, null, null, null, null, null, null, null));
 
         // Regression: the carry-forward must not wipe the OBS secret/port back to defaults.
         assertThat(store.get().obsPassword).isEqualTo("abc1234567890def");
@@ -109,7 +157,9 @@ class SettingsControllerTest {
 
         // A blanked Account ID field sends clearAccountId=true with no accountId value.
         SettingsView updated =
-                controller.putSettings(new SettingsPatch(null, null, null, null, null, true, null));
+                controller.putSettings(
+                        new SettingsPatch(
+                                null, null, null, null, null, true, null, null, null, null));
 
         assertThat(updated.accountId()).isNull();
         assertThat(store.get().accountId).isNull();
@@ -120,7 +170,9 @@ class SettingsControllerTest {
         store.update(s -> { s.accountId = 96828122L; return s; });
 
         // Without the clear flag, a null accountId means "leave unchanged".
-        controller.putSettings(new SettingsPatch("1280x720", null, null, null, null, null, null));
+        controller.putSettings(
+                new SettingsPatch(
+                        "1280x720", null, null, null, null, null, null, null, null, null));
 
         assertThat(store.get().accountId).isEqualTo(96828122L);
     }
@@ -147,7 +199,8 @@ class SettingsControllerTest {
 
         SettingsView updated =
                 controller.putSettings(
-                        new SettingsPatch(null, null, null, null, null, null, sources));
+                        new SettingsPatch(
+                                null, null, null, null, null, null, sources, null, null, null));
 
         assertThat(updated.audioSources()).hasSize(2);
         assertThat(store.get().audioSources).hasSize(2);
@@ -159,10 +212,13 @@ class SettingsControllerTest {
     void putSettings_nullAudioSources_leavesListUnchanged() {
         List<AudioSource> sources =
                 List.of(new AudioSource("id-1", "input", "mic", "Mic", 50, false));
-        controller.putSettings(new SettingsPatch(null, null, null, null, null, null, sources));
+        controller.putSettings(
+                new SettingsPatch(null, null, null, null, null, null, sources, null, null, null));
 
         // A later PUT with null audioSources must not touch the stored list.
-        controller.putSettings(new SettingsPatch("1280x720", null, null, null, null, null, null));
+        controller.putSettings(
+                new SettingsPatch(
+                        "1280x720", null, null, null, null, null, null, null, null, null));
 
         assertThat(store.get().audioSources).hasSize(1);
         assertThat(store.get().audioSources.get(0).id()).isEqualTo("id-1");
@@ -173,7 +229,8 @@ class SettingsControllerTest {
         // An explicit empty array clears all sources (distinct from null = unchanged).
         SettingsView updated =
                 controller.putSettings(
-                        new SettingsPatch(null, null, null, null, null, null, List.of()));
+                        new SettingsPatch(
+                                null, null, null, null, null, null, List.of(), null, null, null));
 
         assertThat(updated.audioSources()).isEmpty();
         assertThat(store.get().audioSources).isEmpty();

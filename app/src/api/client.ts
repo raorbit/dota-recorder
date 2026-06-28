@@ -111,6 +111,12 @@ export interface Settings {
   // Always a non-empty array from the core (a fresh install seeds one default-output
   // source). On PUT it is a FULL-LIST REPLACE: send the complete current array.
   readonly audioSources: AudioSource[];
+  // Recording video controls written into the OBS profile (basic.ini) and applied on
+  // the next OBS launch, mirroring `resolution`. fps is an OBS common-FPS integer
+  // (30/60); quality is the OBS RecQuality token; format is the RecFormat2 container.
+  readonly fps: number;
+  readonly quality: string;
+  readonly format: string;
 }
 
 // A partial update to Settings. Every field is optional so the renderer can PATCH
@@ -223,6 +229,21 @@ export function fetchStatus(): Promise<StatusSnapshot> {
 
 export function fetchSettings(): Promise<Settings> {
   return getJson<Settings>('/settings');
+}
+
+// A single polled screenshot of the OBS "Dota" scene. `dataUri` is a ready-to-use
+// `data:image/jpeg;base64,…` URI on success, or null on every degrade path (OBS down,
+// connection failed, or screenshot failure). The endpoint always returns HTTP 200, so
+// the renderer just shows the image or a placeholder.
+export interface ScenePreview {
+  readonly dataUri: string | null;
+}
+
+// GET /obs/preview — authed via getJson (an <img src> request can't carry the bridge
+// token, hence the inline data-URI design). The renderer polls this while the
+// Recording tab is mounted and renders `dataUri` straight into an <img>.
+export function fetchScenePreview(): Promise<ScenePreview> {
+  return getJson<ScenePreview>('/obs/preview');
 }
 
 // One pickable device/process for an audio source's target, as the core's

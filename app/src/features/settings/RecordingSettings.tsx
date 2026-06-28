@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react';
 import {
   fetchAudioInputs,
+  fetchScenePreview,
   fetchSettings,
   updateSettings,
   type AudioInputOption,
   type AudioSource,
   type AudioSourceKind,
+  type ScenePreview,
   type Settings,
   type SettingsPatch,
 } from '../../api/client';
@@ -39,6 +41,36 @@ const ENCODER_LABELS: Record<string, string> = {
   qsv: 'Intel QuickSync (H.264)',
   x264: 'x264 (software)',
 };
+
+// The encoder-override picker offers `auto` (the blank sentinel — re-arms the GPU
+// probe at boot) plus the four EncoderProbe tokens. Any other string silently falls
+// back to x264 in OBS, so only these are offered.
+const ENCODER_OVERRIDE_TOKENS: ReadonlyArray<string> = ['x264', 'nvenc', 'qsv', 'amd'];
+
+// Frame-rate presets. OBS "Common FPS" integers only (FPSType stays 0); 120/144 would
+// need FPSType=1 and fractional rates (29.97) need a String, so the int field is
+// restricted to 30/60.
+const FPS_PRESETS: ReadonlyArray<{ readonly value: number; readonly label: string }> = [
+  { value: 30, label: '30 fps' },
+  { value: 60, label: '60 fps' },
+];
+
+// OBS RecQuality tokens (case-sensitive). "Small" is tolerated if already stored but
+// omitted from the picker. A stored value outside this list is preserved as a leading option.
+const QUALITY_PRESETS: ReadonlyArray<{ readonly value: string; readonly label: string }> = [
+  { value: 'Stream', label: 'Stream (smaller files)' },
+  { value: 'HQ', label: 'High quality' },
+  { value: 'Lossless', label: 'Lossless (huge files)' },
+];
+
+// OBS RecFormat2 containers. The crash-safe subset only — plain `mp4` is intentionally
+// omitted (unfinalized-file corruption risk on crash). Out-of-list stored value preserved.
+const FORMAT_PRESETS: ReadonlyArray<{ readonly value: string; readonly label: string }> = [
+  { value: 'hybrid_mp4', label: 'MP4 (hybrid)' },
+  { value: 'fragmented_mp4', label: 'MP4 (fragmented)' },
+  { value: 'mkv', label: 'MKV' },
+  { value: 'mov', label: 'MOV' },
+];
 
 const RETENTION_MIN = 10;
 const RETENTION_MAX = 500;
@@ -87,6 +119,16 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
   const [retentionGb, setRetentionGb] = useState(50);
   const [accountId, setAccountId] = useState('');
 
+  // Video controls (mirror `resolution`: saved now, applied on the next OBS launch).
+  // encoderChoice maps 'auto' <-> '' (blank sentinel re-arms the GPU probe at boot).
+  const [fps, setFps] = useState(60);
+  const [quality, setQuality] = useState('HQ');
+  const [recFormat, setRecFormat] = useState('hybrid_mp4');
+  const [encoderChoice, setEncoderChoice] = useState('auto');
+
+  // Latest polled OBS scene-preview frame (null = no frame / OBS down → placeholder).
+  const [preview, setPreview] = useState<ScenePreview | null>(null);
+
   // The editable audio-source list and a per-kind cache of picker options. The core
   // seeds the list (we never synthesize a default here); the options cache is filled
   // lazily by loadInputs() and degrades to [] when OBS is down.
@@ -126,6 +168,10 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
         setRetentionGb(s.retentionCapGb);
         setAccountId(s.accountId !== null ? String(s.accountId) : '');
         setAudioSources(s.audioSources);
+        setFps(s.fps);
+        setQuality(s.quality);
+        setRecFormat(s.format);
+        setEncoderChoice(s.encoder ? s.encoder : 'auto');
         setLoadState('ready');
         // Prime each kind's options once the form is up.
         void loadInputs('application');
@@ -138,6 +184,29 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
     })();
     return () => {
       cancelled = true;
+    };
+  }, []);
+
+  // Live scene preview. Polls GET /obs/preview every ~1s while this tab is mounted
+  // (the parent unmounts on navigation away, so the interval cleanup stops polling).
+  // Each tick degrades to {dataUri:null} on failure → the UI shows the placeholder.
+  useEffect(() => {
+    let cancelled = false;
+
+    const tick = async (): Promise<void> => {
+      try {
+        const next = await fetchScenePreview();
+        if (!cancelled) setPreview(next);
+      } catch {
+        if (!cancelled) setPreview({ dataUri: null });
+      }
+    };
+
+    void tick();
+    const id = window.setInterval(() => void tick(), 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
     };
   }, []);
 
@@ -161,6 +230,10 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
       videoDir.trim() !== settings.videoDir ||
       retentionGb !== settings.retentionCapGb ||
       accountId.trim() !== (settings.accountId !== null ? String(settings.accountId) : '') ||
+      fps !== settings.fps ||
+      quality !== settings.quality ||
+      recFormat !== settings.format ||
+      (encoderChoice === 'auto' ? '' : encoderChoice) !== settings.encoder ||
       JSON.stringify(audioSources) !== JSON.stringify(settings.audioSources));
 
   const onBrowse = async (): Promise<void> => {
@@ -242,6 +315,11 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
         : { accountId: Number(trimmedAccount) }),
       // FULL-LIST REPLACE: always send the complete current array.
       audioSources,
+      fps,
+      quality,
+      format: recFormat,
+      // 'auto' <-> '' (blank): the blank sentinel re-arms the GPU probe on the next boot.
+      encoder: encoderChoice === 'auto' ? '' : encoderChoice,
     };
 
     try {
@@ -252,6 +330,10 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
       setRetentionGb(updated.retentionCapGb);
       setAccountId(updated.accountId !== null ? String(updated.accountId) : '');
       setAudioSources(updated.audioSources);
+      setFps(updated.fps);
+      setQuality(updated.quality);
+      setRecFormat(updated.format);
+      setEncoderChoice(updated.encoder ? updated.encoder : 'auto');
       setSaveState('saved');
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to save settings.');
@@ -261,13 +343,31 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
 
   const status = recorderStatusLabel(obs);
   const encoderToken = settings?.encoder ?? '';
-  const encoderLabel = ENCODER_LABELS[encoderToken] ?? (encoderToken || 'Detecting…');
   const resOptions = RES_PRESETS.some((p) => p.value === resolution)
     ? RES_PRESETS
     : [{ value: resolution, label: resolution || '—' }, ...RES_PRESETS];
+  // Mirror resOptions: a stored quality/format outside the picker list (e.g. "Small"
+  // or "ts") is preserved as a leading option so saving doesn't silently change it.
+  const qualityOptions = QUALITY_PRESETS.some((p) => p.value === quality)
+    ? QUALITY_PRESETS
+    : [{ value: quality, label: quality || '—' }, ...QUALITY_PRESETS];
+  const formatOptions = FORMAT_PRESETS.some((p) => p.value === recFormat)
+    ? FORMAT_PRESETS
+    : [{ value: recFormat, label: recFormat || '—' }, ...FORMAT_PRESETS];
 
   return (
     <section className="rec-panel" aria-label="Recording settings">
+      <div className="rec-preview">
+        {preview?.dataUri ? (
+          <img className="rec-preview-img" src={preview.dataUri} alt="Live scene preview" />
+        ) : (
+          <div className="rec-preview-empty">OBS preview unavailable</div>
+        )}
+        <span className="rec-preview-badge" data-state={status.state}>
+          {status.text}
+        </span>
+      </div>
+
       <header className="rec-panel-head">
         <h2 className="rec-panel-title">Recording</h2>
         <div className="rec-conn" data-state={status.state}>
@@ -327,14 +427,108 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
               <div className="rec-rowlabel">
                 <label className="rec-label">
                   Encoder
-                  <span className="rec-badge">auto</span>
+                  {encoderChoice === 'auto' && <span className="rec-badge">auto</span>}
                 </label>
-                <p className="rec-desc">Best hardware encoder, detected for your GPU.</p>
+                <p className="rec-desc">
+                  Auto picks the best hardware encoder for your GPU. Override only if you
+                  know which one you want.
+                </p>
               </div>
               <div className="rec-control">
-                <div className="rec-readonly" title={encoderToken}>
-                  {encoderLabel}
-                </div>
+                <select
+                  id="rec-encoder"
+                  className="rec-select"
+                  aria-label="Encoder"
+                  value={encoderChoice}
+                  onChange={(e) => {
+                    setEncoderChoice(e.target.value);
+                    setSaveState('idle');
+                  }}
+                >
+                  <option value="auto">
+                    Auto — {ENCODER_LABELS[encoderToken] ?? (encoderToken || 'detecting')}
+                  </option>
+                  {ENCODER_OVERRIDE_TOKENS.map((t) => (
+                    <option key={t} value={t}>
+                      {ENCODER_LABELS[t] ?? t}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <div className="rec-row">
+              <div className="rec-rowlabel">
+                <label className="rec-label" htmlFor="rec-fps">
+                  Frame rate
+                </label>
+                <p className="rec-desc">Frames per second captured into the recording.</p>
+              </div>
+              <div className="rec-control">
+                <select
+                  id="rec-fps"
+                  className="rec-select"
+                  value={fps}
+                  onChange={(e) => {
+                    setFps(Number(e.target.value));
+                    setSaveState('idle');
+                  }}
+                >
+                  {FPS_PRESETS.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <div className="rec-row">
+              <div className="rec-rowlabel">
+                <label className="rec-label" htmlFor="rec-quality">
+                  Quality
+                </label>
+                <p className="rec-desc">Higher quality means larger files.</p>
+              </div>
+              <div className="rec-control">
+                <select
+                  id="rec-quality"
+                  className="rec-select"
+                  value={quality}
+                  onChange={(e) => {
+                    setQuality(e.target.value);
+                    setSaveState('idle');
+                  }}
+                >
+                  {qualityOptions.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <div className="rec-row">
+              <div className="rec-rowlabel">
+                <label className="rec-label" htmlFor="rec-format">
+                  Format
+                </label>
+                <p className="rec-desc">Recording container. All options are crash-safe.</p>
+              </div>
+              <div className="rec-control">
+                <select
+                  id="rec-format"
+                  className="rec-select"
+                  value={recFormat}
+                  onChange={(e) => {
+                    setRecFormat(e.target.value);
+                    setSaveState('idle');
+                  }}
+                >
+                  {formatOptions.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
               </div>
             </div>
           </section>

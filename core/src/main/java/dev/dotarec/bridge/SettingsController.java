@@ -5,6 +5,7 @@ import dev.dotarec.config.SettingsStore;
 import dev.dotarec.config.SettingsStore.AudioSource;
 import dev.dotarec.config.SettingsStore.Settings;
 import dev.dotarec.obs.ObsController;
+import dev.dotarec.obs.setup.ObsConfigWriter;
 import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -35,10 +36,13 @@ public class SettingsController {
 
     private final SettingsStore store;
     private final ObsController obsController;
+    private final ObsConfigWriter obsConfigWriter;
 
-    public SettingsController(SettingsStore store, ObsController obsController) {
+    public SettingsController(
+            SettingsStore store, ObsController obsController, ObsConfigWriter obsConfigWriter) {
         this.store = store;
         this.obsController = obsController;
+        this.obsConfigWriter = obsConfigWriter;
     }
 
     @GetMapping("/settings")
@@ -58,6 +62,15 @@ public class SettingsController {
                     }
                     if (patch.encoder() != null) {
                         current.encoder = patch.encoder();
+                    }
+                    if (patch.fps() != null) {
+                        current.fps = patch.fps();
+                    }
+                    if (patch.quality() != null) {
+                        current.quality = patch.quality();
+                    }
+                    if (patch.format() != null) {
+                        current.format = patch.format();
                     }
                     if (patch.retentionCapGb() != null) {
                         current.retentionCapGb = patch.retentionCapGb();
@@ -88,6 +101,15 @@ public class SettingsController {
         } catch (Exception e) {
             log.debug("On-demand audio reconcile after settings PUT failed (OBS down?): {}", e.toString());
         }
+        // Re-write basic.ini from the saved settings so the recording profile (fps/quality/format/
+        // encoder/resolution) is fresh for the NEXT OBS launch instead of stale until the next reboot.
+        // Best-effort and side-effect-free (no copy/probe/websocket rewrite); the saved settings are the
+        // source of truth and boot-time configure() is authoritative, so a failure here must never 500.
+        try {
+            obsConfigWriter.applyProfile();
+        } catch (Exception e) {
+            log.debug("Profile re-write after settings PUT failed: {}", e.toString());
+        }
         return SettingsView.of(store.get());
     }
 
@@ -102,7 +124,10 @@ public class SettingsController {
             int retentionCapGb,
             String videoDir,
             Long accountId,
-            List<AudioSource> audioSources) {
+            List<AudioSource> audioSources,
+            int fps,
+            String quality,
+            String format) {
 
         static SettingsView of(Settings s) {
             return new SettingsView(
@@ -111,7 +136,10 @@ public class SettingsController {
                     s.retentionCapGb,
                     s.videoDir,
                     s.accountId,
-                    s.audioSources);
+                    s.audioSources,
+                    s.fps,
+                    s.quality,
+                    s.format);
         }
     }
 
@@ -128,5 +156,8 @@ public class SettingsController {
             String videoDir,
             Long accountId,
             Boolean clearAccountId,
-            List<AudioSource> audioSources) {}
+            List<AudioSource> audioSources,
+            Integer fps,
+            String quality,
+            String format) {}
 }
