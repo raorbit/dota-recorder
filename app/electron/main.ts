@@ -4,7 +4,7 @@
 // TODO(plan Step 1+): surface a loud, actionable error window when the core fails
 // to start or crashes mid-session ("core stopped - recordings paused") instead of
 // the bare dialog used here.
-import { app, BrowserWindow, dialog } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain } from 'electron';
 import { randomBytes } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -91,6 +91,9 @@ async function launchObs(): Promise<void> {
       obsDir: launchArgs.obsDir,
       port: launchArgs.port,
       password: launchArgs.password,
+      collection: launchArgs.collection,
+      profile: launchArgs.profile,
+      scene: launchArgs.scene,
       bridgeToken,
       onLog: (line) => logLine(`[obs] ${line}`),
     });
@@ -106,9 +109,14 @@ async function launchObs(): Promise<void> {
  * Returns the OBS dir + websocket port/password the core generated. Throws if the
  * core never becomes ready within the retry budget.
  */
-async function pollLaunchArgs(
-  maxRetries = 30,
-): Promise<{ obsDir: string; port: number; password: string }> {
+async function pollLaunchArgs(maxRetries = 30): Promise<{
+  obsDir: string;
+  port: number;
+  password: string;
+  collection: string;
+  profile: string;
+  scene: string;
+}> {
   for (let i = 0; i < maxRetries; i++) {
     if (shuttingDown) break;
     try {
@@ -117,11 +125,33 @@ async function pollLaunchArgs(
         headers: { [BRIDGE_TOKEN_HEADER]: bridgeToken },
       });
       if (res.ok) {
-        const a = (await res.json()) as { obsDir?: string; port?: number; password?: string };
+        const a = (await res.json()) as {
+          obsDir?: string;
+          port?: number;
+          password?: string;
+          collection?: string;
+          profile?: string;
+          scene?: string;
+        };
         // 200 only once config is fully written; still guard against a blank password
-        // so we never launch OBS with auth effectively disabled.
-        if (a.obsDir && typeof a.port === 'number' && a.password) {
-          return { obsDir: a.obsDir, port: a.port, password: a.password };
+        // so we never launch OBS with auth effectively disabled. The collection/profile/scene
+        // names come from the core (its single source of truth), not re-hardcoded here.
+        if (
+          a.obsDir &&
+          typeof a.port === 'number' &&
+          a.password &&
+          a.collection &&
+          a.profile &&
+          a.scene
+        ) {
+          return {
+            obsDir: a.obsDir,
+            port: a.port,
+            password: a.password,
+            collection: a.collection,
+            profile: a.profile,
+            scene: a.scene,
+          };
         }
       }
       // 409 (not ready) or an incomplete body — fall through and retry.
@@ -154,6 +184,19 @@ function createWindow(): void {
   mainWindow.once('ready-to-show', () => mainWindow?.show());
   mainWindow.on('closed', () => {
     mainWindow = null;
+  });
+
+  // Native folder picker for the recording output-folder Browse button. Renderer-driven over
+  // IPC because the renderer is sandboxed and can't open dialogs itself. Registered with handle()
+  // (idempotent re-register on window re-create) and parented to the window so it's modal.
+  ipcMain.removeHandler('dialog:selectFolder');
+  ipcMain.handle('dialog:selectFolder', async (): Promise<string | null> => {
+    if (!mainWindow) return null;
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: 'Choose recording folder',
+      properties: ['openDirectory', 'createDirectory'],
+    });
+    return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0];
   });
 
   // Lock the window to its own bundled content: deny popups and block any navigation away from the

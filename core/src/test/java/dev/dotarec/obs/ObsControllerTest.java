@@ -27,6 +27,15 @@ import org.springframework.test.util.ReflectionTestUtils;
  */
 class ObsControllerTest {
 
+    /**
+     * A scene configurer whose audio reconcile is never driven in these tests (none of them are
+     * connected enough to call reconcileAudioOnDemand). A null settings store is fine since no test
+     * here exercises the reconcile path.
+     */
+    private static ObsSceneConfigurer sceneConfigurer() {
+        return new ObsSceneConfigurer(mock(SettingsStore.class));
+    }
+
     @Test
     void startRecording_resetsStalePerRecordingAnchorBeforeStarting() {
         ObsHealth health = new ObsHealth();
@@ -41,7 +50,7 @@ class ObsControllerTest {
 
         // Not connected, so the StartRecord itself fails; but startRecording must FIRST clear the
         // stale anchor so the FSM's read of recordConfirmedAt() falls back to the live frame time.
-        ObsController controller = new ObsController(null, health, events);
+        ObsController controller = new ObsController(null, health, events, sceneConfigurer());
         assertThatThrownBy(controller::startRecording).isInstanceOf(ObsException.class);
 
         assertThat(events.recordConfirmedAt())
@@ -52,7 +61,8 @@ class ObsControllerTest {
     @Test
     void startRecording_whenCorrectiveStopTimesOut_keepsRecordingFlagForRetry() {
         ObsHealth health = new ObsHealth();
-        ObsController controller = new ObsController(null, health, new ObsEvents(health));
+        ObsController controller =
+                new ObsController(null, health, new ObsEvents(health), sceneConfigurer());
 
         OBSRemoteController obs = mock(OBSRemoteController.class);
         // A timed-out StopRecord returns null from the library -- it does NOT throw.
@@ -77,7 +87,7 @@ class ObsControllerTest {
     void startRecording_whenCorrectiveStopSucceeds_clearsFlagThenStarts() {
         ObsHealth health = new ObsHealth();
         ObsEvents events = new ObsEvents(health);
-        ObsController controller = new ObsController(null, health, events);
+        ObsController controller = new ObsController(null, health, events, sceneConfigurer());
 
         OBSRemoteController obs = mock(OBSRemoteController.class);
         StopRecordResponse stopOk = mock(StopRecordResponse.class);
@@ -111,7 +121,7 @@ class ObsControllerTest {
     void startRecording_whenCorrectiveStopRacesANativeStop_proceedsWithTheNewRecording() {
         ObsHealth health = new ObsHealth();
         ObsEvents events = new ObsEvents(health);
-        ObsController controller = new ObsController(null, health, events);
+        ObsController controller = new ObsController(null, health, events, sceneConfigurer());
 
         OBSRemoteController obs = mock(OBSRemoteController.class);
         StopRecordResponse stopFailed = mock(StopRecordResponse.class);
@@ -157,7 +167,7 @@ class ObsControllerTest {
         // Simulate a connect that FAILS: the latch is released as onClose/onError would, but the
         // onReady event -- the only thing that sets connectionReady -- never fires.
         ObsController controller =
-                new ObsController(settings, health, new ObsEvents(health)) {
+                new ObsController(settings, health, new ObsEvents(health), sceneConfigurer()) {
                     @Override
                     OBSRemoteController buildController(SettingsStore.Settings s, CountDownLatch latch) {
                         latch.countDown();

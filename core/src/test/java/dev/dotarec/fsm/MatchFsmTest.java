@@ -285,10 +285,11 @@ class MatchFsmTest {
         assertThat(row.videoPath()).isEqualTo("C:\\videos\\match.mkv");
         assertThat(row.enrichmentState()).isEqualTo("pending");
 
-        // Buffered markers were flushed: 2 kills, 1 death-counter + 1 falling-edge death = 4.
+        // Buffered markers were flushed: 2 kills and 1 death (the counter delta and the falling
+        // edge describe the same death, so it is tagged once, not twice).
         List<MarkerRow> persisted = markers.findByMatchId(row.id());
         assertThat(persisted).extracting(MarkerRow::type)
-                .containsExactlyInAnyOrder("kill", "kill", "death", "death");
+                .containsExactlyInAnyOrder("kill", "kill", "death");
 
         // Thumbnail captured BEFORE stop (the contract: a post-stop screenshot is black).
         assertThat(thumbs.calls).isEqualTo(1);

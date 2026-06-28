@@ -60,11 +60,18 @@ class ObsLaunchControllerTest {
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
         Map<String, Object> body = resp.getBody();
         assertThat(body).isNotNull();
-        assertThat(body.keySet()).containsExactlyInAnyOrder("obsDir", "port", "password");
+        assertThat(body.keySet())
+                .containsExactlyInAnyOrder(
+                        "obsDir", "port", "password", "collection", "profile", "scene");
         assertThat(body.get("obsDir"))
                 .isEqualTo(paths.obsDir().toAbsolutePath().toString());
         assertThat(body.get("port")).isEqualTo(4466);
         assertThat(body.get("password")).isEqualTo("abc1234567890def");
+        // The OBS identifiers come from the core's canonical constants (single source of truth).
+        assertThat(body.get("collection"))
+                .isEqualTo(dev.dotarec.obs.setup.ObsLayout.SCENE_COLLECTION);
+        assertThat(body.get("profile")).isEqualTo(dev.dotarec.obs.setup.ObsLayout.PROFILE_NAME);
+        assertThat(body.get("scene")).isEqualTo(dev.dotarec.obs.ObsSceneConfigurer.SCENE_NAME);
     }
 
     @Test

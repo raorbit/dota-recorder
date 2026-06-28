@@ -370,9 +370,23 @@ public class CrashRecoveryRunner implements ApplicationRunner {
         }
     }
 
+    /**
+     * The recording-container extensions the orphan scan recognizes. The {@code RecFormat2} setting is
+     * one of hybrid_mp4 / fragmented_mp4 / mkv / mov -- the first two write {@code .mp4}, so this set
+     * covers all four values. A static allow-list (rather than deriving from the current
+     * {@code settings.format}) is deliberate: the format setting may have changed since a crashed
+     * recording was written, and the scan must still adopt files of any historical container.
+     */
+    private static final Set<String> RECORDING_EXTENSIONS = Set.of(".mp4", ".mkv", ".mov");
+
     private boolean isRecordingFile(Path path) {
         String name = path.getFileName().toString().toLowerCase(Locale.ROOT);
-        return name.endsWith(".mp4");
+        for (String ext : RECORDING_EXTENSIONS) {
+            if (name.endsWith(ext)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private Path videoDir() {

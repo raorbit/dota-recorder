@@ -12,6 +12,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 /**
@@ -45,6 +46,7 @@ public class OpenDotaClient implements MatchSource {
     private final ObjectMapper mapper;
     private final SettingsStore settings;
 
+    @Autowired
     public OpenDotaClient(ObjectMapper mapper, SettingsStore settings) {
         this(HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build(), mapper, settings);
     }

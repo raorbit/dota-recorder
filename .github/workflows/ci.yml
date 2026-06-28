@@ -1,0 +1,45 @@
+name: CI
+
+# Lightweight gate: core JUnit tests + renderer/electron typecheck. Deliberately skips the heavy
+# packaging steps (fetch:obs downloads hundreds of MB, build:all + electron-builder produce the NSIS
+# installer) -- those are not needed to catch boot-wiring or type regressions.
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    # The app is Windows-only (the gradlew wrapper, AppPaths and OBS layout all assume Windows paths).
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Core tests
+        working-directory: core
+        run: ./gradlew test
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # The electron typecheck (tsc -p app/tsconfig.electron.json) resolves the `electron` types from
+      # the ROOT node_modules -- electron is a root devDependency, not an app/ one -- so install both.
+      - name: Install root deps
+        run: npm ci
+
+      - name: Install renderer deps
+        run: npm --prefix app ci
+
+      - name: Renderer + Electron typecheck
+        run: npm --prefix app run typecheck

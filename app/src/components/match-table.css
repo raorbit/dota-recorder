@@ -92,6 +92,38 @@
   text-overflow: ellipsis;
 }
 
+/* Star toggle: faint when off, gold when on/hovered. Protects a recording from the
+   retention sweep ("oldest unstarred removed first"). */
+.mt-star {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+.mt-star:hover {
+  color: var(--gold);
+  background: rgba(255, 255, 255, 0.05);
+}
+.mt-star[data-on='true'] {
+  color: var(--gold);
+}
+
+.mt-row:focus-visible,
+.mt-star:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
 /* --- result --- */
 .mt-result {
   font-weight: 700;

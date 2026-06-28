@@ -9,6 +9,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import dev.dotarec.bridge.EventPublisher;
 import io.obswebsocket.community.client.OBSRemoteController;
 import org.junit.jupiter.api.Test;
 
@@ -20,7 +21,7 @@ class ObsConnectionSchedulerTest {
         ObsSceneConfigurer cfg = mock(ObsSceneConfigurer.class);
         OBSRemoteController ctrl = mock(OBSRemoteController.class);
         when(obs.controller()).thenReturn(ctrl);
-        ObsConnectionScheduler scheduler = new ObsConnectionScheduler(obs, cfg);
+        ObsConnectionScheduler scheduler = new ObsConnectionScheduler(obs, cfg, mock(EventPublisher.class));
 
         // Not connected yet: no scene setup.
         when(obs.ensureConnected()).thenReturn(false);
@@ -54,7 +55,7 @@ class ObsConnectionSchedulerTest {
         // First attempt throws; the second must retry (the edge flag was reset on failure).
         doThrow(new ObsException("boom")).doNothing().when(cfg).ensureSceneReady(ctrl);
 
-        ObsConnectionScheduler scheduler = new ObsConnectionScheduler(obs, cfg);
+        ObsConnectionScheduler scheduler = new ObsConnectionScheduler(obs, cfg, mock(EventPublisher.class));
         scheduler.tryConnectAndConfigure(); // throws internally, caught, edge reset
         scheduler.tryConnectAndConfigure(); // retries and succeeds
 

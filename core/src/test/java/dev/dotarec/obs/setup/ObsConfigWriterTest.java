@@ -78,9 +78,65 @@ class ObsConfigWriterTest {
                 .contains("RecEncoder=nvenc")
                 .contains("BaseCX=2560")
                 .contains("BaseCY=1440")
-                .contains("FilePath=" + settings.get().videoDir);
+                // FilePath is written with forward slashes: OBS stores it in Qt QSettings INI form
+                // where a single backslash is an escape char, so a raw Windows path would be mangled
+                // on read ("bad output path", recording never starts). See ObsConfigWriter.writeProfile.
+                .contains("FilePath=" + settings.get().videoDir.replace('\\', '/'));
         // Probed encoder token is persisted so the UI can reflect it.
         assertThat(settings.get().encoder).isEqualTo("nvenc");
+    }
+
+    @Test
+    void writesUserVideoControlsIntoProfile(@TempDir Path dir) throws Exception {
+        AppPaths paths = paths(dir);
+        SettingsStore settings = new SettingsStore(paths);
+        settings.update(
+                s -> {
+                    s.fps = 30;
+                    s.quality = "Stream";
+                    s.format = "mkv";
+                    return s;
+                });
+        writer(paths, settings, "", "0").configure();
+
+        Path ini = new ObsLayout(paths.obsDir()).profileIni();
+        assertThat(Files.readString(ini))
+                .contains("FPSCommon=30")
+                .contains("RecQuality=Stream")
+                .contains("RecFormat2=mkv")
+                // FPSType stays the literal "Common FPS" mode.
+                .contains("FPSType=0");
+    }
+
+    @Test
+    void blankEncoderFallsBackToX264InProfile(@TempDir Path dir) throws Exception {
+        AppPaths paths = paths(dir);
+        SettingsStore settings = new SettingsStore(paths);
+        // A no-GPU probe leaves the encoder blank; the profile must still write a usable x264 token
+        // rather than an empty RecEncoder= that OBS would reject.
+        EncoderProbe noGpu = new EncoderProbe(java.util.List::of);
+        new ObsConfigWriter(paths, settings, noGpu, "", "0").configure();
+
+        Path ini = new ObsLayout(paths.obsDir()).profileIni();
+        assertThat(Files.readString(ini)).contains("RecEncoder=x264");
+    }
+
+    @Test
+    void applyProfileRewritesIniWithoutOtherSideEffects(@TempDir Path dir) throws Exception {
+        AppPaths paths = paths(dir);
+        SettingsStore settings = new SettingsStore(paths);
+        ObsConfigWriter writer = writer(paths, settings, "", "0");
+        // Seed basic.ini once via configure(), then change a setting and re-apply ONLY the profile.
+        writer.configure();
+        settings.update(
+                s -> {
+                    s.quality = "Lossless";
+                    return s;
+                });
+        writer.applyProfile();
+
+        Path ini = new ObsLayout(paths.obsDir()).profileIni();
+        assertThat(Files.readString(ini)).contains("RecQuality=Lossless");
     }
 
     @Test

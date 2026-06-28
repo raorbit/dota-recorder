@@ -6,17 +6,34 @@ import dev.dotarec.data.MatchRepository;
 import dev.dotarec.data.MatchSummary;
 import dev.dotarec.data.PauseRepository;
 import dev.dotarec.data.PauseSpan;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpRange;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
+import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
 
 import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.io.UncheckedIOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * Matches endpoints consumed by the Electron browse/player UI over the loopback bridge.
@@ -29,14 +46,23 @@ import java.util.List;
  *   <li>{@code GET /matches/{id}} -- one match, or 404.</li>
  *   <li>{@code GET /matches/{id}/markers} -- the seekable timeline, ordered by video offset.</li>
  *   <li>{@code GET /matches/{id}/pauses} -- pause spans, chronological.</li>
- *   <li>{@code GET /matches/{id}/video} -- a {@code file://} URL + absolute path to the .mp4, or 404
- *       when the row is missing or its video was pruned ({@code video_path} null).</li>
+ *   <li>{@code GET /matches/{id}/video/stream} -- the recorded VOD bytes over the authed loopback
+ *       bridge so a renderer {@code <video>} element can play + seek without a cross-origin
+ *       {@code file://} load. Honors HTTP {@code Range}: a {@code Range} header yields 206 Partial
+ *       Content with a {@code Content-Range} (Chromium's seek path), an absent header yields 200
+ *       with {@code Accept-Ranges: bytes} and the full body, an unsatisfiable range yields 416.
+ *       404 when the row is missing, its {@code video_path} is null (pruned/never recorded), or the
+ *       file is gone from disk. A {@code <video src>} can't set the {@code X-Dotarec-Token} header, so the
+ *       renderer passes the bridge token on the {@code ?token=} query param -- {@code BridgeAuthFilter}
+ *       already accepts the token there for every gated path (same as the WS handshake).</li>
  *   <li>{@code PATCH /matches/{id}} {@code { starred }} -- toggles the star, returns the updated row.</li>
  *   <li>{@code GET /buckets/counts} -- one count per library bucket.</li>
  * </ul>
  */
 @RestController
 public class MatchController {
+
+    private static final Logger log = LoggerFactory.getLogger(MatchController.class);
 
     private final MatchRepository matches;
     private final MarkerRepository markers;
@@ -80,13 +106,19 @@ public class MatchController {
         return pauses.findByMatchId(id);
     }
 
+
     /**
-     * Resolves the playable video for a match. 404 (with a reason) when the match is unknown or its
-     * video has been pruned by retention ({@code video_path} null) -- the player shows a
-     * "recording removed" state rather than a broken video element.
+     * Streams the recorded VOD bytes for a match with HTTP Range support so a renderer
+     * {@code <video>} element can play and seek over the authed loopback bridge (no cross-origin
+     * {@code file://} load). 404 when the match is unknown, its
+     * {@code video_path} is null/blank (pruned by retention / never recorded), or the file is gone
+     * from disk. A {@code Range} header yields 206 + {@code Content-Range}; its absence yields 200 +
+     * {@code Accept-Ranges: bytes}; an unsatisfiable range yields 416. The body is streamed in 64KB
+     * chunks via {@link StreamingResponseBody} (no whole-file buffering).
      */
-    @GetMapping("/matches/{id}/video")
-    public VideoLocation video(@PathVariable long id) {
+    @GetMapping("/matches/{id}/video/stream")
+    public ResponseEntity<StreamingResponseBody> videoStream(
+            @PathVariable long id, @RequestHeader HttpHeaders headers) {
         MatchSummary m = matches.findById(id)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "No match " + id));
         String path = m.videoPath();
@@ -94,7 +126,85 @@ public class MatchController {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND,
                     "Video for match " + id + " is unavailable (pruned by retention or never recorded)");
         }
-        return new VideoLocation(id, path, new File(path).toURI().toString());
+        Path file = new File(path).toPath();
+        if (!Files.isRegularFile(file)) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND,
+                    "Video for match " + id + " is unavailable (file missing on disk)");
+        }
+
+        MediaType type = contentType(file);
+        long length;
+        try {
+            length = Files.size(file);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to read video size: " + file, e);
+        }
+
+        // Stream the bytes via StreamingResponseBody rather than a (Generic)HttpMessageConverter:
+        // it streams in chunks (no whole-file buffering) and is written by a dedicated return-value
+        // handler, so it sidesteps the converter-generics trap that erases ResourceRegion under a
+        // ResponseEntity<?> return type. <video> always sends a Range, so the 206 path is the hot one.
+        List<HttpRange> ranges = headers.getRange();
+        if (ranges.isEmpty()) {
+            // No Range header -> full body, 200. Advertise Accept-Ranges so Chromium knows it can seek.
+            return ResponseEntity.ok()
+                    .contentType(type)
+                    .contentLength(length)
+                    .header(HttpHeaders.ACCEPT_RANGES, "bytes")
+                    .body(out -> copyRange(file, 0, length, out));
+        }
+        HttpRange range = ranges.get(0);
+        long start = range.getRangeStart(length);
+        long end = range.getRangeEnd(length); // clamped to length-1 by HttpRange
+        if (start >= length || start > end) {
+            // Unsatisfiable (start beyond EOF): 416 with the actual size so the client can re-ask.
+            return ResponseEntity.status(HttpStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                    .header(HttpHeaders.CONTENT_RANGE, "bytes */" + length)
+                    .build();
+        }
+        long regionLen = end - start + 1;
+        return ResponseEntity.status(HttpStatus.PARTIAL_CONTENT)
+                .contentType(type)
+                .contentLength(regionLen)
+                .header(HttpHeaders.ACCEPT_RANGES, "bytes")
+                .header(HttpHeaders.CONTENT_RANGE, "bytes " + start + "-" + end + "/" + length)
+                .body(out -> copyRange(file, start, regionLen, out));
+    }
+
+    /** Streams {@code count} bytes of {@code file} starting at {@code start} to {@code out}, chunked. */
+    private static void copyRange(Path file, long start, long count, OutputStream out)
+            throws IOException {
+        try (InputStream in = Files.newInputStream(file)) {
+            in.skipNBytes(start);
+            byte[] buf = new byte[64 * 1024];
+            long remaining = count;
+            while (remaining > 0) {
+                int n = in.read(buf, 0, (int) Math.min(buf.length, remaining));
+                if (n < 0) {
+                    break;
+                }
+                out.write(buf, 0, n);
+                remaining -= n;
+            }
+        }
+    }
+
+    /**
+     * Explicit extension -> media type map. {@code Files.probeContentType} is unreliable on Windows
+     * (depends on registry MIME registrations), so the recording containers are mapped by hand.
+     */
+    private static MediaType contentType(Path file) {
+        String name = file.getFileName().toString().toLowerCase(Locale.ROOT);
+        if (name.endsWith(".mp4")) {
+            return MediaType.valueOf("video/mp4");
+        }
+        if (name.endsWith(".mkv")) {
+            return MediaType.valueOf("video/x-matroska");
+        }
+        if (name.endsWith(".mov")) {
+            return MediaType.valueOf("video/quicktime");
+        }
+        return MediaType.APPLICATION_OCTET_STREAM;
     }
 
     @PatchMapping("/matches/{id}")
@@ -106,6 +216,34 @@ public class MatchController {
         }
         return matches.findById(id)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "No match " + id));
+    }
+
+    /**
+     * Permanently deletes a match: the {@code .mp4} + thumbnail on disk, then the row (its markers +
+     * pauses cascade via the FK). 404 when the id is unknown. File unlinks are best-effort — a missing
+     * or locked file is logged and never blocks the row delete (so a half-pruned recording can still
+     * be removed). No undo.
+     */
+    @DeleteMapping("/matches/{id}")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void delete(@PathVariable long id) {
+        MatchSummary m = matches.findById(id)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "No match " + id));
+        deleteFileQuietly(m.videoPath());
+        deleteFileQuietly(m.thumbPath());
+        matches.delete(id);
+    }
+
+    /** Best-effort unlink: ignores a null/blank/missing path; logs (never throws) on an I/O failure. */
+    private static void deleteFileQuietly(String path) {
+        if (path == null || path.isBlank()) {
+            return;
+        }
+        try {
+            Files.deleteIfExists(new File(path).toPath());
+        } catch (IOException e) {
+            log.warn("Could not delete file {} while deleting a match: {}", path, e.toString());
+        }
     }
 
     @GetMapping("/buckets/counts")
@@ -122,9 +260,6 @@ public class MatchController {
     private static boolean isBlank(String s) {
         return s == null || s.isBlank();
     }
-
-    /** {@code GET /matches/{id}/video} response: the absolute path plus a {@code file://} URL. */
-    public record VideoLocation(long matchId, String path, String url) {}
 
     /** {@code PATCH /matches/{id}} body. Only {@code starred} is supported for now; null = no change. */
     public record MatchPatch(Boolean starred) {}

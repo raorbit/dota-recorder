@@ -85,6 +85,17 @@ public class ObsConfigWriter {
     }
 
     /**
+     * Re-writes only {@code basic.ini} from the current settings, with NONE of the {@link #configure}
+     * side effects (no first-run copy, no websocket-config rewrite, no GPU probe). Called best-effort
+     * after a {@code PUT /settings} so the recording profile is fresh for the NEXT OBS launch rather
+     * than stale until the next reboot. Like {@link #configure}, this still only affects recordings
+     * started on the next OBS launch — a live OBS keeps its already-loaded profile.
+     */
+    public synchronized void applyProfile() {
+        writeProfile(new ObsLayout(paths.obsDir()));
+    }
+
+    /**
      * Pins the obs-websocket password, the managed port, and the auto-detected encoder in a single
      * atomic settings update so the read-modify-write cannot race a concurrent {@code PUT /settings}.
      * The (possibly slow) GPU probe runs OUTSIDE the settings lock; its result is applied only if the
@@ -225,14 +236,29 @@ public class ObsConfigWriter {
                 (s.videoDir == null || s.videoDir.isBlank())
                         ? paths.videoDir().toString()
                         : s.videoDir;
+        // OBS stores SimpleOutput.FilePath in Qt QSettings INI form, where a single backslash is an
+        // escape character -- a Windows path written with single backslashes (C:\Users\...) is
+        // mangled on read (\U, \r, ... become bogus escapes), so OBS rejects it as a "bad output
+        // path" and recording never starts (no OUTPUT_STARTED -> every match aborts). OBS itself
+        // writes this key with forward slashes; match that so the path round-trips intact.
+        String recPathIni = recPath.replace('\\', '/');
         String ini =
                 loadTemplate(PROFILE_TEMPLATE)
-                        .replace("@REC_PATH@", recPath)
+                        .replace("@REC_PATH@", recPathIni)
                         .replace("@REC_ENCODER@", encoder)
                         .replace("@BASE_CX@", Integer.toString(res[0]))
                         .replace("@BASE_CY@", Integer.toString(res[1]))
                         .replace("@OUT_CX@", Integer.toString(res[0]))
-                        .replace("@OUT_CY@", Integer.toString(res[1]));
+                        .replace("@OUT_CY@", Integer.toString(res[1]))
+                        // FPS/quality/format are user settings (defaults backfilled in SettingsStore.load).
+                        // Guard null/blank defensively in case a legacy settings.json bypassed the backfill.
+                        .replace("@FPS@", Integer.toString(s.fps > 0 ? s.fps : 60))
+                        .replace(
+                                "@REC_QUALITY@",
+                                (s.quality == null || s.quality.isBlank()) ? "HQ" : s.quality)
+                        .replace(
+                                "@REC_FORMAT@",
+                                (s.format == null || s.format.isBlank()) ? "hybrid_mp4" : s.format);
         Path file = layout.profileIni();
         try {
             Files.createDirectories(file.getParent());

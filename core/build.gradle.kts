@@ -17,6 +17,26 @@ repositories {
     mavenCentral()
 }
 
+dependencyManagement {
+    dependencies {
+        // The obs-websocket community client (below) targets Jetty 9.4's websocket-client, whose
+        // WebSocketClient.<clinit> references org.eclipse.jetty.util.log.Log -- a class removed in
+        // Jetty 10+. Spring Boot's BOM otherwise bumps the transitive jetty support artifacts
+        // (util/io/http/client/...) to 12.x, so the 9.4 websocket-client fails to initialize at
+        // runtime (NoClassDefFoundError) and OBS never connects -> no recording. Nothing else uses
+        // Jetty (Spring runs on embedded Tomcat), so pin the whole support graph to the matching
+        // 9.4.49 line that the websocket-client expects.
+        dependencySet("org.eclipse.jetty:9.4.49.v20220914") {
+            entry("jetty-util")
+            entry("jetty-io")
+            entry("jetty-http")
+            entry("jetty-client")
+            entry("jetty-alpn-client")
+            entry("jetty-xml")
+        }
+    }
+}
+
 dependencies {
     // Web + WebSocket bridge (REST/WebSocket on 127.0.0.1:3224) and the
     // second Tomcat connector for GSI ingest on 127.0.0.1:3223. Jackson is
@@ -51,6 +71,16 @@ tasks.named<org.springframework.boot.gradle.tasks.bundling.BootJar>("bootJar") {
     // The Electron supervisor launches <resourcesPath>/core/core.jar, so the
     // packaged artifact name is part of the runtime contract.
     archiveFileName.set("core.jar")
+    manifest {
+        // The obs-websocket community client deserializes OBS events with Gson, which
+        // reflectively instantiates java.lang.Void for empty event payloads (e.g. the
+        // RecordStateChanged/OUTPUT_STARTED event). On JDK 16+ strong encapsulation blocks
+        // setAccessible on java.lang unless it is opened -- without this the OUTPUT_STARTED
+        // confirmation never parses, recording is never confirmed, and every match aborts.
+        // Set in the manifest so it applies however the jar is launched (java -jar standalone
+        // and the supervisor's javaw -jar alike), not just under one launcher.
+        attributes("Add-Opens" to "java.base/java.lang")
+    }
 }
 
 tasks.named<Test>("test") {

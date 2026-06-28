@@ -31,6 +31,12 @@ const PRIMARY_BUCKETS: readonly BucketDef[] = [
 const SECONDARY_BUCKETS: readonly BucketDef[] = [
   { key: 'turbo', label: 'Turbo', badge: 'plain' },
   { key: 'abilityDraft', label: 'Ability Draft', badge: 'plain' },
+];
+
+// Manual recordings and saved Clips have no creation UI in v0.1, so these buckets
+// would always read 0 and advertise features that don't exist. Shown only if the
+// backend ever reports a count (future-proof, mirroring the Unsorted bucket).
+const OPTIONAL_BUCKETS: readonly BucketDef[] = [
   { key: 'manual', label: 'Manual', badge: 'plain' },
   { key: 'clips', label: 'Clips', badge: 'gold' },
 ];
@@ -130,7 +136,10 @@ export function Sidebar({
           renderBucket({ key: 'unsorted', label: 'Unsorted', badge: 'plain' })}
       </div>
 
-      <div className="sb-secondary">{SECONDARY_BUCKETS.map(renderBucket)}</div>
+      <div className="sb-secondary">
+        {SECONDARY_BUCKETS.map(renderBucket)}
+        {OPTIONAL_BUCKETS.filter((def) => countFor(counts, def.key) > 0).map(renderBucket)}
+      </div>
 
       <div className="sb-group-label sb-group-label-settings">SETTINGS</div>
       <div className="sb-settings">

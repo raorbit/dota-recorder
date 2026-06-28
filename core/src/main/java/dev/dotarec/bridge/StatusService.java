@@ -3,6 +3,7 @@ package dev.dotarec.bridge;
 import dev.dotarec.fsm.MatchFsm;
 import dev.dotarec.gsi.GsiHeartbeat;
 import dev.dotarec.obs.ObsHealth;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 
 /**
@@ -19,7 +20,10 @@ public class StatusService {
     private final ObsHealth obsHealth;
     private final MatchFsm matchFsm;
 
-    public StatusService(GsiHeartbeat gsiHeartbeat, ObsHealth obsHealth, MatchFsm matchFsm) {
+    // @Lazy breaks the construction cycle StatusService -> MatchFsm -> EventPublisher ->
+    // StatusService. MatchFsm is only dereferenced at runtime in snapshot(), so a lazy proxy is
+    // safe and keeps the core domain bean free of presentation-layer wiring concerns.
+    public StatusService(GsiHeartbeat gsiHeartbeat, ObsHealth obsHealth, @Lazy MatchFsm matchFsm) {
         this.gsiHeartbeat = gsiHeartbeat;
         this.obsHealth = obsHealth;
         this.matchFsm = matchFsm;

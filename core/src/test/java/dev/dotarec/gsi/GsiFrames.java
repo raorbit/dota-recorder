@@ -13,6 +13,7 @@ public final class GsiFrames {
     private boolean paused = false;
     private boolean heroPresent = true;
     private boolean alive = true;
+    private boolean playerPresent = true;
     private long matchId = 0L;
     private String hero = "npc_dota_hero_drow_ranger";
     private int heroId = 6;
@@ -33,6 +34,7 @@ public final class GsiFrames {
     public GsiFrames paused(boolean v) { this.paused = v; return this; }
     public GsiFrames heroPresent(boolean v) { this.heroPresent = v; return this; }
     public GsiFrames alive(boolean v) { this.alive = v; return this; }
+    public GsiFrames playerPresent(boolean v) { this.playerPresent = v; return this; }
     public GsiFrames matchId(long v) { this.matchId = v; return this; }
     public GsiFrames hero(String v) { this.hero = v; return this; }
     public GsiFrames activity(String v) { this.activity = v; return this; }
@@ -48,9 +50,22 @@ public final class GsiFrames {
         return this;
     }
 
+    /**
+     * Models a heartbeat / reconnect frame with no PLAYER block: presence flips off and the KDA
+     * counters zero out (mirrors {@link GsiPayload#toFrame} defaulting them to 0 when player==null).
+     * Distinct from {@link #noHero()} -- the two blocks drop independently.
+     */
+    public GsiFrames noPlayer() {
+        this.playerPresent = false;
+        this.kills = 0;
+        this.deaths = 0;
+        this.assists = 0;
+        return this;
+    }
+
     public GsiFrame build() {
         return new GsiFrame(
-                wallClockMillis, gameState, gameClock, paused, heroPresent, alive, matchId, hero,
-                heroId, activity, kills, deaths, assists, radiantScore, direScore);
+                wallClockMillis, gameState, gameClock, paused, heroPresent, alive, playerPresent,
+                matchId, hero, heroId, activity, kills, deaths, assists, radiantScore, direScore);
     }
 }

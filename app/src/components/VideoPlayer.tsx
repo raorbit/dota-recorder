@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import type { MatchSummary, Marker, PauseSpan } from '../api/client';
-import { fetchMarkers, fetchMatch, fetchPauses, fetchVideo } from '../api/client';
+import { fetchMarkers, fetchMatch, fetchPauses, videoStreamUrl } from '../api/client';
 import { bucketLabelOf } from '../store/buckets';
+import { useLibraryStore } from '../store/library';
 import './video-player.css';
 
 interface VideoPlayerProps {
@@ -43,6 +44,14 @@ function clamp01(v: number): number {
   return Math.min(1, Math.max(0, v));
 }
 
+// Playback time (non-negative seconds) as M:SS for the transport readout.
+function fmtPlayTime(seconds: number): string {
+  const s = Number.isFinite(seconds) && seconds > 0 ? Math.trunc(seconds) : 0;
+  const mm = Math.floor(s / 60);
+  const ss = s % 60;
+  return `${mm}:${String(ss).padStart(2, '0')}`;
+}
+
 // The 300px video stage. A real <video> sits behind the existing placeholder /
 // score / clock / scrubber chrome. Markers are data-driven from GET
 // /matches/{id}/markers, positioned by video_offset_s / duration, and click-to-seek
@@ -61,13 +70,24 @@ export function VideoPlayer({ match }: VideoPlayerProps): React.JSX.Element {
   const [durationS, setDurationS] = useState<number | null>(null);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [progress, setProgress] = useState(0); // playhead %, driven by timeupdate
+  const [currentTimeS, setCurrentTimeS] = useState(0); // playhead seconds, for the time readout
+  const [playing, setPlaying] = useState(false);
+  const [muted, setMuted] = useState(false);
+  // Two-step delete: the first click arms a confirm bar so a permanent delete can't fire on one tap.
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  const deleteMatch = useLibraryStore((s) => s.deleteMatch);
 
   const matchId = match?.id ?? null;
 
-  // Self-contained per-selection fetch: markers + detail (for durationS) + video
-  // (file:// url) in parallel via allSettled, so a 404 on /video (pruned/seeded,
-  // no file) still lets markers + duration render. Reset on matchId change /
-  // null; a `cancelled` guard drops late responses for a superseded selection so
+  // Self-contained per-selection fetch: markers + detail (for durationS + video
+  // availability) + pauses in parallel via allSettled. Video availability comes
+  // from the detail's `videoPath` — non-null/non-blank means the file exists, so
+  // videoUrl points at the authed range-streaming endpoint; null/blank (pruned by
+  // retention / seeded no-file) leaves videoUrl null and the placeholder renders.
+  // No separate /video round-trip needed. Reset on matchId change / null; a
+  // `cancelled` guard drops late responses for a superseded selection so
   // out-of-order resolves can't overwrite the current match's state.
   useEffect(() => {
     setMarkers([]);
@@ -76,29 +96,31 @@ export function VideoPlayer({ match }: VideoPlayerProps): React.JSX.Element {
     setDurationS(null);
     setVideoUrl(null);
     setProgress(0);
+    setCurrentTimeS(0); // else the readout shows the previous match's position for a video-less row
+    setConfirmDelete(false);
+    setDeleting(false);
 
     if (matchId === null) return;
 
     let cancelled = false;
     const id = matchId;
 
-    void Promise.allSettled([
-      fetchMarkers(id),
-      fetchMatch(id),
-      fetchVideo(id),
-      fetchPauses(id),
-    ]).then(([markersRes, detailRes, videoRes, pausesRes]) => {
-      if (cancelled) return; // a newer selection (or unmount) superseded this fetch
-      if (markersRes.status === 'fulfilled') setMarkers(markersRes.value);
-      if (detailRes.status === 'fulfilled') {
-        setDurationS(detailRes.value.durationS);
-        setRecordStartWall(detailRes.value.recordStartedWallMs);
-      }
-      // 404 (no file) just leaves videoUrl null — markers/duration still render.
-      if (videoRes.status === 'fulfilled') setVideoUrl(videoRes.value.url);
-      // A failed /pauses (none, or seeded) just leaves the span list empty.
-      if (pausesRes.status === 'fulfilled') setPauses(pausesRes.value);
-    });
+    void Promise.allSettled([fetchMarkers(id), fetchMatch(id), fetchPauses(id)]).then(
+      ([markersRes, detailRes, pausesRes]) => {
+        if (cancelled) return; // a newer selection (or unmount) superseded this fetch
+        if (markersRes.status === 'fulfilled') setMarkers(markersRes.value);
+        if (detailRes.status === 'fulfilled') {
+          setDurationS(detailRes.value.durationS);
+          setRecordStartWall(detailRes.value.recordStartedWallMs);
+          // Only point at the stream when a file actually exists. A blank/null
+          // videoPath (pruned/seeded) leaves videoUrl null -> placeholder shows.
+          const path = detailRes.value.videoPath;
+          if (path != null && path.trim() !== '') setVideoUrl(videoStreamUrl(id));
+        }
+        // A failed /pauses (none, or seeded) just leaves the span list empty.
+        if (pausesRes.status === 'fulfilled') setPauses(pausesRes.value);
+      },
+    );
 
     return () => {
       cancelled = true;
@@ -130,9 +152,54 @@ export function VideoPlayer({ match }: VideoPlayerProps): React.JSX.Element {
     const v = videoRef.current;
     if (!v || !Number.isFinite(v.duration) || v.duration <= 0) {
       setProgress(0);
+      setCurrentTimeS(0);
       return;
     }
     setProgress((v.currentTime / v.duration) * 100);
+    setCurrentTimeS(v.currentTime);
+  }
+
+  // Transport controls, wired to the real <video> element (no-ops on an empty/seeded player).
+  function togglePlay(): void {
+    const v = videoRef.current;
+    if (!v) return;
+    if (v.paused) {
+      void v.play?.().catch(() => {});
+    } else {
+      v.pause();
+    }
+  }
+
+  function toggleMute(): void {
+    const v = videoRef.current;
+    if (!v) return;
+    v.muted = !v.muted;
+    setMuted(v.muted);
+  }
+
+  function toggleFullscreen(): void {
+    void videoRef.current?.requestFullscreen?.().catch(() => {});
+  }
+
+  // Enter/Space activates a role="button" control (the glyph controls aren't <button>s).
+  const keyActivate = (fn: () => void) => (e: React.KeyboardEvent): void => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      fn();
+    }
+  };
+
+  // Confirmed delete: removes the row + .mp4/thumbnail. On success the store clears the
+  // selection, so this view falls back to the library (no local cleanup needed); on failure
+  // the confirm bar stays open so the user can retry.
+  async function onConfirmDelete(): Promise<void> {
+    if (!match) return;
+    setDeleting(true);
+    try {
+      await deleteMatch(match.id);
+    } catch {
+      setDeleting(false);
+    }
   }
 
   // Click anywhere on the scrub track to seek by fraction. No-op without a finite
@@ -156,16 +223,20 @@ export function VideoPlayer({ match }: VideoPlayerProps): React.JSX.Element {
     <div className="vp-stage">
       <div className="vp-hatch" aria-hidden="true" />
 
-      {/* Real VOD behind the chrome. file:// works in this Electron renderer; if a
-          CSP/origin change later blocks it, add an HTTP-range endpoint core-side
-          and point videoUrl at that stream url — no change needed below.
-          src omitted when videoUrl is null (not fetched, 404, or seeded no-file):
+      {/* Real VOD behind the chrome. videoUrl points at the authed loopback range
+          stream (GET /matches/{id}/video/stream) — a plain http(s) media load that
+          Chromium can seek; the bridge token rides the ?token= query param since a
+          <video> element can't set the X-Dotarec-Token header.
+          src omitted when videoUrl is null (not fetched, or seeded/pruned no-file):
           an empty media element over which markers + scrubber still render. */}
       <video
         ref={videoRef}
         className="vp-video"
         src={videoUrl ?? undefined}
         onTimeUpdate={handleTimeUpdate}
+        onPlay={() => setPlaying(true)}
+        onPause={() => setPlaying(false)}
+        onVolumeChange={(e) => setMuted(e.currentTarget.muted)}
         playsInline
         preload="metadata"
       />
@@ -177,10 +248,11 @@ export function VideoPlayer({ match }: VideoPlayerProps): React.JSX.Element {
         </div>
       )}
 
-      <div className="vp-strip">
-        <span className="vp-pill vp-pill-score">RADIANT 31 — 24 DIRE</span>
-        <span className="vp-pill vp-pill-clock">⏱ 38:12</span>
-      </div>
+      {match && (
+        <div className="vp-strip">
+          <span className="vp-pill vp-pill-score">{caption}</span>
+        </div>
+      )}
 
       <div className="vp-controls">
         <div className="vp-scrub" onClick={handleScrubClick}>
@@ -253,16 +325,79 @@ export function VideoPlayer({ match }: VideoPlayerProps): React.JSX.Element {
         </div>
 
         <div className="vp-controls-row">
-          <span className="vp-play">▶</span>
-          <span className="vp-icon">🔊</span>
-          <span className="vp-time">17:34 / 38:12</span>
+          <span
+            className="vp-play"
+            role="button"
+            tabIndex={0}
+            aria-label={playing ? 'Pause' : 'Play'}
+            onClick={togglePlay}
+            onKeyDown={keyActivate(togglePlay)}
+          >
+            {playing ? '⏸' : '▶'}
+          </span>
+          <span
+            className="vp-icon"
+            role="button"
+            tabIndex={0}
+            aria-label={muted ? 'Unmute' : 'Mute'}
+            onClick={toggleMute}
+            onKeyDown={keyActivate(toggleMute)}
+          >
+            {muted ? '🔇' : '🔊'}
+          </span>
+          <span className="vp-time">
+            {fmtPlayTime(currentTimeS)} / {fmtPlayTime(dur)}
+          </span>
           <span className="vp-controls-spacer" />
-          <span className="vp-time">1×</span>
-          <span className="vp-icon">✂</span>
-          <span className="vp-icon">⤓</span>
-          <span className="vp-icon">⛶</span>
+          <span
+            className="vp-icon"
+            role="button"
+            tabIndex={0}
+            aria-label="Fullscreen"
+            onClick={toggleFullscreen}
+            onKeyDown={keyActivate(toggleFullscreen)}
+          >
+            ⛶
+          </span>
+          {match && (
+            <span
+              className="vp-icon vp-delete"
+              role="button"
+              tabIndex={0}
+              aria-label="Delete recording"
+              title="Delete recording"
+              onClick={() => setConfirmDelete(true)}
+              onKeyDown={keyActivate(() => setConfirmDelete(true))}
+            >
+              🗑
+            </span>
+          )}
         </div>
       </div>
+
+      {confirmDelete && (
+        <div className="vp-confirm" role="alertdialog" aria-label="Confirm delete recording">
+          <span className="vp-confirm-text">Delete this recording permanently?</span>
+          <div className="vp-confirm-actions">
+            <button
+              type="button"
+              className="vp-confirm-del"
+              onClick={() => void onConfirmDelete()}
+              disabled={deleting}
+            >
+              {deleting ? 'Deleting…' : 'Delete'}
+            </button>
+            <button
+              type="button"
+              className="vp-confirm-cancel"
+              onClick={() => setConfirmDelete(false)}
+              disabled={deleting}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

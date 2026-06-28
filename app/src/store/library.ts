@@ -14,6 +14,8 @@ import {
   fetchMatches,
   fetchBucketCounts,
   fetchStatus,
+  setStarred,
+  deleteMatch as apiDeleteMatch,
   StatusSocket,
   type MatchSummary,
   type BucketCounts,
@@ -58,6 +60,8 @@ export interface LibraryState {
   readonly setDateFilter: (date: string | null) => void;
   readonly selectMatch: (id: number | null) => void;
   readonly setStatus: (status: Status | null) => void;
+  readonly toggleStar: (id: number, starred: boolean) => Promise<void>;
+  readonly deleteMatch: (id: number) => Promise<void>;
   readonly load: () => Promise<void>;
 }
 
@@ -85,6 +89,37 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   setDateFilter: (dateFilter) => set({ dateFilter }),
   selectMatch: (selectedMatchId) => set({ selectedMatchId }),
   setStatus: (status) => set({ status }),
+
+  // Star/unstar a match: flip it locally for instant feedback, then persist via
+  // PATCH /matches/{id}. Starred recordings are exempt from the retention sweep, so
+  // this is the lever that copy promises ("oldest unstarred removed first"). Both the
+  // optimistic flip and the on-failure revert are functional per-row updates (not a
+  // whole-array snapshot) so a list reload landing during the in-flight PATCH — a
+  // coalesced match.* event fires load() every ~200ms — isn't clobbered on revert.
+  toggleStar: async (id, starred) => {
+    set((s) => ({ matches: s.matches.map((m) => (m.id === id ? { ...m, starred } : m)) }));
+    try {
+      await setStarred(id, starred);
+    } catch {
+      set((s) => ({ matches: s.matches.map((m) => (m.id === id ? { ...m, starred: !starred } : m)) }));
+    }
+  },
+
+  // Permanently delete a match (row + markers/pauses + .mp4 + thumbnail). Pessimistic:
+  // delete server-side FIRST, then drop it from the list and clear the selection if it
+  // was open, and refresh the bucket badges. Rethrows so the caller can surface a failure.
+  deleteMatch: async (id) => {
+    await apiDeleteMatch(id);
+    set((s) => ({
+      matches: s.matches.filter((m) => m.id !== id),
+      selectedMatchId: s.selectedMatchId === id ? null : s.selectedMatchId,
+    }));
+    try {
+      set({ counts: await fetchBucketCounts() });
+    } catch {
+      /* leave the stale badge; the next load() reconciles */
+    }
+  },
 
   load: async () => {
     const token = ++loadToken;

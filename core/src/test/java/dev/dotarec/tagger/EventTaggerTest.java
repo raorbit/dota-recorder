@@ -45,12 +45,13 @@ class EventTaggerTest {
 
         List<PendingMarker> markers = tagger.diff(prev, curr, ANCHOR, DURATION);
 
-        // 1 kill + 1 assist + 1 death (counter) + 1 death (falling edge) = 2 deaths total.
+        // The deaths counter (+1) and the alive falling edge describe the SAME death, so it must
+        // emit exactly ONE death marker, not two -- the edge is suppressed when the counter moved.
         assertThat(markers).extracting(PendingMarker::type)
-                .containsExactlyInAnyOrder("kill", "assist", "death", "death");
+                .containsExactlyInAnyOrder("kill", "assist", "death");
         assertThat(markers).filteredOn(m -> m.type().equals("kill")).hasSize(1);
         assertThat(markers).filteredOn(m -> m.type().equals("assist")).hasSize(1);
-        assertThat(markers).filteredOn(m -> m.type().equals("death")).hasSize(2);
+        assertThat(markers).filteredOn(m -> m.type().equals("death")).hasSize(1);
     }
 
     @Test
@@ -91,6 +92,18 @@ class EventTaggerTest {
         GsiFrame alivePrev = frame().wall(ANCHOR + 1_100L).alive(true).heroPresent(true).build();
 
         assertThat(tagger.diff(gonePrev, alivePrev, ANCHOR, DURATION)).isEmpty();
+    }
+
+    @Test
+    void playerBlockVanishesThenReturnsNonZero_isNotPhantomMarkers() {
+        // The player block drops on a heartbeat / reconnect (counters default to 0), then returns
+        // with the real running totals. Without the player-presence gate this pair would emit a
+        // burst of phantom markers (8 kills + 5 deaths); the gate must suppress them entirely.
+        GsiFrame absent = frame().wall(ANCHOR + 40_000L).noPlayer().build();
+        GsiFrame back =
+                frame().wall(ANCHOR + 40_100L).playerPresent(true).kills(8).deaths(5).assists(3).build();
+
+        assertThat(tagger.diff(absent, back, ANCHOR, DURATION)).isEmpty();
     }
 
     @Test

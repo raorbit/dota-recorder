@@ -1,5 +1,6 @@
 package dev.dotarec.obs;
 
+import dev.dotarec.bridge.EventPublisher;
 import io.obswebsocket.community.client.OBSRemoteController;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -27,6 +28,7 @@ public class ObsConnectionScheduler {
 
     private final ObsController obsController;
     private final ObsSceneConfigurer sceneConfigurer;
+    private final EventPublisher eventPublisher;
 
     /**
      * Tracks the connection edge (only the scheduler thread touches it). Scene setup runs on each
@@ -35,10 +37,17 @@ public class ObsConnectionScheduler {
      */
     private boolean wasConnected = false;
 
+    /** Logs a scene-config failure loudly once, then quietly, so a persistent failure is visible but
+     * the 5s retry doesn't spam. Reset after a clean configure so a later regression re-surfaces. */
+    private boolean loggedConfigError = false;
+
     public ObsConnectionScheduler(
-            ObsController obsController, ObsSceneConfigurer sceneConfigurer) {
+            ObsController obsController,
+            ObsSceneConfigurer sceneConfigurer,
+            EventPublisher eventPublisher) {
         this.obsController = obsController;
         this.sceneConfigurer = sceneConfigurer;
+        this.eventPublisher = eventPublisher;
     }
 
     @Scheduled(fixedRate = 5_000) // every 5 seconds
@@ -52,12 +61,30 @@ public class ObsConnectionScheduler {
                 if (controller != null) {
                     sceneConfigurer.ensureSceneReady(controller);
                     log.info("OBS scene configured on connect");
+                    loggedConfigError = false;
                 }
             }
             wasConnected = connected;
         } catch (Exception e) {
-            log.debug("OBS connection/scene attempt failed (will retry): {}", e.toString());
+            // Surface the first failure with its stack (a silently-looping scene config is a real
+            // bug), then drop to debug so the 5s retry doesn't spam.
+            if (!loggedConfigError) {
+                log.warn("OBS scene configuration failed; will keep retrying", e);
+                loggedConfigError = true;
+            } else {
+                log.debug("OBS connection/scene attempt failed (will retry): {}", e.toString());
+            }
             wasConnected = false; // force a re-configure on the next successful connect
+        } finally {
+            // Heartbeat the live status to the renderer every tick. OBS connect/disconnect only flips
+            // ObsHealth; nothing else broadcasts a status frame, so without this the UI stays stuck on
+            // its initial connect-time frame and shows a stale "error" after OBS reconnects. Best-effort:
+            // a broadcast hiccup must never break the connect loop.
+            try {
+                eventPublisher.publishStatus();
+            } catch (RuntimeException ignored) {
+                /* status heartbeat is best-effort */
+            }
         }
     }
 }

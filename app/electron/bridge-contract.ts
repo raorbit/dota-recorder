@@ -10,4 +10,7 @@ export interface DotaRecBridge {
   // header / WS query param). Empty string when running outside Electron (plain
   // browser dev), in which case the core also runs with auth disabled.
   readonly bridgeToken: string;
+  // Opens the native folder picker (main process) and resolves the chosen path,
+  // or null if the user cancelled. Used by the recording output-folder Browse button.
+  readonly selectFolder: () => Promise<string | null>;
 }

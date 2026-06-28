@@ -14,12 +14,16 @@ import org.springframework.stereotype.Service;
  *       INDEPENDENTLY and a marker is emitted per increment, because a single ~10Hz tick can carry
  *       several at once (e.g. you trade a kill, an assist, and your own death in the same frame).
  *       A positive delta of N emits N markers of that type (rare, but a dropped frame can batch
- *       two kills into one tick).</li>
- *   <li>A death is the {@code hero.alive} true-&gt;false FALLING EDGE, and only when the hero block
- *       is present on BOTH frames. On load / hero-select the hero block is absent
- *       ({@code heroPresent=false} -&gt; {@code alive=false}); without this guard the absence would
- *       read as a phantom death. The {@code deaths} counter delta is a second, independent death
- *       signal and is intentionally allowed to coexist (Dota increments it on the same edge).</li>
+ *       two kills into one tick). The counter diff is gated on the PLAYER block being present on
+ *       BOTH frames: a heartbeat / reconnect drops the player block (counters default to 0), so a
+ *       [player absent: 0/0/0] -&gt; [player back: non-zero KDA] pair would otherwise emit a burst of
+ *       phantom kill/death/assist markers -- the gate suppresses that.</li>
+ *   <li>A death is detected from the {@code deaths} counter delta (primary) OR the {@code hero.alive}
+ *       true-&gt;false FALLING EDGE (fallback when the counter lagged), but never BOTH for the same
+ *       tick -- a single death emits a single marker. The falling edge is gated on the hero block
+ *       being present on BOTH frames: on load / hero-select the block is absent
+ *       ({@code heroPresent=false} -&gt; {@code alive=false}), and without that guard the absence would
+ *       read as a phantom death.</li>
  * </ul>
  *
  * <p>Each marker's {@code video_offset_s} comes from {@link VideoOffsetCalculator} anchored on the
@@ -53,15 +57,27 @@ public class EventTagger {
                         curr.wallClockMillis(), recordConfirmedWallMs, durationS);
         Integer gameClock = curr.gameClock();
 
-        // Running-total counters: one marker per increment, each counter independent.
-        emitIncrements(markers, "kill", curr.kills() - prev.kills(), offset, gameClock);
-        emitIncrements(markers, "assist", curr.assists() - prev.assists(), offset, gameClock);
-        emitIncrements(markers, "death", curr.deaths() - prev.deaths(), offset, gameClock);
+        // Running-total counters: one marker per increment, each counter independent. Gated on the
+        // player block being present on BOTH frames: on a heartbeat / reconnect the player block is
+        // ABSENT and the counters default to 0 (GsiPayload.toFrame), so a frame pair
+        // [player absent: 0/0/0] -> [player back: deaths=5,kills=8] would otherwise emit a burst of
+        // phantom markers. deathDelta stays 0 when the gate is closed so the falling-edge fallback
+        // below still behaves (no spurious counter signal to suppress it).
+        int deathDelta = 0;
+        if (prev.playerPresent() && curr.playerPresent()) {
+            emitIncrements(markers, "kill", curr.kills() - prev.kills(), offset, gameClock);
+            emitIncrements(markers, "assist", curr.assists() - prev.assists(), offset, gameClock);
+            deathDelta = curr.deaths() - prev.deaths();
+            emitIncrements(markers, "death", deathDelta, offset, gameClock);
+        }
 
-        // Falling-edge death, gated on hero presence on BOTH frames so a vanished hero block
-        // (load / hero-select / reconnect) cannot manufacture a phantom death. This is independent
-        // of the deaths-counter signal above; both legitimately fire on a real death edge.
-        if (prev.heroPresent()
+        // Falling-edge death as a FALLBACK signal, used only when the deaths counter did NOT already
+        // catch this death on the same tick -- otherwise a single death emits two identical markers.
+        // The counter is the primary signal; the edge covers the case where it lagged or didn't move.
+        // Gated on hero presence on BOTH frames so a vanished hero block (load / hero-select /
+        // reconnect) cannot manufacture a phantom death.
+        if (deathDelta <= 0
+                && prev.heroPresent()
                 && curr.heroPresent()
                 && prev.alive()
                 && !curr.alive()) {
