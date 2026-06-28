@@ -3,6 +3,7 @@ package dev.dotarec;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.dotarec.bridge.MatchController;
+import dev.dotarec.config.SchedulingConfig;
 import dev.dotarec.data.MigrationRunner;
 import dev.dotarec.obs.ObsController;
 import java.nio.file.Path;
@@ -49,6 +50,11 @@ class DotaRecorderApplicationTests {
         registry.add("app.data-dir", () -> tmp.resolve("data").toString());
         registry.add("app.obs.dir", () -> tmp.resolve("obs").toString());
         registry.add("app.db-path", () -> tmp.resolve("db").resolve("test.sqlite").toString());
+        // Wire every bean but DON'T let the background jobs run: the no-initial-delay schedulers
+        // (OBS reconnect, retention sweep, enrichment) otherwise fire at the tail of context refresh
+        // and race the startup runners (migration, crash recovery) on single-writer SQLite, which
+        // intermittently threw a SQLiteException during boot and flaked this test.
+        registry.add("app.scheduling.enabled", () -> "false");
     }
 
     @Autowired ApplicationContext ctx;
@@ -59,5 +65,10 @@ class DotaRecorderApplicationTests {
         assertThat(ctx.getBean(MatchController.class)).isNotNull();
         assertThat(ctx.getBean(ObsController.class)).isNotNull();
         assertThat(ctx.getBean(MigrationRunner.class)).isNotNull();
+        // Scheduling must be OFF here (app.scheduling.enabled=false), so the background jobs can't
+        // race the boot. Guards against the property/config being dropped and the flake returning.
+        assertThat(ctx.getBeansOfType(SchedulingConfig.class))
+                .as("scheduling must be disabled in the smoke test to avoid the boot DB race")
+                .isEmpty();
     }
 }

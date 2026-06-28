@@ -2,7 +2,6 @@ package dev.dotarec;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
-import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
  * Entry point for the Dota 2 Recorder core service.
@@ -12,11 +11,11 @@ import org.springframework.scheduling.annotation.EnableScheduling;
  * dedicated GSI ingest connector on 127.0.0.1:3223 (see
  * {@link dev.dotarec.bridge.GsiConnectorConfig}).
  *
- * <p>{@code @EnableScheduling} is required for the OBS connect/scene-setup retry loop
- * ({@link dev.dotarec.obs.ObsConnectionScheduler}).
+ * <p>Scheduling (the OBS connect/scene-setup retry loop, retention, enrichment, archiver) is enabled
+ * by {@link dev.dotarec.config.SchedulingConfig}, gated behind {@code app.scheduling.enabled} so
+ * tests can turn it off.
  */
 @SpringBootApplication
-@EnableScheduling
 public class DotaRecorderApplication {
 
     public static void main(String[] args) {
