@@ -8,8 +8,9 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Tray } from 'el
 import { randomBytes } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { JvmSupervisor, type ExitInfo } from './jvm-supervisor';
-import { ObsSupervisor, type ObsExitInfo } from './obs-supervisor';
+import { JvmSupervisor } from './jvm-supervisor';
+import { ObsSupervisor } from './obs-supervisor';
+import { SupervisionController } from './supervision';
 import {
   applyLaunchAtLogin,
   getLaunchAtLogin,
@@ -43,22 +44,7 @@ function logLine(line: string): void {
   console.log(line);
 }
 
-const supervisor = new JvmSupervisor({
-  bridgeToken,
-  onLog: (line) => logLine(`[core] ${line}`),
-  // A core crash while tray-hidden would otherwise silently stop all recording (and leave OBS
-  // running unmanaged). Supervise it: stop the orphaned OBS, then bounded-restart the core.
-  onUnexpectedExit: (info) => void handleCoreCrash(info),
-});
 let obsSupervisor: ObsSupervisor | null = null;
-// Bounded restart budgets so a crash-looping child can't spin forever (not reset on success).
-let coreRestartAttempts = 0;
-let obsRestartAttempts = 0;
-const MAX_CHILD_RESTARTS = 2;
-// Re-entrancy guards: a crash that lands mid-restart (or two near-simultaneous crashes) must not run
-// two overlapping supervisor.start()/launchObs(), which would race to bind ports or orphan a process.
-let coreRestarting = false;
-let obsLaunching = false;
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let shuttingDown = false;
@@ -70,6 +56,27 @@ let isQuitting = false;
 let trayHintShown = false;
 // Auto-start launches (login item) carry --hidden so the app boots straight to the tray.
 const startHidden = process.argv.includes(HIDDEN_LAUNCH_ARG);
+
+// Crash-supervision policy — bounded restart, re-entrancy / launch guards, OBS teardown on a core
+// crash — lives in SupervisionController so it can be unit-tested without Electron. Here we just wire
+// the real side effects (start/stop the supervisors, relaunch OBS, tray notice, log).
+const supervision = new SupervisionController({
+  startCore: () => supervisor.start(),
+  stopCore: () => supervisor.stop(),
+  startObs: startObsSupervisor,
+  stopObs: stopObsSupervisor,
+  notifyDown: notifyRecorderDown,
+  log: logLine,
+  isShuttingDown: () => shuttingDown || isQuitting,
+});
+
+const supervisor = new JvmSupervisor({
+  bridgeToken,
+  onLog: (line) => logLine(`[core] ${line}`),
+  // A core crash while tray-hidden would otherwise silently stop all recording (and leave OBS running
+  // unmanaged). The controller stops the orphaned OBS, then bounded-restarts the core.
+  onUnexpectedExit: (info) => void supervision.handleCoreCrash(info),
+});
 
 if (!app.requestSingleInstanceLock()) {
   app.quit();
@@ -112,7 +119,7 @@ async function bootstrap(): Promise<void> {
   if (startHidden) logLine('started hidden in tray (launched at login)');
   // Launch OBS in the background so a slow or failed OBS never blocks the UI; the
   // status card reflects OBS connectivity from /status as the core connects to it.
-  void launchObs();
+  void supervision.launchObs();
 }
 
 /** Renderer-driven get/set for the app-level prefs (currently launch-at-login). */
@@ -209,19 +216,12 @@ function showTrayHint(): void {
 }
 
 /**
- * Spawn + supervise OBS once the core's config bootstrap has finished. Detached from
- * window startup; failure is non-fatal — the status card surfaces "recorder not ready".
+ * Launch + adopt a fresh OBS supervisor once the core's config bootstrap has finished: poll the core
+ * for OBS launch args, spawn OBS, and wait for the core to report it connected. Detached from window
+ * startup; failure is non-fatal — the status card surfaces "recorder not ready". The
+ * {@link SupervisionController} serializes calls to this (see its launchObs).
  */
-async function launchObs(): Promise<void> {
-  // Serialize launches: launchObs is now reachable from bootstrap(), handleObsCrash(), and
-  // handleCoreCrash(). pollLaunchArgs() yields for seconds, so two overlapping calls would each
-  // assign obsSupervisor and spawn an obs64.exe — orphaning the first (stop() only acts on the
-  // current field). At most one launch runs at a time.
-  if (obsLaunching) {
-    logLine('[obs] launch already in progress; skipping duplicate request');
-    return;
-  }
-  obsLaunching = true;
+async function startObsSupervisor(): Promise<void> {
   try {
     // The core generates the OBS port/password and writes its config during its
     // bootstrap; GET /obs/launch-args returns 409 until that completes, so poll.
@@ -236,14 +236,25 @@ async function launchObs(): Promise<void> {
       scene: launchArgs.scene,
       bridgeToken,
       onLog: (line) => logLine(`[obs] ${line}`),
-      onUnexpectedExit: handleObsCrash,
+      onUnexpectedExit: (info) => supervision.handleObsCrash(info),
     });
     await obsSupervisor.start();
     logLine('OBS connected');
   } catch (err) {
     logLine(`OBS startup failed: ${err instanceof Error ? err.message : String(err)}`);
-  } finally {
-    obsLaunching = false;
+  }
+}
+
+/** Stop + clear the current OBS supervisor (no-op if none); the controller calls this to reap the
+ * orphaned OBS on a core crash. */
+async function stopObsSupervisor(): Promise<void> {
+  if (obsSupervisor) {
+    try {
+      await obsSupervisor.stop();
+    } catch {
+      /* best-effort. */
+    }
+    obsSupervisor = null;
   }
 }
 
@@ -393,71 +404,6 @@ function fatal(err: unknown): void {
   logLine(`fatal: ${message}`);
   dialog.showErrorBox('Dota 2 Recorder', `Failed to start the recorder core.\n\n${message}`);
   void supervisor.stop().finally(() => app.exit(1));
-}
-
-/**
- * The core crashed (exited without a stop() request). Stop the now-orphaned OBS — with the core gone
- * there is no controller to drive recording, so a live OBS would keep an unmanaged output running —
- * then bounded-restart the core and relaunch OBS. On a tray-hidden app this is the only thing standing
- * between a core crash and silently-stopped recording.
- */
-async function handleCoreCrash(info: ExitInfo): Promise<void> {
-  if (shuttingDown || isQuitting) return;
-  if (coreRestarting) {
-    // A crash landed while a restart is already in flight (e.g. the just-restarted core crashed again
-    // during waitForHealth). Don't run a second overlapping supervisor.start() on the same instance.
-    logLine('[core] crash during an in-flight restart; a restart is already running');
-    return;
-  }
-  coreRestarting = true;
-  try {
-    logLine(`[core] crash detected (code=${info.code ?? 'null'} signal=${info.signal ?? 'null'})`);
-    if (obsSupervisor) {
-      try {
-        await obsSupervisor.stop();
-      } catch {
-        /* best-effort — we are about to relaunch it anyway. */
-      }
-      obsSupervisor = null;
-    }
-    if (coreRestartAttempts >= MAX_CHILD_RESTARTS) {
-      notifyRecorderDown(
-        'The recorder core stopped and could not be restarted. Restart the app to resume recording.',
-      );
-      return;
-    }
-    coreRestartAttempts += 1;
-    logLine(`[core] restarting (attempt ${coreRestartAttempts}/${MAX_CHILD_RESTARTS})`);
-    try {
-      await supervisor.start();
-      logLine('[core] restarted; relaunching OBS');
-      obsRestartAttempts = 0; // a fresh core epoch gets a fresh OBS restart budget
-      void launchObs();
-    } catch (err) {
-      logLine(`[core] restart failed: ${err instanceof Error ? err.message : String(err)}`);
-      // start() does NOT kill its child on a health-timeout, so a restarted-but-unhealthy JVM would
-      // linger holding :3223/:3224. Reap it (mirrors fatal()) before giving up.
-      await supervisor.stop().catch(() => {});
-      notifyRecorderDown('The recorder core stopped. Restart the app to resume recording.');
-    }
-  } finally {
-    coreRestarting = false;
-  }
-}
-
-/** OBS crashed (exited without a stop() request). Bounded-relaunch it; the status card reflects the
- * gap via /status until it reconnects. */
-function handleObsCrash(info: ObsExitInfo): void {
-  if (shuttingDown || isQuitting) return;
-  logLine(`[obs] crash detected (code=${info.code ?? 'null'} signal=${info.signal ?? 'null'})`);
-  obsSupervisor = null;
-  if (obsRestartAttempts >= MAX_CHILD_RESTARTS) {
-    logLine('[obs] exceeded restart attempts; leaving OBS down (recorder will show not ready)');
-    return;
-  }
-  obsRestartAttempts += 1;
-  logLine(`[obs] relaunching (attempt ${obsRestartAttempts}/${MAX_CHILD_RESTARTS})`);
-  void launchObs();
 }
 
 /** Surface a recorder-down condition to a possibly tray-hidden user (balloon) and the log. */

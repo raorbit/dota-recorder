@@ -1,0 +1,9 @@
+{
+  "//": "Type-checks the electron unit tests (electron/**/*.test.ts) without emitting. Extends the electron build config but clears its test exclude and turns emit off.",
+  "extends": "./tsconfig.electron.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "exclude": [],
+  "include": ["electron"]
+}

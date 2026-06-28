@@ -37,11 +37,21 @@ public class ParentProcessWatchdog {
         if (parentPid <= 0) {
             return; // No supervising parent (standalone / dev run): nothing to watch.
         }
-        if (ProcessHandle.of(parentPid).isEmpty()) {
+        if (!parentAlive()) {
             log.warn(
                     "Supervising parent process {} is gone; exiting to free the loopback ports",
                     parentPid);
-            System.exit(0);
+            exit();
         }
+    }
+
+    /** Whether the configured supervising parent process is still alive. Seam for testing. */
+    protected boolean parentAlive() {
+        return ProcessHandle.of(parentPid).isPresent();
+    }
+
+    /** Terminates the JVM to free the loopback ports. Seam for testing. */
+    protected void exit() {
+        System.exit(0);
     }
 }
