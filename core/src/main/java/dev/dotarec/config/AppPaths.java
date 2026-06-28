@@ -34,7 +34,7 @@ public class AppPaths {
             @Value("${app.obs.dir:}") String configuredObsDir) {
         Path root = resolveRoot(configuredDataDir);
         this.dataDir = ensureDir(root);
-        this.videoDir = ensureDir(root.resolve("video"));
+        this.videoDir = ensureDir(resolveVideoDir(configuredDataDir));
         this.dbDir = ensureDir(root.resolve("db"));
         this.logDir = ensureDir(root.resolve("log"));
         this.obsDir = ensureDir(resolveObsRoot(configuredObsDir, root));
@@ -49,6 +49,19 @@ public class AppPaths {
             return Path.of(appData, "dota-recorder");
         }
         return Path.of(System.getProperty("user.home"), ".dota-recorder");
+    }
+
+    /**
+     * Default recording directory. With an explicitly configured data dir (tests / custom installs)
+     * recordings stay isolated under {@code <dataRoot>/video}; otherwise they default to the user's
+     * {@code Videos/Dota2Rec} folder so VODs land somewhere obvious and browsable rather than buried in
+     * the Roaming app data. The user can override this in settings.
+     */
+    private static Path resolveVideoDir(String configuredDataDir) {
+        if (configuredDataDir != null && !configuredDataDir.isBlank()) {
+            return Path.of(configuredDataDir).resolve("video");
+        }
+        return Path.of(System.getProperty("user.home"), "Videos", "Dota2Rec");
     }
 
     private static Path resolveObsRoot(String configuredObsDir, Path dataRoot) {
