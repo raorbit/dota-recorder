@@ -94,7 +94,11 @@ export class SupervisionController {
     this.coreRestarting = true;
     try {
       this.deps.log(`[core] crash detected (${formatExit(info)})`);
-      await this.deps.stopObs();
+      // Best-effort: tearing down the orphaned OBS must never abort the core restart. A flaky
+      // stopObs() rejection here would otherwise leave recording dead silently on a tray-hidden app.
+      await this.deps.stopObs().catch((err) => {
+        this.deps.log(`[obs] stop during core crash failed: ${err instanceof Error ? err.message : String(err)}`);
+      });
       if (this.coreRestartAttempts >= this.maxRestarts) {
         this.deps.notifyDown(
           'The recorder core stopped and could not be restarted. Restart the app to resume recording.',
