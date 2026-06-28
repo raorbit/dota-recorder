@@ -4,12 +4,18 @@
 // TODO(plan Step 1+): surface a loud, actionable error window when the core fails
 // to start or crashes mid-session ("core stopped - recordings paused") instead of
 // the bare dialog used here.
-import { app, BrowserWindow, dialog, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Tray } from 'electron';
 import { randomBytes } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { JvmSupervisor } from './jvm-supervisor';
 import { ObsSupervisor } from './obs-supervisor';
+import {
+  applyLaunchAtLogin,
+  getLaunchAtLogin,
+  HIDDEN_LAUNCH_ARG,
+  setLaunchAtLogin,
+} from './app-prefs';
 import {
   BRIDGE_BASE,
   BRIDGE_TOKEN_ARG_PREFIX,
@@ -40,7 +46,16 @@ function logLine(line: string): void {
 const supervisor = new JvmSupervisor({ bridgeToken, onLog: (line) => logLine(`[core] ${line}`) });
 let obsSupervisor: ObsSupervisor | null = null;
 let mainWindow: BrowserWindow | null = null;
+let tray: Tray | null = null;
 let shuttingDown = false;
+// True once a REAL quit is underway (tray Quit / menu Quit / before-quit), so the
+// window 'close' handler knows to actually close instead of hiding to the tray.
+let isQuitting = false;
+// One-time "we're still in the tray" hint, shown the first time the window is hidden so
+// closing the window doesn't look like the app vanished.
+let trayHintShown = false;
+// Auto-start launches (login item) carry --hidden so the app boots straight to the tray.
+const startHidden = process.argv.includes(HIDDEN_LAUNCH_ARG);
 
 if (!app.requestSingleInstanceLock()) {
   app.quit();
@@ -55,26 +70,128 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(bootstrap).catch(fatal);
 
   app.on('before-quit', (event) => {
-    // Defer quit until the JVM is stopped so we never orphan the core.
+    // Mark a real quit so the window 'close' handler stops hiding to the tray, then
+    // defer the actual exit until the JVM/OBS are stopped so we never orphan them.
+    isQuitting = true;
     event.preventDefault();
     void shutdown();
   });
 
   app.on('window-all-closed', () => {
-    // On Windows the app quits when the window closes; before-quit handles teardown.
-    app.quit();
+    // Do NOT quit here: closing the window hides it to the tray, where the app keeps
+    // auto-recording. The only real exit is the tray menu (or File -> Quit), which
+    // sets isQuitting and goes through before-quit -> shutdown.
   });
 }
 
 async function bootstrap(): Promise<void> {
   fs.mkdirSync(logDir(), { recursive: true });
   logLine('app starting; launching core');
+  registerPrefsIpc();
+  // Reconcile the OS login item with the stored pref on every launch (packaged only),
+  // so a pref set in a prior session still applies if it ever drifts.
+  applyLaunchAtLogin();
   await supervisor.start();
   logLine('core healthy; opening window');
   createWindow();
+  createTray();
+  if (startHidden) logLine('started hidden in tray (launched at login)');
   // Launch OBS in the background so a slow or failed OBS never blocks the UI; the
   // status card reflects OBS connectivity from /status as the core connects to it.
   void launchObs();
+}
+
+/** Renderer-driven get/set for the app-level prefs (currently launch-at-login). */
+function registerPrefsIpc(): void {
+  ipcMain.removeHandler('prefs:getLaunchAtLogin');
+  ipcMain.handle('prefs:getLaunchAtLogin', () => getLaunchAtLogin());
+  ipcMain.removeHandler('prefs:setLaunchAtLogin');
+  ipcMain.handle('prefs:setLaunchAtLogin', (_event, value: unknown) =>
+    setLaunchAtLogin(value === true),
+  );
+}
+
+/**
+ * System-tray icon + menu. The app lives in the tray so closing the window keeps it
+ * recording in the background; the tray is the way back to the window and the only real
+ * way to quit. Built once, after the window exists.
+ */
+function createTray(): void {
+  if (tray) return;
+  tray = new Tray(createTrayIcon());
+  tray.setToolTip('Dota 2 Recorder');
+  const menu = Menu.buildFromTemplate([
+    { label: 'Show Dota 2 Recorder', click: showWindow },
+    { type: 'separator' },
+    { label: 'Quit Dota 2 Recorder', click: quitApp },
+  ]);
+  tray.setContextMenu(menu);
+  // Left-click (and double-click) the tray icon to bring the window back.
+  tray.on('click', showWindow);
+  tray.on('double-click', showWindow);
+}
+
+/**
+ * The tray/app icon: a brand-red diamond drawn straight into a raw RGBA bitmap, so
+ * there's no .ico/.png asset to ship or resolve (works identically in dev and packaged).
+ * Diamond = points where the Manhattan distance to the center is within the radius.
+ */
+function createTrayIcon(): Electron.NativeImage {
+  const size = 16;
+  // --accent #e23c2e
+  const r = 0xe2;
+  const g = 0x3c;
+  const b = 0x2e;
+  const center = (size - 1) / 2;
+  const radius = size / 2 - 0.5;
+  const buf = Buffer.alloc(size * size * 4);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const inside = Math.abs(x - center) + Math.abs(y - center) <= radius;
+      const i = (y * size + x) * 4;
+      // createFromBitmap takes raw pixels in BGRA order. Binary alpha (0/255) so
+      // premultiplication is moot.
+      buf[i] = inside ? b : 0;
+      buf[i + 1] = inside ? g : 0;
+      buf[i + 2] = inside ? r : 0;
+      buf[i + 3] = inside ? 0xff : 0;
+    }
+  }
+  return nativeImage.createFromBitmap(buf, { width: size, height: size });
+}
+
+/** Bring the window back from the tray (re-creating it if it was destroyed). */
+function showWindow(): void {
+  if (!mainWindow) {
+    createWindow();
+    return;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+/** Begin a real quit: flag it so the close handler doesn't intercept, then tear down. */
+function quitApp(): void {
+  isQuitting = true;
+  app.quit();
+}
+
+/** One-time Windows tray balloon so the first window-close doesn't look like a crash. */
+function showTrayHint(): void {
+  if (trayHintShown || !tray) return;
+  trayHintShown = true;
+  try {
+    tray.displayBalloon({
+      icon: createTrayIcon(),
+      title: 'Still recording',
+      content:
+        'Dota 2 Recorder is running in the tray and will keep recording your matches. ' +
+        'Right-click the tray icon to quit.',
+    });
+  } catch {
+    /* balloons are best-effort cosmetic; never let one break window close. */
+  }
 }
 
 /**
@@ -181,7 +298,19 @@ function createWindow(): void {
     },
   });
 
-  mainWindow.once('ready-to-show', () => mainWindow?.show());
+  // Stay hidden when auto-started at login (the app sits in the tray); otherwise show.
+  mainWindow.once('ready-to-show', () => {
+    if (!startHidden) mainWindow?.show();
+  });
+  // Closing the window hides it to the tray (keeps recording) unless a real quit is
+  // underway. The first hide shows a one-time tray hint so the app doesn't seem to vanish.
+  mainWindow.on('close', (event) => {
+    if (!isQuitting) {
+      event.preventDefault();
+      mainWindow?.hide();
+      showTrayHint();
+    }
+  });
   mainWindow.on('closed', () => {
     mainWindow = null;
   });

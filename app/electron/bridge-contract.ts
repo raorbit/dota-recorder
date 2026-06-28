@@ -13,4 +13,9 @@ export interface DotaRecBridge {
   // Opens the native folder picker (main process) and resolves the chosen path,
   // or null if the user cancelled. Used by the recording output-folder Browse button.
   readonly selectFolder: () => Promise<string | null>;
+  // App-level (OS) prefs the main process owns. Launch-at-login starts the app hidden
+  // in the tray when you sign in to Windows. Both resolve the effective value the main
+  // process applied (so the UI stays in sync with the OS).
+  readonly getLaunchAtLogin: () => Promise<boolean>;
+  readonly setLaunchAtLogin: (value: boolean) => Promise<boolean>;
 }

@@ -32,6 +32,9 @@ const bridge: DotaRecBridge = {
   wsUrl: WS_URL,
   bridgeToken,
   selectFolder: () => ipcRenderer.invoke('dialog:selectFolder') as Promise<string | null>,
+  getLaunchAtLogin: () => ipcRenderer.invoke('prefs:getLaunchAtLogin') as Promise<boolean>,
+  setLaunchAtLogin: (value: boolean) =>
+    ipcRenderer.invoke('prefs:setLaunchAtLogin', value) as Promise<boolean>,
 };
 
 contextBridge.exposeInMainWorld('dotarec', bridge);
