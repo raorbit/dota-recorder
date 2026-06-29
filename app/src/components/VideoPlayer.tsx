@@ -151,6 +151,9 @@ export function VideoPlayer({
   const lastPlayedTokenRef = useRef<number | null>(null);
 
   const deleteMatch = useLibraryStore((s) => s.deleteMatch);
+  // Refresh the library list/counts after a clip delete so the "Clips" bucket + badge stay in sync
+  // (the player's clip strip is local state; no WS event fires on delete).
+  const reloadLibrary = useLibraryStore((s) => s.load);
 
   const matchId = match?.id ?? null;
 
@@ -447,6 +450,10 @@ export function VideoPlayer({
   // calling play() synchronously would race the old src).
   function playClip(clip: Clip): void {
     if (clip.status !== 'ready') return;
+    // Leaving clip-arming mode if it was active: while a clip plays the media timebase is
+    // clip-relative, so the in/out handles (which map to parent-VOD offsets) would be wrong.
+    setClipRange(null);
+    dragHandleRef.current = null;
     setActiveClipId(clip.id);
   }
 
@@ -462,6 +469,9 @@ export function VideoPlayer({
       await deleteClip(clip.id);
       if (activeClipId === clip.id) setActiveClipId(null);
       setClips((prev) => prev.filter((c) => c.id !== clip.id));
+      // The strip above is player-local; refresh the store so the library "Clips" bucket list and the
+      // sidebar badge drop the deleted clip too (no clip.* socket event fires on delete).
+      void reloadLibrary();
     } catch {
       /* leave the row; the next clip.* frame / re-select reconciles */
     }
@@ -483,6 +493,10 @@ export function VideoPlayer({
   // Clip controls (scissors + range handles) only make sense over a real, playable
   // VOD — disabled on a seeded / pruned no-file row.
   const hasVideo = videoUrl !== null;
+  // Clipping is only valid against the FULL VOD: while a clip is playing (activeClipId set) the media
+  // element's currentTime/duration are clip-relative, but createClip sends parent-VOD offsets — so
+  // arming the scissors then would cut the wrong range. Disable it until "Full VOD" is selected.
+  const canClip = hasVideo && activeClipId === null;
   // The src the media element loads: a playing clip's stream when one is selected,
   // else the full match VOD (or nothing on a no-file row).
   const playSrc = activeClipId !== null ? clipStreamUrl(activeClipId) : (videoUrl ?? undefined);
@@ -673,13 +687,19 @@ export function VideoPlayer({
             <span
               className="vp-icon vp-clip"
               role="button"
-              tabIndex={hasVideo ? 0 : -1}
+              tabIndex={canClip ? 0 : -1}
               aria-label="Clip"
-              aria-disabled={!hasVideo}
-              title={hasVideo ? 'Clip a moment' : 'No video to clip'}
-              data-disabled={!hasVideo}
-              onClick={() => hasVideo && enterClipMode()}
-              onKeyDown={keyActivate(() => hasVideo && enterClipMode())}
+              aria-disabled={!canClip}
+              title={
+                !hasVideo
+                  ? 'No video to clip'
+                  : activeClipId !== null
+                    ? 'Return to the full VOD to clip'
+                    : 'Clip a moment'
+              }
+              data-disabled={!canClip}
+              onClick={() => canClip && enterClipMode()}
+              onKeyDown={keyActivate(() => canClip && enterClipMode())}
             >
               ✂
             </span>

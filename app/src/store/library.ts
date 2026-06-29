@@ -162,7 +162,9 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
     invalidatePendingLoad();
     set((s) => ({
       matches: s.matches.filter((m) => m.id !== id),
-      // Deleting a match cascades its clips, so drop a clip-auto-play that pointed here.
+      // Deleting a match cascades its clips server-side; drop them from the Clips bucket list too, and
+      // clear a clip-auto-play that pointed here.
+      clips: s.clips.filter((c) => c.parentMatchId !== id),
       selectedMatchId: s.selectedMatchId === id ? null : s.selectedMatchId,
       selectedClipId: s.selectedMatchId === id ? null : s.selectedClipId,
     }));
