@@ -168,7 +168,17 @@ export class ObsSupervisor {
     // parent crash; taskkill /T /F is the explicit fallback on graceful quit.
     if (process.platform === 'win32') {
       try {
-        spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true });
+        const killer = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true });
+        // spawn reports a LAUNCH failure (taskkill missing / EPERM) asynchronously via 'error'; with no
+        // listener Node re-emits it as an uncaught exception and kills the Electron main process, so the
+        // catch's SIGKILL fallback never runs. Handle it here to fall back instead of crashing.
+        killer.on('error', () => {
+          try {
+            child.kill('SIGKILL');
+          } catch {
+            /* nothing left to escalate to. */
+          }
+        });
       } catch {
         child.kill('SIGKILL');
       }
