@@ -2,6 +2,8 @@ package dev.dotarec.retention;
 
 import dev.dotarec.config.SettingsStore;
 import dev.dotarec.config.SettingsStore.StorageLocation;
+import dev.dotarec.data.ClipRepository;
+import dev.dotarec.data.ClipRow;
 import dev.dotarec.data.MatchRepository;
 import dev.dotarec.data.MatchSummary;
 import java.io.IOException;
@@ -66,6 +68,7 @@ public class RecordingArchiver {
     }
 
     private final MatchRepository matches;
+    private final ClipRepository clips;
     private final SettingsStore settings;
     private final RetentionSweeper sweeper;
     private final FreeSpaceProbe freeSpace;
@@ -74,10 +77,11 @@ public class RecordingArchiver {
     @Autowired
     public RecordingArchiver(
             MatchRepository matches,
+            ClipRepository clips,
             SettingsStore settings,
             RetentionSweeper sweeper,
             StorageMaintenanceLock maintenanceLock) {
-        this(matches, settings, sweeper, dir -> Files.getFileStore(dir).getUsableSpace(),
+        this(matches, clips, settings, sweeper, dir -> Files.getFileStore(dir).getUsableSpace(),
                 maintenanceLock);
     }
 
@@ -88,20 +92,23 @@ public class RecordingArchiver {
      */
     RecordingArchiver(
             MatchRepository matches,
+            ClipRepository clips,
             SettingsStore settings,
             RetentionSweeper sweeper,
             FreeSpaceProbe freeSpace) {
-        this(matches, settings, sweeper, freeSpace, new StorageMaintenanceLock());
+        this(matches, clips, settings, sweeper, freeSpace, new StorageMaintenanceLock());
     }
 
     /** Test seam: inject both a deterministic free-space probe and the shared maintenance lock. */
     RecordingArchiver(
             MatchRepository matches,
+            ClipRepository clips,
             SettingsStore settings,
             RetentionSweeper sweeper,
             FreeSpaceProbe freeSpace,
             StorageMaintenanceLock maintenanceLock) {
         this.matches = matches;
+        this.clips = clips;
         this.settings = settings;
         this.sweeper = sweeper;
         this.freeSpace = freeSpace;
@@ -144,65 +151,82 @@ public class RecordingArchiver {
             Location active = locations.get(0);
             List<Location> archives = locations.subList(1, locations.size());
 
-            // Account current per-location usage from the DB (rows still holding a file).
+            // Account current per-location usage from the DB. Match VODs AND clips are first-class
+            // movable stored files — gather both into one uniform list.
+            List<Movable> all = new ArrayList<>();
+            for (MatchSummary m : matches.findAll()) {
+                if (m.videoPath() != null && !m.videoPath().isBlank()) {
+                    all.add(Movable.ofMatch(m, sizeOf(m.videoPath(), m.fileSizeBytes())));
+                }
+            }
+            for (ClipRow c : clips.findAll()) {
+                if (c.videoPath() != null && !c.videoPath().isBlank()) {
+                    all.add(Movable.ofClip(c, sizeOf(c.videoPath(), c.fileSizeBytes())));
+                }
+            }
+
             Map<Location, Long> used = new HashMap<>();
             for (Location loc : locations) {
                 used.put(loc, 0L);
             }
-            List<MatchSummary> activeMovable = new ArrayList<>();
-            for (MatchSummary m : matches.findAll()) {
-                if (m.videoPath() == null || m.videoPath().isBlank()) {
-                    continue;
-                }
-                Location loc = locationOf(m.videoPath(), locations);
+            List<Movable> activeMovable = new ArrayList<>();
+            for (Movable mv : all) {
+                Location loc = locationOf(mv.videoPath(), locations);
                 if (loc == null) {
                     continue; // file lives outside any configured drive (e.g. videoDir was changed)
                 }
-                used.merge(loc, sizeOf(m), Long::sum);
-                if (loc == active && (protectedId == null || m.id() != protectedId)) {
-                    activeMovable.add(m);
+                used.merge(loc, mv.size(), Long::sum);
+                // The actively-recording match (protectedId) is never moved; a clip is never protected.
+                boolean isProtected = !mv.isClip() && protectedId != null && mv.ownerId() == protectedId;
+                if (loc == active && !isProtected) {
+                    activeMovable.add(mv);
                 }
             }
             // Move order: starred keepers FIRST (so they reach the safe archive drive soonest), then
             // oldest-first within each group. Eviction (deletion) is still age-only and skips starred —
             // this only changes which files get RELOCATED first when the active drive is over its cap.
             activeMovable.sort(
-                    Comparator.comparingInt((MatchSummary m) -> m.starred() ? 0 : 1)
-                            .thenComparingLong(RecordingArchiver::ageKey));
-            Deque<MatchSummary> queue = new ArrayDeque<>(activeMovable);
+                    Comparator.comparingInt((Movable mv) -> mv.starred() ? 0 : 1)
+                            .thenComparingLong(Movable::ageKey));
+            Deque<Movable> queue = new ArrayDeque<>(activeMovable);
 
-            List<Long> moved = new ArrayList<>();
+            List<Long> movedMatches = new ArrayList<>();
+            int movedClips = 0;
             int unplaced = 0;
-            // Move active VODs out (starred first, then oldest) until the active drive is under its cap.
+            // Move active files out (starred first, then oldest) until the active drive is under its cap.
             while (used.get(active) > active.capBytes() && !queue.isEmpty()) {
-                MatchSummary vod = queue.pollFirst();
-                long size = sizeOf(vod);
-                Location target = firstWithHeadroom(archives, used, size);
+                Movable mv = queue.pollFirst();
+                Location target = firstWithHeadroom(archives, used, mv.size());
                 if (target == null) {
-                    // This VOD doesn't fit any archive drive right now (by cap or physical space). Do
-                    // NOT break the whole pass — a smaller VOD later in the queue may still fit, so
+                    // This file doesn't fit any archive drive right now (by cap or physical space). Do
+                    // NOT break the whole pass — a smaller file later in the queue may still fit, so
                     // skip this one and keep draining. The deque shrinks each iteration, so the loop
                     // still terminates.
                     unplaced++;
                     continue;
                 }
-                if (moveToLocation(vod, target.dir())) {
-                    used.merge(active, -size, Long::sum);
-                    used.merge(target, size, Long::sum);
-                    moved.add(vod.id());
+                if (moveToLocation(mv, target.dir())) {
+                    used.merge(active, -mv.size(), Long::sum);
+                    used.merge(target, mv.size(), Long::sum);
+                    if (mv.isClip()) {
+                        movedClips++;
+                    } else {
+                        movedMatches.add(mv.ownerId());
+                    }
                 }
                 // A failed move is left for the next pass; the loop still terminates (deque drains).
             }
-            if (!moved.isEmpty()) {
-                log.info("Archiver relocated {} recording(s) off the active drive: {}", moved.size(), moved);
+            if (!movedMatches.isEmpty() || movedClips > 0) {
+                log.info("Archiver relocated {} recording(s) and {} clip(s) off the active drive: {}",
+                        movedMatches.size(), movedClips, movedMatches);
             }
             if (unplaced > 0) {
                 log.warn(
-                        "{} recording(s) could not be placed on any archive drive this pass (all full by"
+                        "{} file(s) could not be placed on any archive drive this pass (all full by"
                             + " cap or physical space); leaving them on the active drive",
                         unplaced);
             }
-            return new ArchiveResult(moved);
+            return new ArchiveResult(movedMatches);
         } finally {
             maintenanceLock.unlock();
         }
@@ -242,15 +266,15 @@ public class RecordingArchiver {
      * unreferenced. The thumbnail follows the same order: its source is deleted only after the single
      * {@code updateVideoPath} (which carries the new thumb path) commits.
      */
-    private boolean moveToLocation(MatchSummary vod, Path targetDir) {
-        Path src = Path.of(vod.videoPath());
+    private boolean moveToLocation(Movable mv, Path targetDir) {
+        Path src = Path.of(mv.videoPath());
         try {
             Files.createDirectories(targetDir);
-            // Collision-proof destination: prefix the id so a move can never overwrite a DIFFERENT
-            // match's archived VOD (OBS's per-second filenames could otherwise collide on a clock
-            // anomaly). With the id prefix, REPLACE_EXISTING on the copy can only ever clobber a
-            // leftover from THIS SAME match's prior interrupted move — which makes retries idempotent.
-            Path dstVideo = targetDir.resolve(vod.id() + "-" + src.getFileName());
+            // Collision-proof destination: prefix the id (and "clip-" for clips, a separate id space)
+            // so a move can never overwrite a DIFFERENT file's archived copy. With the prefix,
+            // REPLACE_EXISTING on the copy can only ever clobber a leftover from THIS SAME file's prior
+            // interrupted move — which makes retries idempotent.
+            Path dstVideo = targetDir.resolve(mv.fileNamePrefix() + src.getFileName());
             // A same-filesystem rename is atomic and self-finalizing; repoint after it succeeds.
             // Otherwise copy+verify, leaving the source in place so the repoint below points at a file
             // that already exists before any delete.
@@ -260,26 +284,30 @@ public class RecordingArchiver {
             // destination (source kept) and remember whether to delete the source after the repoint.
             // Best-effort: a thumb-copy failure keeps the old thumb path (still on the source drive)
             // rather than losing the row's thumbnail — the video, the important bit, is moved.
-            String newThumb = vod.thumbPath();
+            String newThumb = mv.thumbPath();
             Path thumbSrc = null;
             boolean thumbRenamedInPlace = false;
-            if (vod.thumbPath() != null && !vod.thumbPath().isBlank()) {
+            if (mv.thumbPath() != null && !mv.thumbPath().isBlank()) {
                 try {
-                    thumbSrc = Path.of(vod.thumbPath());
+                    thumbSrc = Path.of(mv.thumbPath());
                     Path thumbDir = targetDir.resolve("thumbs");
                     Files.createDirectories(thumbDir);
-                    Path dstThumb = thumbDir.resolve(vod.id() + "-" + thumbSrc.getFileName());
+                    Path dstThumb = thumbDir.resolve(mv.fileNamePrefix() + thumbSrc.getFileName());
                     thumbRenamedInPlace = tryAtomicMove(thumbSrc, dstThumb);
                     newThumb = dstThumb.toString();
                 } catch (IOException | RuntimeException e) {
-                    log.warn("Moved video for match {} but thumbnail copy failed: {}",
-                            vod.id(), e.toString());
+                    log.warn("Moved video for {} {} but thumbnail copy failed: {}",
+                            mv.kindLabel(), mv.ownerId(), e.toString());
                     thumbSrc = null; // copy failed: do NOT delete the source thumb below
                 }
             }
 
             // Repoint the row to the (already fully-written) destination(s) BEFORE deleting any source.
-            matches.updateVideoPath(vod.id(), dstVideo.toString(), newThumb);
+            if (mv.isClip()) {
+                clips.updateVideoPath(mv.ownerId(), dstVideo.toString(), newThumb);
+            } else {
+                matches.updateVideoPath(mv.ownerId(), dstVideo.toString(), newThumb);
+            }
 
             // The row now references the destination; the source copies are safe to remove. (An atomic
             // rename already consumed the source, so only delete on the cross-store copy path.)
@@ -289,11 +317,11 @@ public class RecordingArchiver {
             if (thumbSrc != null && !thumbRenamedInPlace) {
                 deleteQuietly(thumbSrc);
             }
-            log.debug("Moved match {} -> {}", vod.id(), dstVideo);
+            log.debug("Moved {} {} -> {}", mv.kindLabel(), mv.ownerId(), dstVideo);
             return true;
         } catch (IOException | RuntimeException e) {
-            log.warn("Could not archive match {} ({} -> {}): {}",
-                    vod.id(), src, targetDir, e.toString());
+            log.warn("Could not archive {} {} ({} -> {}): {}",
+                    mv.kindLabel(), mv.ownerId(), src, targetDir, e.toString());
             return false;
         }
     }
@@ -377,24 +405,47 @@ public class RecordingArchiver {
         return null;
     }
 
-    /** Age sort key: the recording's play time, falling back to its creation time. */
-    private static long ageKey(MatchSummary m) {
-        return m.playedAt() != null ? m.playedAt() : m.createdAt();
-    }
-
-    private long sizeOf(MatchSummary m) {
-        if (m.videoPath() != null && !m.videoPath().isBlank()) {
+    /** Real on-disk size of a stored file, falling back to the DB-recorded size on a stat failure. */
+    private long sizeOf(String videoPath, Long fallbackBytes) {
+        if (videoPath != null && !videoPath.isBlank()) {
             try {
-                return Files.size(Path.of(m.videoPath()));
+                return Files.size(Path.of(videoPath));
             } catch (IOException | RuntimeException e) {
-                log.debug("Could not stat {} during archive: {}", m.videoPath(), e.toString());
+                log.debug("Could not stat {} during archive: {}", videoPath, e.toString());
             }
         }
-        return m.fileSizeBytes() != null ? m.fileSizeBytes() : 0L;
+        return fallbackBytes != null ? fallbackBytes : 0L;
     }
 
     /** One drive in the ordered fill list: its directory and its cap in bytes. */
     private record Location(Path dir, long capBytes) {}
+
+    /**
+     * A relocatable stored file — a match VOD or a clip — flattened to the fields the archiver needs:
+     * row id, paths, size, starred flag (move priority), and an age key (oldest moved first). Lets the
+     * accounting/move logic treat VODs and clips uniformly; {@code isClip} routes the DB repoint to the
+     * right repository.
+     */
+    private record Movable(boolean isClip, long ownerId, String videoPath, String thumbPath,
+                           long size, boolean starred, long ageKey) {
+        static Movable ofMatch(MatchSummary m, long size) {
+            long age = m.playedAt() != null ? m.playedAt() : m.createdAt();
+            return new Movable(false, m.id(), m.videoPath(), m.thumbPath(), size, m.starred(), age);
+        }
+
+        static Movable ofClip(ClipRow c, long size) {
+            return new Movable(true, c.id(), c.videoPath(), c.thumbPath(), size, c.starred(), c.createdAt());
+        }
+
+        /** Collision-proof archive filename prefix; clips get a distinct namespace from match ids. */
+        String fileNamePrefix() {
+            return (isClip ? "clip-" : "") + ownerId + "-";
+        }
+
+        String kindLabel() {
+            return isClip ? "clip" : "match";
+        }
+    }
 
     /** Outcome of a pass: the match ids whose files were relocated. */
     public record ArchiveResult(List<Long> movedIds) {}

@@ -3,6 +3,7 @@ package dev.dotarec.retention;
 import dev.dotarec.bridge.EventPublisher;
 import dev.dotarec.config.AppPaths;
 import dev.dotarec.config.SettingsStore;
+import dev.dotarec.data.ClipRepository;
 import dev.dotarec.data.MarkerRepository;
 import dev.dotarec.data.MatchRepository;
 import dev.dotarec.data.MatchRepository.NewMatch;
@@ -39,6 +40,7 @@ class RetentionSweeperTest {
 
     private MatchRepository matches;
     private MarkerRepository markers;
+    private ClipRepository clips;
     private SettingsStore settings;
     private EventPublisher events;
     private RetentionSweeper sweeper;
@@ -49,6 +51,7 @@ class RetentionSweeperTest {
         DataSource ds = TestDb.migrated(dir);
         matches = new MatchRepository(ds);
         markers = new MarkerRepository(ds);
+        clips = new ClipRepository(ds);
 
         videoDir = Files.createDirectories(dir.resolve("video"));
         // Real SettingsStore over a temp data dir; default cap is 50GB, we shrink it per-test.
@@ -57,7 +60,7 @@ class RetentionSweeperTest {
         settings.get().videoDir = videoDir.toString();
 
         events = mock(EventPublisher.class);
-        sweeper = new RetentionSweeper(matches, settings, events);
+        sweeper = new RetentionSweeper(matches, clips, settings, events);
     }
 
     @Test
@@ -89,6 +92,74 @@ class RetentionSweeperTest {
 
         // Newer row untouched.
         assertThat(matches.findById(newer).orElseThrow().videoPath()).isNotNull();
+    }
+
+    @Test
+    void clipsAreEvictedAfterVodsAndStarredClipsAreKept() throws Exception {
+        // Cap 1 GiB. Seed a non-starred match VOD plus two of its clips (one starred, one not), each
+        // 0.6 GiB -> 1.8 GiB total. The VOD is pruned first; still over cap, the NON-STARRED clip is
+        // evicted next ("clips last"); the STARRED clip is always kept.
+        settings.get().retentionCapGb = 1;
+        long gib = 1024L * 1024 * 1024;
+        long unit = 6 * gib / 10;
+
+        long match = seedWithFiles("m.mp4", "m.jpg", unit, 1_000L, false);
+        long starredClip = seedClip(match, "c-star.mp4", "c-star.jpg", unit, 200L, true);
+        long plainClip = seedClip(match, "c-plain.mp4", "c-plain.jpg", unit, 100L, false);
+
+        sweeper.sweep(null);
+
+        // The VOD is pruned first (row kept, paths nulled).
+        assertThat(matches.findById(match).orElseThrow().videoPath()).isNull();
+        assertThat(Files.exists(videoDir.resolve("m.mp4"))).isFalse();
+        // Then the non-starred clip is evicted: its file AND row are gone.
+        assertThat(Files.exists(videoDir.resolve("c-plain.mp4"))).isFalse();
+        assertThat(clips.findById(plainClip)).isEmpty();
+        // The starred clip survives even though it is older and the budget is still tight.
+        assertThat(Files.exists(videoDir.resolve("c-star.mp4"))).isTrue();
+        assertThat(clips.findById(starredClip)).isPresent();
+    }
+
+    @Test
+    void clipsAreEvictedOldestFirstAndNewestPlusStarredSurvive() throws Exception {
+        // Cap 1 GiB. Seed four NON-starred clips at increasing createdAt plus one starred clip, each
+        // 0.4 GiB -> 2.0 GiB total, all over a single parent match VOD with no on-disk file (so the
+        // budget is driven purely by the clips). The clip phase evicts oldest-first (created_at ASC):
+        // it removes the three oldest non-starred clips (2.0 -> 1.6 -> 1.2 -> 0.8 GiB, now under cap),
+        // stops there so the NEWEST non-starred clip survives, and never touches the starred clip.
+        settings.get().retentionCapGb = 1;
+        long gib = 1024L * 1024 * 1024;
+        long unit = 4 * gib / 10;
+
+        // Parent row only, no VOD file: keeps the budget entirely in the clip phase.
+        long match = matches.insert(new NewMatch(
+                null, "match", "enriched", "puck",
+                1, 2, 3, 400, 500, 10000, 120,
+                "win", 7, 22, null, null, 1800,
+                1_000L, null, null, null, false, 1_000L, null));
+
+        long oldest = seedClip(match, "c-oldest.mp4", "c-oldest.jpg", unit, 100L, false);
+        long middle = seedClip(match, "c-middle.mp4", "c-middle.jpg", unit, 200L, false);
+        long older = seedClip(match, "c-older.mp4", "c-older.jpg", unit, 300L, false);
+        long newest = seedClip(match, "c-newest.mp4", "c-newest.jpg", unit, 400L, false);
+        // Starred and the OLDEST of all -> must still survive untouched.
+        long starred = seedClip(match, "c-starred.mp4", "c-starred.jpg", unit, 50L, true);
+
+        sweeper.sweep(null);
+
+        // The three oldest non-starred clips are evicted: files AND rows gone.
+        assertThat(Files.exists(videoDir.resolve("c-oldest.mp4"))).isFalse();
+        assertThat(Files.exists(videoDir.resolve("c-middle.mp4"))).isFalse();
+        assertThat(Files.exists(videoDir.resolve("c-older.mp4"))).isFalse();
+        assertThat(clips.findById(oldest)).isEmpty();
+        assertThat(clips.findById(middle)).isEmpty();
+        assertThat(clips.findById(older)).isEmpty();
+        // The newest non-starred clip survives: the budget went under cap before reaching it.
+        assertThat(Files.exists(videoDir.resolve("c-newest.mp4"))).isTrue();
+        assertThat(clips.findById(newest)).isPresent();
+        // The starred clip is kept even though it is the oldest of all.
+        assertThat(Files.exists(videoDir.resolve("c-starred.mp4"))).isTrue();
+        assertThat(clips.findById(starred)).isPresent();
     }
 
     @Test
@@ -232,7 +303,7 @@ class RetentionSweeperTest {
                     return t;
                 };
         RetentionSweeper clamped =
-                new RetentionSweeper(matches, settings, events, new StorageMaintenanceLock(), probe);
+                new RetentionSweeper(matches, clips, settings, events, new StorageMaintenanceLock(), probe);
 
         // 2 GiB stored on the 1-GiB-physical drive: 1.5 GiB old + 0.5 GiB new. Clamped budget = 1 GiB,
         // so the oldest is evicted and 0.5 GiB remains (under budget).
@@ -275,7 +346,7 @@ class RetentionSweeperTest {
                     return t;
                 };
         RetentionSweeper sweeper =
-                new RetentionSweeper(matches, settings, events, new StorageMaintenanceLock(), probe);
+                new RetentionSweeper(matches, clips, settings, events, new StorageMaintenanceLock(), probe);
 
         long oldest = seedWithFiles("old.mp4", "old.jpg", 3 * gib / 2, 1_000L, false);
         long newer = seedWithFiles("new.mp4", "new.jpg", gib / 2, 2_000L, false);
@@ -356,6 +427,21 @@ class RetentionSweeperTest {
                 "win", 7, 22, null, null, 1800,
                 playedAt, videoPath.toString(), thumbPath.toString(), dbSizeBytes, starred, playedAt,
                 null));
+    }
+
+    /** Seeds a ready clip of {@code parentMatchId} with on-disk video + thumb files; returns its id. */
+    private long seedClip(long parentMatchId, String video, String thumb, long sizeBytes, long createdAt,
+                          boolean starred) throws Exception {
+        Path videoPath = videoDir.resolve(video);
+        Path thumbPath = videoDir.resolve(thumb);
+        createSparseFile(videoPath, sizeBytes);
+        Files.createFile(thumbPath);
+        long id = clips.insert(parentMatchId, "manual", null, 0.0, 10.0, null,
+                videoPath.toString(), thumbPath.toString(), sizeBytes, "ready", null, createdAt);
+        if (starred) {
+            clips.setStarred(id, true);
+        }
+        return id;
     }
 
     private static void createSparseFile(Path path, long sizeBytes) throws Exception {

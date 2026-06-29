@@ -33,9 +33,10 @@ const SECONDARY_BUCKETS: readonly BucketDef[] = [
   { key: 'abilityDraft', label: 'Ability Draft', badge: 'plain' },
 ];
 
-// Manual recordings and saved Clips have no creation UI in v0.1, so these buckets
-// would always read 0 and advertise features that don't exist. Shown only if the
-// backend ever reports a count (future-proof, mirroring the Unsorted bucket).
+// Optional buckets shown only once the backend reports a non-zero count (so an empty
+// library doesn't advertise empty sections, mirroring the Unsorted bucket). Manual has
+// no creation UI yet; Clips is populated from the clips table (count = ClipRepository
+// total) and lists every saved clip when opened.
 const OPTIONAL_BUCKETS: readonly BucketDef[] = [
   { key: 'manual', label: 'Manual', badge: 'plain' },
   { key: 'clips', label: 'Clips', badge: 'gold' },

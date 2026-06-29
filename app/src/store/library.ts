@@ -13,11 +13,14 @@ import { create } from 'zustand';
 import {
   fetchMatches,
   fetchBucketCounts,
+  fetchAllClips,
   fetchStatus,
   setStarred,
+  setClipStarred,
   deleteMatch as apiDeleteMatch,
   StatusSocket,
   type MatchSummary,
+  type Clip,
   type BucketCounts,
   type Status,
   type StatusSnapshot,
@@ -42,6 +45,9 @@ const EMPTY_COUNTS: BucketCounts = {
 export interface LibraryState {
   // --- data ---
   readonly matches: readonly MatchSummary[];
+  // Every saved clip across all matches (GET /clips), newest first. Backs the "Clips"
+  // bucket, which lists clips from their own table rather than the matches list.
+  readonly clips: readonly Clip[];
   readonly counts: BucketCounts;
   readonly status: Status | null;
   readonly loadState: LoadState;
@@ -52,6 +58,14 @@ export interface LibraryState {
   readonly search: string;
   readonly dateFilter: string | null;
   readonly selectedMatchId: number | null;
+  // When a clip is selected from the Clips bucket, this holds its id so the player
+  // auto-plays that clip (selectedMatchId points at the clip's parent match, so the
+  // player loads the parent VOD + clip strip and starts on this clip). Null for a
+  // plain match selection (full VOD).
+  readonly selectedClipId: number | null;
+  // Monotonic token bumped on every selectClip (even re-selecting the same clip id) so the player
+  // re-plays a clip the user clicks again after switching back to the full VOD.
+  readonly clipPlayToken: number;
 
   // --- actions ---
   readonly setBucket: (bucket: Bucket) => void;
@@ -59,8 +73,13 @@ export interface LibraryState {
   readonly setSearch: (search: string) => void;
   readonly setDateFilter: (date: string | null) => void;
   readonly selectMatch: (id: number | null) => void;
+  // Select a clip from the Clips bucket: opens its parent match in the player and
+  // marks the clip for auto-play.
+  readonly selectClip: (clip: Clip) => void;
   readonly setStatus: (status: Status | null) => void;
   readonly toggleStar: (id: number, starred: boolean) => Promise<void>;
+  // Star/unstar a clip (exempts it from the retention sweep), mirroring toggleStar for matches.
+  readonly toggleClipStar: (id: number, starred: boolean) => Promise<void>;
   readonly deleteMatch: (id: number) => Promise<void>;
   readonly load: () => Promise<void>;
 }
@@ -85,6 +104,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
 
   return {
   matches: [],
+  clips: [],
   counts: EMPTY_COUNTS,
   status: null,
   loadState: 'idle',
@@ -94,12 +114,23 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
   search: '',
   dateFilter: null,
   selectedMatchId: null,
+  selectedClipId: null,
+  clipPlayToken: 0,
 
   setBucket: (bucket) => set({ bucket }),
   setResultFilter: (resultFilter) => set({ resultFilter }),
   setSearch: (search) => set({ search }),
   setDateFilter: (dateFilter) => set({ dateFilter }),
-  selectMatch: (selectedMatchId) => set({ selectedMatchId }),
+  // A plain match selection always plays the full VOD, so clear any clip auto-play.
+  selectMatch: (selectedMatchId) => set({ selectedMatchId, selectedClipId: null }),
+  // Open the clip's parent match in the player and flag the clip for auto-play. Bump clipPlayToken
+  // every call (even for the same clip id) so re-selecting a clip after "Full VOD" replays it.
+  selectClip: (clip) =>
+    set((s) => ({
+      selectedMatchId: clip.parentMatchId,
+      selectedClipId: clip.id,
+      clipPlayToken: s.clipPlayToken + 1,
+    })),
   setStatus: (status) => set({ status }),
 
   // Star/unstar a match: flip it locally for instant feedback, then persist via
@@ -122,6 +153,18 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
       set((s) => ({ matches: s.matches.map((m) => (m.id === id ? { ...m, starred: !starred } : m)) }));
     }
   },
+  // Optimistic clip star toggle, mirroring toggleStar: flip locally for instant feedback, persist via
+  // PATCH /clips/{id}, revert on failure. invalidatePendingLoad keeps an in-flight load() from
+  // clobbering the flip with pre-toggle data.
+  toggleClipStar: async (id, starred) => {
+    set((s) => ({ clips: s.clips.map((c) => (c.id === id ? { ...c, starred } : c)) }));
+    try {
+      await setClipStarred(id, starred);
+      invalidatePendingLoad();
+    } catch {
+      set((s) => ({ clips: s.clips.map((c) => (c.id === id ? { ...c, starred: !starred } : c)) }));
+    }
+  },
 
   // Permanently delete a match (row + markers/pauses + .mp4 + thumbnail). Pessimistic:
   // delete server-side FIRST, then drop it from the list and clear the selection if it
@@ -134,7 +177,11 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
     invalidatePendingLoad();
     set((s) => ({
       matches: s.matches.filter((m) => m.id !== id),
+      // Deleting a match cascades its clips server-side; drop them from the Clips bucket list too, and
+      // clear a clip-auto-play that pointed here.
+      clips: s.clips.filter((c) => c.parentMatchId !== id),
       selectedMatchId: s.selectedMatchId === id ? null : s.selectedMatchId,
+      selectedClipId: s.selectedMatchId === id ? null : s.selectedClipId,
     }));
     try {
       set({ counts: await fetchBucketCounts() });
@@ -146,11 +193,12 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
   load: async () => {
     const token = ++loadToken;
     set({ loadState: 'loading' });
-    // Counts and the list are independent; settle both so one failing endpoint
-    // (e.g. counts not yet implemented) does not blank the whole screen.
-    const [matchesRes, countsRes] = await Promise.allSettled([
+    // Matches, counts, and clips are independent; settle all three so one failing
+    // endpoint (e.g. counts not yet implemented) does not blank the whole screen.
+    const [matchesRes, countsRes, clipsRes] = await Promise.allSettled([
       fetchMatches(),
       fetchBucketCounts(),
+      fetchAllClips(),
     ]);
 
     // A newer load() superseded this one while it was in flight (a burst of match.*
@@ -159,21 +207,33 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
 
     const matches = matchesRes.status === 'fulfilled' ? matchesRes.value : [];
     const counts = countsRes.status === 'fulfilled' ? countsRes.value : EMPTY_COUNTS;
+    const clips = clipsRes.status === 'fulfilled' ? clipsRes.value : [];
 
-    // If BOTH calls failed the core is unreachable; surface an error state.
-    // If only one failed we still render with what we have.
-    const errored = matchesRes.status === 'rejected' && countsRes.status === 'rejected';
+    // If ALL calls failed the core is unreachable; surface an error state.
+    // If only some failed we still render with what we have.
+    const errored =
+      matchesRes.status === 'rejected' &&
+      countsRes.status === 'rejected' &&
+      clipsRes.status === 'rejected';
 
-    // Drop a stale selection if the selected match is no longer in the list.
-    const { selectedMatchId } = get();
-    const stillPresent =
+    // Drop a stale selection if neither the selected match nor (for a clip selection)
+    // the selected clip survives the refresh.
+    const { selectedMatchId, selectedClipId } = get();
+    const matchPresent =
       selectedMatchId !== null && matches.some((m) => m.id === selectedMatchId);
+    const clipPresent =
+      selectedClipId !== null && clips.some((c) => c.id === selectedClipId);
+    // A clip selection points selectedMatchId at the clip's parent (which is in the
+    // matches list), so a surviving match OR clip keeps the selection alive.
+    const stillPresent = matchPresent || clipPresent;
 
     set({
       matches,
+      clips,
       counts,
       loadState: errored ? 'error' : 'ready',
       selectedMatchId: stillPresent ? selectedMatchId : null,
+      selectedClipId: clipPresent ? selectedClipId : null,
     });
   },
   };
@@ -247,12 +307,23 @@ export function startLibrary(): () => void {
   };
   const off = subscribeToMatchEvents(socket, scheduleReload);
 
+  // Clip lifecycle frames mutate the library too: a new/finished clip changes the
+  // Clips bucket list + count. Subscribe to ALL matches (key 0) and reuse the same
+  // coalesced reload — load() now refetches clips + counts alongside the match list.
+  // clip.progress fires often during generation; only created/ready change membership,
+  // so skip progress to avoid a reload per percent tick.
+  const offClips = socket.onClipEvent(0, (evt) => {
+    if (evt.type === 'clip.progress') return;
+    scheduleReload();
+  });
+
   socket.connect();
 
   return () => {
     offStatus();
     offConn();
     off();
+    offClips();
     if (reloadTimer !== null) clearTimeout(reloadTimer);
     socket.close();
   };

@@ -38,6 +38,12 @@ release/
 # version + sha256. Leaves the rest of build-resources/ trackable (icons, etc.).
 build-resources/obs/
 
+# Bundled ffmpeg — fetched + extracted at build time by scripts/fetch-ffmpeg.mjs
+# (same rationale as OBS above): the ~100MB exe + its version marker regenerate from
+# the pinned sha256, so neither is tracked.
+build-resources/ffmpeg/
+build-resources/.ffmpeg-*.ok
+
 # Local SQLite db + write-ahead files / migration backups
 *.sqlite
 *.sqlite-shm

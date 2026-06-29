@@ -11,6 +11,8 @@ import static org.mockito.Mockito.when;
 import static org.assertj.core.data.Offset.offset;
 
 import dev.dotarec.bridge.EventPublisher;
+import dev.dotarec.clip.ClipService;
+import dev.dotarec.config.SettingsStore;
 import dev.dotarec.data.MarkerRepository;
 import dev.dotarec.data.MarkerRow;
 import dev.dotarec.data.MatchRepository;
@@ -112,6 +114,8 @@ class MatchFsmTest {
     private PauseRepository pauses;
     private RecordingSessionRepository journal;
     private EventPublisher events;
+    private ClipService clipService;
+    private SettingsStore settings;
     private MatchFsm fsm;
     private Path tempDir;
 
@@ -126,7 +130,13 @@ class MatchFsmTest {
         events = mock(EventPublisher.class);
         obs = new FakeObs();
         thumbs = new FakeThumbs();
-        fsm = new MatchFsm(obs, thumbs, new EventTagger(), matches, markers, pauses, journal, events, ds);
+        clipService = mock(ClipService.class);
+        // Default settings -> autoClipOnRampage=false, so the finalize auto-clip hook is a no-op and
+        // these tests stay focused on the record/tag/persist path.
+        settings = mock(SettingsStore.class);
+        when(settings.get()).thenReturn(new SettingsStore.Settings());
+        fsm = new MatchFsm(obs, thumbs, new EventTagger(), matches, markers, pauses, journal, events,
+                ds, clipService, settings);
     }
 
     @Test
@@ -430,7 +440,8 @@ class MatchFsmTest {
     @Test
     void thumbnailFailure_doesNotLoseTheRecording() {
         ThumbnailCapturer failing = id -> { throw new ObsException("no scene"); };
-        fsm = new MatchFsm(obs, failing, new EventTagger(), matches, markers, pauses, journal, events, ds);
+        fsm = new MatchFsm(obs, failing, new EventTagger(), matches, markers, pauses, journal, events,
+                ds, clipService, settings);
 
         fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
         fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_POST_GAME").noHero().build());
@@ -485,7 +496,8 @@ class MatchFsmTest {
         MatchRepository throwing = mock(MatchRepository.class);
         when(throwing.insert(any(java.sql.Connection.class), any(MatchRepository.NewMatch.class)))
                 .thenThrow(new IllegalStateException("disk full"));
-        fsm = new MatchFsm(obs, thumbs, new EventTagger(), throwing, markers, pauses, journal, events, ds);
+        fsm = new MatchFsm(obs, thumbs, new EventTagger(), throwing, markers, pauses, journal, events,
+                ds, clipService, settings);
 
         fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
         assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
@@ -506,7 +518,8 @@ class MatchFsmTest {
         MatchRepository throwing = mock(MatchRepository.class);
         when(throwing.insert(any(java.sql.Connection.class), any(MatchRepository.NewMatch.class)))
                 .thenThrow(new IllegalStateException("disk full"));
-        fsm = new MatchFsm(obs, thumbs, new EventTagger(), throwing, markers, pauses, journal, events, ds);
+        fsm = new MatchFsm(obs, thumbs, new EventTagger(), throwing, markers, pauses, journal, events,
+                ds, clipService, settings);
 
         fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
         String sessionId = fsm.currentSession().getSurrogateId();

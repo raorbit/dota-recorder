@@ -39,6 +39,26 @@ export function videoStreamUrl(id: number): string {
   return token ? `${base}?token=${encodeURIComponent(token)}` : base;
 }
 
+// Playback URL for a generated clip's .mp4 (GET /clips/{id}/video/stream). Mirrors
+// videoStreamUrl(): a <video> element can't carry the X-Dotarec-Token header, so the
+// token rides the query string (BridgeAuthFilter accepts ?token= on any gated path).
+export function clipStreamUrl(clipId: number): string {
+  const base = `${bridgeBase()}/clips/${clipId}/video/stream`;
+  const token = window.dotarec?.bridgeToken;
+  return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+}
+
+// Thumbnail image URL for a clip (GET /clips/{id}/thumb). Mirrors clipStreamUrl():
+// an <img src> can't carry the X-Dotarec-Token header, so the token rides the
+// ?token= query param (BridgeAuthFilter accepts it on any gated path). The endpoint
+// 404s when the thumbnail isn't rendered yet / the file is gone, so callers should
+// render it through an <img onError> fallback. Absent token outside Electron.
+export function clipThumbUrl(clipId: number): string {
+  const base = `${bridgeBase()}/clips/${clipId}/thumb`;
+  const token = window.dotarec?.bridgeToken;
+  return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+}
+
 export interface Health {
   readonly status: 'ok' | string;
   readonly version: string;
@@ -143,6 +163,11 @@ export interface Settings {
   // Archive drives recordings are moved onto after recording (tiered storage). Empty =
   // single-drive: everything stays in videoDir under retentionCapGb.
   readonly storageLocations: StorageLocation[];
+  // Auto-clip controls. When `autoClipOnRampage` is on, the core cuts a clip on a
+  // rampage trigger; `clipPaddingSeconds` (1..60) is the lead/trail padding around a
+  // clip's span. Mirrors SettingsStore.Settings.autoClipOnRampage / clipPaddingSeconds.
+  readonly autoClipOnRampage: boolean;
+  readonly clipPaddingSeconds: number;
 }
 
 // Per-drive disk usage from GET /storage/usage, used to show real free/total space and
@@ -287,6 +312,27 @@ async function postJson<TResult>(path: string): Promise<TResult> {
   });
   if (!res.ok) {
     throw new Error(`POST ${path} failed: ${res.status} ${res.statusText}`);
+  }
+  return (await res.json()) as TResult;
+}
+
+// Body-carrying POST returning JSON (distinct from the bodyless postJson above —
+// do not collapse the two). Surfaces the core's validation message on a non-ok
+// body, exactly like putJson.
+async function postJsonBody<TBody, TResult>(path: string, body: TBody): Promise<TResult> {
+  const res = await fetch(`${bridgeBase()}${path}`, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      ...authHeaders(),
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!res.ok) {
+    const detail = await errorBodyMessage(res);
+    throw new Error(detail ?? `POST ${path} failed: ${res.status} ${res.statusText}`);
   }
   return (await res.json()) as TResult;
 }
@@ -453,6 +499,32 @@ export interface PauseSpan {
   readonly endWall: number | null;
 }
 
+// A saved clip cut from a parent match's VOD. FROZEN wire shape, serialized
+// identically by the core's dev.dotarec.data.ClipRow record and here — field
+// names/order match the record. `kind` is 'auto' (rampage/etc.) or 'manual';
+// `triggerReason` is the auto trigger (e.g. 'rampage'), null for manual. Offsets
+// are seconds into the parent VOD. `videoPath`/`thumbPath`/`fileSizeBytes` are null
+// until the clip is generated. `status` walks 'pending' → 'generating' → 'ready'
+// (or 'failed', with `error` set).
+export interface Clip {
+  readonly id: number;
+  readonly parentMatchId: number;
+  readonly kind: 'auto' | 'manual';
+  readonly triggerReason: string | null;
+  readonly startOffsetS: number;
+  readonly endOffsetS: number;
+  readonly label: string | null;
+  readonly videoPath: string | null;
+  readonly thumbPath: string | null;
+  readonly fileSizeBytes: number | null;
+  readonly status: 'pending' | 'generating' | 'ready' | 'failed';
+  readonly error: string | null;
+  readonly createdAt: number;
+  // When true, the clip is exempt from the retention sweep (kept until manually deleted),
+  // independently of its parent match's star.
+  readonly starred: boolean;
+}
+
 // GET /buckets/counts — one count per library bucket. Always all seven keys.
 export interface BucketCounts {
   readonly ranked: number;
@@ -480,9 +552,41 @@ export function fetchBucketCounts(): Promise<BucketCounts> {
   return getJson<BucketCounts>('/buckets/counts');
 }
 
+// Clips cut from a match's VOD, ordered by start offset (GET /matches/{id}/clips).
+export function fetchClips(matchId: number): Promise<Clip[]> {
+  return getJson<Clip[]>(`/matches/${matchId}/clips`);
+}
+
+// Every clip across all matches, newest first (GET /clips). Backs the library
+// "Clips" bucket flat list (clips live in their own table, not the matches list).
+export function fetchAllClips(): Promise<Clip[]> {
+  return getJson<Clip[]>('/clips');
+}
+
+// Requests a new manual clip (POST /matches/{id}/clips). The core accepts the cut and
+// returns the freshly-created ClipRow (status 'pending'); generation runs async and
+// progress/readiness arrive over the socket as clip.progress / clip.ready events.
+export function createClip(
+  matchId: number,
+  body: { startOffsetS: number; endOffsetS: number; label?: string },
+): Promise<Clip> {
+  return postJsonBody<typeof body, Clip>(`/matches/${matchId}/clips`, body);
+}
+
+// Permanently deletes a clip (DELETE /clips/{id}): unlinks the .mp4 then drops the row.
+export function deleteClip(clipId: number): Promise<void> {
+  return delVoid(`/clips/${clipId}`);
+}
+
 // Toggles the star on a match (PATCH /matches/{id}) and returns the updated row.
 export function setStarred(id: number, starred: boolean): Promise<MatchDetail> {
   return patchJson<{ starred: boolean }, MatchDetail>(`/matches/${id}`, { starred });
+}
+
+// Toggles the star on a clip (PATCH /clips/{id}) and returns the updated clip. A starred clip is
+// exempt from the retention sweep, independent of its parent match.
+export function setClipStarred(clipId: number, starred: boolean): Promise<Clip> {
+  return patchJson<{ starred: boolean }, Clip>(`/clips/${clipId}`, { starred });
 }
 
 // Permanently deletes a match (DELETE /matches/{id}): the row + its markers/pauses
@@ -498,6 +602,38 @@ export type StateListener = (connected: boolean) => void;
 // re-fetching the list + counts; the payload shape is intentionally opaque here.
 export type MatchEventListener = (evt: { type: string; payload: unknown }) => void;
 
+// Clip lifecycle frames fanned out to onClipEvent() subscribers. Three kinds:
+//   'clip.created'  — payload is the new Clip (status 'pending')
+//   'clip.progress' — payload is { clipId, parentMatchId, percent }
+//   'clip.ready'    — payload is { clipId, parentMatchId, status, videoPath }
+// Every payload carries `parentMatchId`, so a subscription can be scoped to the open
+// match (see StatusSocket.onClipEvent). The renderer reacts by refreshing that match's
+// clip list (clip.created / clip.ready) or updating a progress bar (clip.progress).
+export type ClipEventType = 'clip.created' | 'clip.progress' | 'clip.ready';
+
+export type ClipEvent =
+  | { readonly type: 'clip.created'; readonly payload: Clip }
+  | {
+      readonly type: 'clip.progress';
+      readonly payload: { readonly clipId: number; readonly parentMatchId: number; readonly percent: number };
+    }
+  | {
+      readonly type: 'clip.ready';
+      readonly payload: {
+        readonly clipId: number;
+        readonly parentMatchId: number;
+        readonly status: string;
+        readonly videoPath: string | null;
+      };
+    };
+
+export type ClipEventListener = (evt: ClipEvent) => void;
+
+// Every clip frame payload carries parentMatchId; pull it out for matchId-scoped routing.
+function clipEventMatchId(evt: ClipEvent): number {
+  return evt.payload.parentMatchId;
+}
+
 /**
  * WebSocket client to the core's /ws endpoint with exponential-backoff reconnect.
  * Step 0: connects and forwards parsed JSON frames; full status schema is wired
@@ -511,6 +647,9 @@ export class StatusSocket {
   private readonly statusListeners = new Set<StatusListener>();
   private readonly stateListeners = new Set<StateListener>();
   private readonly matchEventListeners = new Set<MatchEventListener>();
+  // Clip-event subscribers keyed by the match they care about; a 0 key means "all
+  // matches". onClipEvent() adds to a per-match set and returns a detacher.
+  private readonly clipEventListeners = new Map<number, Set<ClipEventListener>>();
 
   connect(): void {
     this.closed = false;
@@ -538,6 +677,35 @@ export class StatusSocket {
   onEvent(listener: MatchEventListener): () => void {
     this.matchEventListeners.add(listener);
     return () => this.matchEventListeners.delete(listener);
+  }
+
+  // Subscribe to clip lifecycle frames (clip.created / clip.progress / clip.ready),
+  // scoped to one match by its parentMatchId. Pass matchId 0 (or omit) to receive
+  // every clip event. Mirrors onEvent(): returns a detacher that also prunes the
+  // per-match bucket once empty.
+  onClipEvent(matchId: number, listener: ClipEventListener): () => void {
+    let bucket = this.clipEventListeners.get(matchId);
+    if (!bucket) {
+      bucket = new Set<ClipEventListener>();
+      this.clipEventListeners.set(matchId, bucket);
+    }
+    bucket.add(listener);
+    return () => {
+      const set = this.clipEventListeners.get(matchId);
+      if (!set) return;
+      set.delete(listener);
+      if (set.size === 0) this.clipEventListeners.delete(matchId);
+    };
+  }
+
+  // Fans a clip frame out to its match-scoped subscribers plus any all-matches (key 0)
+  // subscribers.
+  private emitClipEvent(evt: ClipEvent): void {
+    const matchId = clipEventMatchId(evt);
+    for (const listener of this.clipEventListeners.get(matchId) ?? []) listener(evt);
+    if (matchId !== 0) {
+      for (const listener of this.clipEventListeners.get(0) ?? []) listener(evt);
+    }
   }
 
   private open(): void {
@@ -569,6 +737,15 @@ export class StatusSocket {
         // Library-mutating events: fan out to onEvent() subscribers, which
         // re-fetch the list + counts. Unknown types still fall through ignored.
         for (const listener of this.matchEventListeners) listener(envelope);
+      } else if (
+        envelope?.type === 'clip.created' ||
+        envelope?.type === 'clip.progress' ||
+        envelope?.type === 'clip.ready'
+      ) {
+        // Clip lifecycle events: fan out to onClipEvent() subscribers scoped by the
+        // payload's parentMatchId. The envelope's payload shape is known per type
+        // (see ClipEvent), so the cast is safe.
+        this.emitClipEvent(envelope as ClipEvent);
       }
     };
 

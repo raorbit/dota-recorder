@@ -114,6 +114,21 @@ export function obsSourceDir(): string | null {
 }
 
 /**
+ * Bundled static ffmpeg.exe the supervisor hands to the core (app.ffmpeg.path /
+ * DOTAREC_FFMPEG_PATH) so the core never depends on ffmpeg being on PATH.
+ *  - packaged: <resourcesPath>/ffmpeg/ffmpeg.exe
+ *  - dev:      <repoRoot>/build-resources/ffmpeg/ffmpeg.exe (null if absent)
+ */
+export function ffmpegPath(): string | null {
+  if (isPackaged()) {
+    return path.join(process.resourcesPath, 'ffmpeg', 'ffmpeg.exe');
+  }
+  // Dev mode: app.getAppPath() points at app/; the repo root is one level up.
+  const devPath = path.resolve(app.getAppPath(), '..', 'build-resources', 'ffmpeg', 'ffmpeg.exe');
+  return fs.existsSync(devPath) ? devPath : null;
+}
+
+/**
  * OBS version string read from the `.obs-<version>.ok` marker filename (e.g.
  * "32.1.2"). Used to detect when a bundled OBS upgrade needs re-materializing.
  *  - packaged: <resourcesPath>/obs/.obs-<version>.ok

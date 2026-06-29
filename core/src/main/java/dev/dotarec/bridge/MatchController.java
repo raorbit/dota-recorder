@@ -1,5 +1,10 @@
 package dev.dotarec.bridge;
 
+import dev.dotarec.config.SettingsStore;
+import dev.dotarec.config.SettingsStore.StorageLocation;
+import dev.dotarec.data.Bucket;
+import dev.dotarec.data.ClipRepository;
+import dev.dotarec.data.ClipRow;
 import dev.dotarec.data.MarkerRepository;
 import dev.dotarec.data.MarkerRow;
 import dev.dotarec.data.MatchRepository;
@@ -9,9 +14,7 @@ import dev.dotarec.data.PauseSpan;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpHeaders;
-import org.springframework.http.HttpRange;
 import org.springframework.http.HttpStatus;
-import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -27,13 +30,11 @@ import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBo
 
 import java.io.File;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
+import java.util.Map;
 
 /**
  * Matches endpoints consumed by the Electron browse/player UI over the loopback bridge.
@@ -67,11 +68,16 @@ public class MatchController {
     private final MatchRepository matches;
     private final MarkerRepository markers;
     private final PauseRepository pauses;
+    private final ClipRepository clips;
+    private final SettingsStore settings;
 
-    public MatchController(MatchRepository matches, MarkerRepository markers, PauseRepository pauses) {
+    public MatchController(MatchRepository matches, MarkerRepository markers, PauseRepository pauses,
+                           ClipRepository clips, SettingsStore settings) {
         this.matches = matches;
         this.markers = markers;
         this.pauses = pauses;
+        this.clips = clips;
+        this.settings = settings;
     }
 
     @GetMapping("/matches")
@@ -131,80 +137,8 @@ public class MatchController {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND,
                     "Video for match " + id + " is unavailable (file missing on disk)");
         }
-
-        MediaType type = contentType(file);
-        long length;
-        try {
-            length = Files.size(file);
-        } catch (IOException e) {
-            throw new UncheckedIOException("Failed to read video size: " + file, e);
-        }
-
-        // Stream the bytes via StreamingResponseBody rather than a (Generic)HttpMessageConverter:
-        // it streams in chunks (no whole-file buffering) and is written by a dedicated return-value
-        // handler, so it sidesteps the converter-generics trap that erases ResourceRegion under a
-        // ResponseEntity<?> return type. <video> always sends a Range, so the 206 path is the hot one.
-        List<HttpRange> ranges = headers.getRange();
-        if (ranges.isEmpty()) {
-            // No Range header -> full body, 200. Advertise Accept-Ranges so Chromium knows it can seek.
-            return ResponseEntity.ok()
-                    .contentType(type)
-                    .contentLength(length)
-                    .header(HttpHeaders.ACCEPT_RANGES, "bytes")
-                    .body(out -> copyRange(file, 0, length, out));
-        }
-        HttpRange range = ranges.get(0);
-        long start = range.getRangeStart(length);
-        long end = range.getRangeEnd(length); // clamped to length-1 by HttpRange
-        if (start >= length || start > end) {
-            // Unsatisfiable (start beyond EOF): 416 with the actual size so the client can re-ask.
-            return ResponseEntity.status(HttpStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
-                    .header(HttpHeaders.CONTENT_RANGE, "bytes */" + length)
-                    .build();
-        }
-        long regionLen = end - start + 1;
-        return ResponseEntity.status(HttpStatus.PARTIAL_CONTENT)
-                .contentType(type)
-                .contentLength(regionLen)
-                .header(HttpHeaders.ACCEPT_RANGES, "bytes")
-                .header(HttpHeaders.CONTENT_RANGE, "bytes " + start + "-" + end + "/" + length)
-                .body(out -> copyRange(file, start, regionLen, out));
-    }
-
-    /** Streams {@code count} bytes of {@code file} starting at {@code start} to {@code out}, chunked. */
-    private static void copyRange(Path file, long start, long count, OutputStream out)
-            throws IOException {
-        try (InputStream in = Files.newInputStream(file)) {
-            in.skipNBytes(start);
-            byte[] buf = new byte[64 * 1024];
-            long remaining = count;
-            while (remaining > 0) {
-                int n = in.read(buf, 0, (int) Math.min(buf.length, remaining));
-                if (n < 0) {
-                    break;
-                }
-                out.write(buf, 0, n);
-                remaining -= n;
-            }
-        }
-    }
-
-    /**
-     * Explicit extension -> media type map. {@code Files.probeContentType} is unreliable on Windows
-     * (depends on registry MIME registrations), so the recording containers are mapped by hand.
-     */
-    private static MediaType contentType(Path file) {
-        String name = file.getFileName().toString().toLowerCase(Locale.ROOT);
-        if (name.endsWith(".mp4")) {
-            return MediaType.valueOf("video/mp4");
-        }
-        if (name.endsWith(".mkv")) {
-            return MediaType.valueOf("video/x-matroska");
-        }
-        if (name.endsWith(".mov")) {
-            return MediaType.valueOf("video/quicktime");
-        }
-        return MediaType.APPLICATION_OCTET_STREAM;
+        requireUnderStorageRoot(file, "Video for match " + id);
+        return VideoStreamSupport.stream(file, headers);
     }
 
     @PatchMapping("/matches/{id}")
@@ -219,10 +153,10 @@ public class MatchController {
     }
 
     /**
-     * Permanently deletes a match: the {@code .mp4} + thumbnail on disk, then the row (its markers +
-     * pauses cascade via the FK). 404 when the id is unknown. File unlinks are best-effort — a missing
-     * or locked file is logged and never blocks the row delete (so a half-pruned recording can still
-     * be removed). No undo.
+     * Permanently deletes a match: the {@code .mp4} + thumbnail on disk, every child clip's
+     * {@code .mp4}/thumbnail on disk, then the row (its markers, pauses, and clip rows cascade via the
+     * FK). 404 when the id is unknown. File unlinks are best-effort — a missing or locked file is logged
+     * and never blocks the row delete (so a half-pruned recording can still be removed). No undo.
      */
     @DeleteMapping("/matches/{id}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
@@ -231,6 +165,12 @@ public class MatchController {
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "No match " + id));
         deleteFileQuietly(m.videoPath());
         deleteFileQuietly(m.thumbPath());
+        // Clip rows cascade-delete with the match (FK ON DELETE CASCADE); their on-disk files do not,
+        // so unlink them here to avoid orphaning .mp4/thumb bytes the cascade leaves behind.
+        for (ClipRow clip : clips.findByParentMatchId(id)) {
+            deleteFileQuietly(clip.videoPath());
+            deleteFileQuietly(clip.thumbPath());
+        }
         matches.delete(id);
     }
 
@@ -248,7 +188,40 @@ public class MatchController {
 
     @GetMapping("/buckets/counts")
     public BucketCounts bucketCounts() {
-        return BucketCounts.of(matches.bucketCounts());
+        // Clips live in their own table (not as matches rows), so the matches-derived counts always
+        // report 0 for the Clips bucket. Override that key with the real clip count so the sidebar
+        // Clips pill reflects the clips library.
+        Map<String, Integer> counts = matches.bucketCounts();
+        counts.put(Bucket.CLIPS.key(), (int) clips.count());
+        return BucketCounts.of(counts);
+    }
+
+    /**
+     * Path-traversal guard for {@code GET /matches/{id}/video/stream}: a stored {@code video_path}
+     * must resolve under one of the configured storage roots ({@code videoDir} + every archive
+     * {@code storageLocations[].path}), else 404. Archived VODs live under an archive root, so all
+     * roots are allowed. {@code what} names the resource for the 404 message.
+     */
+    private void requireUnderStorageRoot(Path file, String what) {
+        if (!VideoStreamSupport.isUnderAnyRoot(file, storageRoots())) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND,
+                    what + " is unavailable (outside the configured storage roots)");
+        }
+    }
+
+    /** The configured storage roots: the active {@code videoDir} plus every archive drive's path. */
+    private List<String> storageRoots() {
+        SettingsStore.Settings s = settings.get();
+        List<String> roots = new ArrayList<>();
+        roots.add(s.videoDir);
+        if (s.storageLocations != null) {
+            for (StorageLocation loc : s.storageLocations) {
+                if (loc != null) {
+                    roots.add(loc.path());
+                }
+            }
+        }
+        return roots;
     }
 
     private void requireMatch(long id) {

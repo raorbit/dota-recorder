@@ -15,6 +15,13 @@
   grid-template-columns: 1.6fr 0.8fr 0.9fr 0.8fr 0.9fr 0.8fr 1fr;
 }
 
+/* Clips bucket: a flatter 4-col grid (clip + length + kind + created). Overrides the
+   7-col template above for the clip header + rows only. */
+.mt-clip-header,
+.mt-clip-row {
+  grid-template-columns: 2.4fr 0.8fr 0.9fr 1fr;
+}
+
 .mt-header {
   padding: 10px 18px;
   background: var(--surface-alt);

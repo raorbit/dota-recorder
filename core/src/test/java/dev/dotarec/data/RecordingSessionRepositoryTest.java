@@ -31,7 +31,7 @@ class RecordingSessionRepositoryTest {
                 Statement st = conn.createStatement();
                 ResultSet version = st.executeQuery("PRAGMA user_version")) {
             assertThat(version.next()).isTrue();
-            assertThat(version.getInt(1)).isEqualTo(3);
+            assertThat(version.getInt(1)).isEqualTo(5);
         }
 
         try (Connection conn = ds.getConnection();

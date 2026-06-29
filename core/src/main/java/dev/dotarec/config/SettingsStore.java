@@ -108,6 +108,18 @@ public class SettingsStore {
          * re-seeded on the next launch.
          */
         public List<AudioSource> audioSources;
+        /**
+         * When true, the recorder auto-clips a highlight around a rampage (five rapid kills) instead of
+         * only tagging it. Off by default so existing installs keep their tag-only behavior. Defaults to
+         * false naturally, so a legacy settings.json predating the field deserializes it off.
+         */
+        public boolean autoClipOnRampage = false;
+        /**
+         * Seconds of padding kept on each side of an auto-clip's bounds. Valid range 1..60; clamped to
+         * that range by the settings endpoint. {@link #load} backfills the default when a legacy
+         * settings.json deserializes it as 0/absent, mirroring the fps/quality backfill.
+         */
+        public int clipPaddingSeconds = 8;
 
         /** Field-by-field copy (all fields are primitive/immutable) for atomic copy-on-write updates. */
         Settings copy() {
@@ -125,6 +137,8 @@ public class SettingsStore {
             c.accountId = accountId;
             c.opendotaApiKey = opendotaApiKey;
             c.gsiAuthToken = gsiAuthToken;
+            c.autoClipOnRampage = autoClipOnRampage;
+            c.clipPaddingSeconds = clipPaddingSeconds;
             // Deep-copy the list (records are immutable, so element sharing is safe). Omitting this
             // would silently drop audioSources on every copy-on-write update(). Null-safe: the field
             // defaults to null pre-seed, though copy() is only ever called on post-load settings.
@@ -210,6 +224,12 @@ public class SettingsStore {
         }
         if (loaded.format == null || loaded.format.isBlank()) {
             loaded.format = "hybrid_mp4";
+        }
+        // A legacy settings.json predating clipPaddingSeconds deserializes it to 0; backfill the default
+        // so the clip bounds never collapse to zero padding. autoClipOnRampage defaults to false
+        // naturally and needs no backfill.
+        if (loaded.clipPaddingSeconds <= 0) {
+            loaded.clipPaddingSeconds = 8;
         }
         // Seed one Dota application-capture source ONLY on a genuinely fresh field (null = fresh
         // install or a legacy settings.json predating audioSources) so the game's audio records out of

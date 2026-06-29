@@ -163,6 +163,14 @@ public class SettingsController {
                     if (patch.storageLocations() != null) {
                         current.storageLocations = patch.storageLocations();
                     }
+                    if (patch.autoClipOnRampage() != null) {
+                        current.autoClipOnRampage = patch.autoClipOnRampage();
+                    }
+                    // Clamp clipPaddingSeconds to [1,60] rather than reject: out-of-range padding only
+                    // widens/narrows a clip, never breaks recording like a bad fps/quality would.
+                    if (patch.clipPaddingSeconds() != null) {
+                        current.clipPaddingSeconds = Math.max(1, Math.min(60, patch.clipPaddingSeconds()));
+                    }
                     return current;
                 });
         // Apply the (possibly new) audio source list to a live OBS without waiting for a reconnect.
@@ -278,7 +286,9 @@ public class SettingsController {
             int fps,
             String quality,
             String format,
-            List<StorageLocation> storageLocations) {
+            List<StorageLocation> storageLocations,
+            boolean autoClipOnRampage,
+            int clipPaddingSeconds) {
 
         static SettingsView of(Settings s) {
             return new SettingsView(
@@ -291,7 +301,9 @@ public class SettingsController {
                     s.fps,
                     s.quality,
                     s.format,
-                    s.storageLocations);
+                    s.storageLocations,
+                    s.autoClipOnRampage,
+                    s.clipPaddingSeconds);
         }
     }
 
@@ -312,5 +324,7 @@ public class SettingsController {
             Integer fps,
             String quality,
             String format,
-            List<StorageLocation> storageLocations) {}
+            List<StorageLocation> storageLocations,
+            Boolean autoClipOnRampage,
+            Integer clipPaddingSeconds) {}
 }

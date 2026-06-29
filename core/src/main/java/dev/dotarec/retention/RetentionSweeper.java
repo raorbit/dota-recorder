@@ -2,6 +2,8 @@ package dev.dotarec.retention;
 
 import dev.dotarec.bridge.EventPublisher;
 import dev.dotarec.config.SettingsStore;
+import dev.dotarec.data.ClipRepository;
+import dev.dotarec.data.ClipRow;
 import dev.dotarec.data.MatchRepository;
 import dev.dotarec.data.MatchSummary;
 import org.slf4j.Logger;
@@ -56,6 +58,7 @@ public class RetentionSweeper {
     }
 
     private final MatchRepository matches;
+    private final ClipRepository clips;
     private final SettingsStore settings;
     private final EventPublisher events;
     private final StorageMaintenanceLock maintenanceLock;
@@ -64,10 +67,11 @@ public class RetentionSweeper {
     @org.springframework.beans.factory.annotation.Autowired
     public RetentionSweeper(
             MatchRepository matches,
+            ClipRepository clips,
             SettingsStore settings,
             EventPublisher events,
             StorageMaintenanceLock maintenanceLock) {
-        this(matches, settings, events, maintenanceLock,
+        this(matches, clips, settings, events, maintenanceLock,
                 dir -> Files.getFileStore(dir).getTotalSpace());
     }
 
@@ -76,27 +80,36 @@ public class RetentionSweeper {
      * StorageMaintenanceLock} (the sweeper is the sole lock holder in those tests, so a private
      * instance is fine) and a real total-space probe.
      */
-    public RetentionSweeper(MatchRepository matches, SettingsStore settings, EventPublisher events) {
-        this(matches, settings, events, new StorageMaintenanceLock(),
+    public RetentionSweeper(MatchRepository matches, ClipRepository clips, SettingsStore settings,
+                            EventPublisher events) {
+        this(matches, clips, settings, events, new StorageMaintenanceLock(),
                 dir -> Files.getFileStore(dir).getTotalSpace());
     }
 
     /** Test seam: inject a deterministic total-space probe (and the shared lock). */
     RetentionSweeper(
             MatchRepository matches,
+            ClipRepository clips,
             SettingsStore settings,
             EventPublisher events,
             StorageMaintenanceLock maintenanceLock,
             TotalSpaceProbe totalSpace) {
         this.matches = matches;
+        this.clips = clips;
         this.settings = settings;
         this.events = events;
         this.maintenanceLock = maintenanceLock;
         this.totalSpace = totalSpace;
     }
 
-    /** Scheduled hourly sweep with no protected match (nothing is actively recording from here). */
-    @Scheduled(fixedDelay = 3_600_000L)
+    /**
+     * Scheduled hourly sweep with no protected match (nothing is actively recording from here). The
+     * initialDelay keeps the first sweep from firing the instant the scheduler starts — before the
+     * startup {@code MigrationRunner} runs — so it can't query the {@code clips}/{@code matches} tables
+     * before a pending migration has created them (a fresh/upgrade boot otherwise logged a spurious
+     * "no such table" error).
+     */
+    @Scheduled(initialDelay = 60_000L, fixedDelay = 3_600_000L)
     public void sweep() {
         sweep(null);
     }
@@ -156,18 +169,45 @@ public class RetentionSweeper {
                             "Retention sweep could not delete thumbnail for match {}; pruning video row anyway",
                             m.id());
                 }
+                // Prune the VOD row only (markers/stats survive with nulled paths). Its clips are NOT
+                // cascade-deleted: clips are standalone files, kept and evicted LAST — after every
+                // non-starred VOD — in the clip phase below.
                 matches.nullVideoPath(m.id());
                 deletedIds.add(m.id());
                 freed += size;
             }
 
-            if (!deletedIds.isEmpty()) {
+            // Clips last: only after exhausting non-starred VODs, evict non-starred clips oldest-first
+            // until under budget. Starred clips (their own flag) are never auto-deleted. A clip has no
+            // row worth keeping once its file is gone (unlike a match), so delete its file AND row.
+            int clipsDeleted = 0;
+            for (ClipRow clip : clips.findSweepCandidates()) {
+                if (total <= capBytes) {
+                    break;
+                }
+                if (!driveReachable(clip.videoPath())) {
+                    continue; // file on an offline drive: can't delete, but its bytes still count toward the budget (via clips.sumFileSizeBytes())
+                }
+                long clipSize = clipSizeBytes(clip);
+                boolean clipGone = deleteFileQuietly(clip.videoPath());
+                deleteFileQuietly(clip.thumbPath());
+                if (!clipGone) {
+                    log.warn("Retention sweep left clip {} intact because video deletion failed", clip.id());
+                    continue;
+                }
+                clips.delete(clip.id());
+                total -= clipSize;
+                freed += clipSize;
+                clipsDeleted++;
+            }
+
+            if (!deletedIds.isEmpty() || clipsDeleted > 0) {
                 Map<String, Object> payload = new LinkedHashMap<>();
                 payload.put("freedBytes", freed);
                 payload.put("deletedIds", deletedIds);
                 events.publish("retention.swept", payload);
-                log.info("Retention sweep freed {} bytes across {} recordings (cap {} bytes)",
-                        freed, deletedIds.size(), capBytes);
+                log.info("Retention sweep freed {} bytes across {} recording(s) and {} clip(s) (cap {} bytes)",
+                        freed, deletedIds.size(), clipsDeleted, capBytes);
             }
             return new SweepResult(freed, deletedIds, total, capBytes);
         } finally {
@@ -304,6 +344,10 @@ public class RetentionSweeper {
             }
             total += videoSizeBytes(m);
         }
+        // Clips are first-class stored bytes too: their rendered .mp4s count against the same cap as
+        // VODs. Use the DB-recorded sizes (cheap, no per-file stat) — a clip on an unplugged drive is a
+        // rare edge whose recorded bytes still over-count toward eviction, which is the safe direction.
+        total += clips.sumFileSizeBytes();
         return total;
     }
 
@@ -337,6 +381,20 @@ public class RetentionSweeper {
             // failure would otherwise hide an over-budget row from pruning.
             log.warn("Could not stat {} during retention sweep: {}", path, e.toString());
             return m.fileSizeBytes() != null ? m.fileSizeBytes() : 0L;
+        }
+    }
+
+    /** Real on-disk size of a clip's .mp4, falling back to the DB-recorded size on a stat failure. */
+    private long clipSizeBytes(ClipRow clip) {
+        String path = clip.videoPath();
+        if (path == null || path.isBlank()) {
+            return 0L;
+        }
+        try {
+            return Files.size(Path.of(path));
+        } catch (IOException | RuntimeException e) {
+            log.warn("Could not stat clip {} during retention sweep: {}", path, e.toString());
+            return clip.fileSizeBytes() != null ? clip.fileSizeBytes() : 0L;
         }
     }
 
