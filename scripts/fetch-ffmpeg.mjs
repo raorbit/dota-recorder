@@ -13,6 +13,9 @@
 // pinned it verifies strictly and aborts on mismatch. Override either via env at build
 // time. The default build is the gyan.dev "release-essentials" zip, which is sufficient
 // for trimming/remux; swap FFMPEG_URL for a BtbN release if a full build is needed.
+// The unpacked ffmpeg.exe + .ok marker are gitignored, so a fresh clone / CI has no
+// cache and re-downloads + re-verifies the zip against FFMPEG_SHA256 every time — the
+// supply-chain guarantee rides on that hash, not on the (untracked) cached binary.
 
 import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -74,8 +77,12 @@ async function main() {
   rmSync(extractDir, { recursive: true, force: true });
   mkdirSync(extractDir, { recursive: true });
   // Windows-only target: use PowerShell Expand-Archive (no extra npm dependency).
+  // Pass the paths via env vars and read them back with $env: inside the command — never
+  // interpolate them into the PowerShell string, so paths containing apostrophes, spaces
+  // or other special characters can't produce an unbalanced/invalid command.
   execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command',
-    `Expand-Archive -Path '${zipPath}' -DestinationPath '${extractDir}' -Force`], { stdio: 'inherit' });
+    'Expand-Archive -LiteralPath $env:DOTAREC_ZIP -DestinationPath $env:DOTAREC_DEST -Force'],
+    { stdio: 'inherit', env: { ...process.env, DOTAREC_ZIP: zipPath, DOTAREC_DEST: extractDir } });
 
   // These static zips wrap everything in a versioned top-level dir (e.g.
   // ffmpeg-7.1-essentials_build/bin/ffmpeg.exe). Locate bin/ffmpeg.exe wherever it lands
