@@ -5,6 +5,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.dotarec.config.AppPaths;
 import dev.dotarec.config.SettingsStore;
+import dev.dotarec.data.ClipRepository;
+import dev.dotarec.data.ClipRow;
 import dev.dotarec.data.MarkerRepository;
 import dev.dotarec.data.MatchRepository;
 import dev.dotarec.data.MatchRepository.NewMatch;
@@ -28,6 +30,7 @@ class CrashRecoveryRunnerTest {
     private DataSource ds;
     private RecordingSessionRepository journal;
     private MatchRepository matches;
+    private ClipRepository clips;
     private MarkerRepository markers;
     private PauseRepository pauses;
     private CrashRecoveryRunner runner;
@@ -41,6 +44,7 @@ class CrashRecoveryRunnerTest {
         ds = TestDb.migrated(tmp);
         journal = new RecordingSessionRepository(ds);
         matches = new MatchRepository(ds);
+        clips = new ClipRepository(ds);
         markers = new MarkerRepository(ds);
         pauses = new PauseRepository(ds);
         videoDir = Files.createDirectories(tmp.resolve("video"));
@@ -54,7 +58,7 @@ class CrashRecoveryRunnerTest {
                 });
         runner =
                 new CrashRecoveryRunner(
-                        journal, matches, markers, pauses, ds, new ObjectMapper(), settings);
+                        journal, matches, clips, markers, pauses, ds, new ObjectMapper(), settings);
     }
 
     @Test
@@ -416,6 +420,107 @@ class CrashRecoveryRunnerTest {
                 .satisfies(row -> assertThat(row.enrichmentState()).isEqualTo("gsi_only"));
     }
 
+    @Test
+    void archivedClipIsNotImportedAsMatchNorDeleted() throws Exception {
+        Path archiveDir = configureArchive("hdd");
+        long parentId = insertMatch(videoDir.resolve("parent.mp4").toString(), null, 4_096L);
+        // A clip that was successfully relocated to the archive drive: its row points at the archived
+        // copy in the archive ROOT (named clip-<clipId>-<original>). The orphan scan must treat it as
+        // referenced — not adopt it as a bogus match, and not delete it as a "redundant" leftover.
+        long clipId = insertClip(parentId, "placeholder");
+        Path archivedClip = archiveDir.resolve("clip-" + clipId + "-parent-clip-" + clipId + ".mp4");
+        Files.writeString(archivedClip, "rendered clip bytes");
+        clips.updateVideoPath(clipId, archivedClip.toString(), null);
+
+        runner.run(null);
+
+        // No match row was created pointing at the clip file...
+        assertThat(matches.findAll())
+                .noneMatch(row -> archivedClip.toString().equals(row.videoPath()));
+        // ...the parent match is the only match row...
+        assertThat(matches.findAll()).hasSize(1);
+        // ...the clip file survives and its row still points at it.
+        assertThat(Files.exists(archivedClip)).isTrue();
+        assertThat(clips.findById(clipId).orElseThrow().videoPath()).isEqualTo(archivedClip.toString());
+    }
+
+    @Test
+    void dropsRedundantArchivedClipLeftoverWhenClipAlreadyIntact() throws Exception {
+        Path archiveDir = configureArchive("hdd");
+        long parentId = insertMatch(videoDir.resolve("parent.mp4").toString(), null, 4_096L);
+        // The clip row still points at an existing source (interrupted move copied across but crashed
+        // before repointing), so the archive-drive copy is a redundant duplicate to reclaim.
+        Path clipSource = Files.createDirectories(videoDir.resolve("clips")).resolve("1-clip-1.mp4");
+        Files.writeString(clipSource, "the live clip");
+        long clipId = insertClip(parentId, clipSource.toString());
+        Path leftover = archiveDir.resolve("clip-" + clipId + "-1-clip-1.mp4");
+        Files.writeString(leftover, "redundant copy");
+
+        runner.run(null);
+
+        // Redundant leftover removed; the clip row is untouched; no bogus match row imported.
+        assertThat(Files.exists(leftover)).isFalse();
+        assertThat(clips.findById(clipId).orElseThrow().videoPath()).isEqualTo(clipSource.toString());
+        assertThat(matches.findAll()).hasSize(1);
+    }
+
+    @Test
+    void relinksStrandedArchivedClipWhenItsVideoMissing() throws Exception {
+        Path archiveDir = configureArchive("hdd");
+        long parentId = insertMatch(videoDir.resolve("parent.mp4").toString(), null, 4_096L);
+        // The clip row points at a source that no longer exists (a same-filesystem rename consumed it
+        // before the repoint committed), while the relocated copy survives on the archive drive.
+        long clipId = insertClip(parentId, videoDir.resolve("clips").resolve("gone-clip.mp4").toString());
+        Path stranded = archiveDir.resolve("clip-" + clipId + "-1-clip-1.mp4");
+        Files.writeString(stranded, "the real clip bytes");
+
+        runner.run(null);
+
+        // The ORIGINAL clip row is re-linked to the recovered copy — no duplicate, no bogus match.
+        assertThat(clips.findById(clipId).orElseThrow().videoPath()).isEqualTo(stranded.toString());
+        assertThat(Files.exists(stranded)).isTrue();
+        assertThat(matches.findAll()).hasSize(1);
+    }
+
+    @Test
+    void relinkAlsoRecoversTheArchivedClipThumbnail() throws Exception {
+        Path archiveDir = configureArchive("hdd");
+        long parentId = insertMatch(videoDir.resolve("parent.mp4").toString(), null, 4_096L);
+        long clipId = insertClip(parentId, videoDir.resolve("clips").resolve("gone-clip.mp4").toString());
+        Path stranded = archiveDir.resolve("clip-" + clipId + "-1-clip-1.mp4");
+        Files.writeString(stranded, "the real clip bytes");
+        // The move also relocated the clip thumbnail under <archive>/thumbs/clip-<clipId>-...; recovery
+        // must find it via the clip prefix (exercises recoverArchivedThumb's clip-prefix branch).
+        Path strandedThumb =
+                Files.createDirectories(archiveDir.resolve("thumbs")).resolve("clip-" + clipId + "-gone.jpg");
+        Files.writeString(strandedThumb, "thumb");
+
+        runner.run(null);
+
+        ClipRow row = clips.findById(clipId).orElseThrow();
+        assertThat(row.videoPath()).isEqualTo(stranded.toString());
+        assertThat(row.thumbPath()).isEqualTo(strandedThumb.toString());
+    }
+
+    @Test
+    void importsClipPrefixedArchiveFileAsGsiOnlyWhenNoClipRowExists() throws Exception {
+        Path archiveDir = configureArchive("hdd");
+        // A "clip-<id>-" file on the archive drive whose clip row no longer exists (the clip was
+        // deleted). leadingClipId parses it, recoverArchivedClipLeftover finds no row and returns false,
+        // so it falls through to a standalone gsi_only import rather than being deleted.
+        Path orphan = archiveDir.resolve("clip-99-x.mp4");
+        Files.writeString(orphan, "loose clip residue");
+
+        runner.run(null);
+
+        assertThat(clips.findById(99L)).isEmpty();
+        assertThat(Files.exists(orphan)).isTrue(); // never deleted — we don't destroy unattributable files
+        assertThat(matches.findAll())
+                .filteredOn(row -> orphan.toString().equals(row.videoPath()))
+                .singleElement()
+                .satisfies(row -> assertThat(row.enrichmentState()).isEqualTo("gsi_only"));
+    }
+
     /** Adds an archive storage location at {@code <tmp>/<name>} and returns its directory. */
     private Path configureArchive(String name) throws Exception {
         Path archiveDir = Files.createDirectories(dir.resolve(name));
@@ -439,6 +544,13 @@ class CrashRecoveryRunnerTest {
                         null, null, null, null, null, null, null,
                         null, null, null, null, null, null,
                         1_000L, videoPath, thumbPath, fileSizeBytes, false, 1_000L, null));
+    }
+
+    /** Inserts a ready clip for {@code parentId} pointing at {@code videoPath} and returns its id. */
+    private long insertClip(long parentId, String videoPath) {
+        return clips.insert(
+                parentId, "auto", "rampage", 10.0, 30.0, null, videoPath, null, 2_048L, "ready", null,
+                1_000L);
     }
 
     private RecordingSessionRow sessionRow(String id, Long dotaMatchId) {

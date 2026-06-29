@@ -151,6 +151,38 @@ describe('ObsSupervisor', () => {
     expect(execFileMock).not.toHaveBeenCalled();
   });
 
+  // Case 1b: obs64.exe present (existsSync passes) but the spawn itself fails (EACCES / corrupt binary
+  // / TOCTOU delete). The 'error' event must reject start() rather than become an uncaughtException
+  // that kills the Electron main process.
+  it('rejects start() with the real error (not crash) when obs64.exe fails to launch', async () => {
+    obsConnected = false; // keep the readiness poll going so the launch error wins the race
+    const onUnexpectedExit = vi.fn();
+    const sup = new ObsSupervisor({ ...baseOpts, onLog: () => {}, onUnexpectedExit, healthTimeoutMs: 5_000 });
+
+    const starting = sup.start();
+    await flush(10);
+    children[0].emit('error', Object.assign(new Error('spawn obs64.exe EACCES'), { code: 'EACCES' }));
+
+    await expect(starting).rejects.toThrow(/EACCES/);
+    expect(onUnexpectedExit).not.toHaveBeenCalled(); // a launch failure rejects start(), not a phantom crash
+  });
+
+  it('logs a post-startup OBS error without restarting or orphaning (stop still reaps)', async () => {
+    // After start() succeeds the 'error' listener stays benign: it must not null the handle (stop()
+    // would then never reap the live OBS) nor fire onUnexpectedExit (a spurious relaunch).
+    const onUnexpectedExit = vi.fn();
+    const sup = new ObsSupervisor({ ...baseOpts, onLog: () => {}, onUnexpectedExit });
+    await sup.start();
+
+    children[0].emit('error', new Error('post-startup hiccup'));
+    expect(onUnexpectedExit).not.toHaveBeenCalled();
+
+    const stopped = sup.stop();
+    children[0].emit('exit', 0, 'SIGTERM'); // satisfy the graceful-exit wait
+    await stopped;
+    expect(children[0].kill).toHaveBeenCalledWith('SIGTERM'); // stop() still saw the live child and reaped it
+  });
+
   // Case 2: firewall scoping success branch.
   it('logs the loopback-scoped success message and runs netsh delete-then-add', async () => {
     setPlatform('win32');

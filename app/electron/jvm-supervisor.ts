@@ -128,7 +128,33 @@ export class JvmSupervisor {
       }
     });
 
-    await this.waitForHealth(child);
+    // A failed spawn (missing/unlaunchable javaw, ENOENT/EACCES) emits 'error' and never 'exit'. With
+    // no listener Node re-emits it as an uncaughtException that takes down the Electron main process,
+    // bypassing the supervisor's controlled failure path. Keep a PERSISTENT listener so an 'error' is
+    // never unhandled: during startup it rejects start() (the caller then runs notifyDown / bounded
+    // restart); after startup (rare) it is only logged — the handle is left intact so a later stop()
+    // still reaps the process, and we don't spuriously restart since 'error' doesn't imply it exited.
+    let launchSettled = false;
+    let rejectLaunch: ((err: Error) => void) | undefined;
+    const launchFailed = new Promise<never>((_, reject) => {
+      rejectLaunch = reject;
+    });
+    child.on('error', (err) => {
+      const e = err instanceof Error ? err : new Error(String(err));
+      if (launchSettled) {
+        this.onLog(`core errored after startup: ${e.message}`);
+        return;
+      }
+      if (this.child === child) this.child = null;
+      this.onLog(`core failed to launch: ${e.message}`);
+      rejectLaunch?.(e);
+    });
+
+    try {
+      await Promise.race([this.waitForHealth(child), launchFailed]);
+    } finally {
+      launchSettled = true; // past this point an 'error' is post-startup, not a launch failure
+    }
   }
 
   /** Graceful-then-forceful shutdown of the JVM tree. */
@@ -209,8 +235,14 @@ export class JvmSupervisor {
           ...(this.bridgeToken ? { headers: { [BRIDGE_TOKEN_HEADER]: this.bridgeToken } } : {}),
         });
         if (res.ok) {
-          const body = (await res.json()) as { status?: string };
-          if (body.status === 'ok') return;
+          // /health answers `ok` as soon as the web server binds — which is BEFORE the migration
+          // runner finishes (it runs as an ApplicationRunner, after the port is open). Gating only on
+          // status would let the renderer mount and fire its initial queries straight into a
+          // half-migrated DB (those requests fail and never retry). Require dbReady too, so the poll
+          // waits the extra few ms until the schema exists. createWindow() runs only after start()
+          // resolves, so this closes the race at the root.
+          const body = (await res.json()) as { status?: string; dbReady?: boolean };
+          if (body.status === 'ok' && body.dbReady === true) return;
         }
       } catch (err) {
         lastError = err;

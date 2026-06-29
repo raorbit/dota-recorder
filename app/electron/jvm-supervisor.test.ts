@@ -53,7 +53,9 @@ beforeEach(() => {
     'fetch',
     vi.fn(async () => ({
       ok: healthOk,
-      json: async () => ({ status: healthOk ? 'ok' : 'starting' }),
+      // Readiness requires BOTH status=ok and dbReady=true (migrations finished). A healthy core
+      // reports both; the unhealthy stub reports neither.
+      json: async () => ({ status: healthOk ? 'ok' : 'starting', dbReady: healthOk }),
     })),
   );
 });
@@ -138,6 +140,71 @@ describe('JvmSupervisor', () => {
     const sup = new JvmSupervisor({ onLog: () => {}, healthTimeoutMs: 250 });
 
     await expect(sup.start()).rejects.toThrow(/did not become healthy/i);
+  });
+
+  it('keeps waiting while migrations run ({status:ok, dbReady:false}) and does not resolve', async () => {
+    // /health flips to ok the instant the web server binds, but the schema migration runs afterward.
+    // Resolving on status alone would mount the renderer into a half-migrated DB; dbReady gates it.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: true, json: async () => ({ status: 'ok', dbReady: false }) })),
+    );
+    const sup = new JvmSupervisor({ onLog: () => {}, healthTimeoutMs: 250 });
+
+    await expect(sup.start()).rejects.toThrow(/did not become healthy/i);
+  });
+
+  it('keeps polling while dbReady is false, then resolves once it flips true', async () => {
+    let ready = false;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: true, json: async () => ({ status: 'ok', dbReady: ready }) })),
+    );
+    const sup = new JvmSupervisor({ onLog: () => {}, healthTimeoutMs: 5_000 });
+
+    const starting = sup.start();
+    let resolved = false;
+    void starting.then(() => {
+      resolved = true;
+    });
+    await flush(250); // well past the first poll — the OLD status-only gate would have resolved by now
+    expect(resolved).toBe(false); // the dbReady gate kept polling while migrations ran
+
+    ready = true; // migrations complete -> the next poll resolves
+    await expect(starting).resolves.toBeUndefined();
+  });
+
+  it('rejects start() with the real error (not crash) when the child fails to launch', async () => {
+    // A missing/unlaunchable javaw emits 'error' and never 'exit'. With no error listener Node re-emits
+    // it as an uncaughtException that kills the Electron main process; instead start() must reject with
+    // the real ENOENT so the supervisor's controlled notifyDown / restart path runs.
+    healthOk = false; // keep waitForHealth polling so the launch error wins the race
+    const onUnexpectedExit = vi.fn();
+    const sup = new JvmSupervisor({ onLog: () => {}, onUnexpectedExit, healthTimeoutMs: 5_000 });
+
+    const starting = sup.start();
+    await flush(10);
+    children[0].emit('error', Object.assign(new Error('spawn javaw ENOENT'), { code: 'ENOENT' }));
+
+    await expect(starting).rejects.toThrow(/ENOENT/);
+    expect(onUnexpectedExit).not.toHaveBeenCalled(); // a launch failure rejects start(), not a phantom crash
+  });
+
+  it('logs a post-startup error without restarting or orphaning (stop still reaps)', async () => {
+    // After start() succeeds the 'error' listener must stay benign: an 'error' (not 'exit') does not
+    // imply the process died, so it must NOT null the handle (stop() would then never reap the live
+    // process) nor fire onUnexpectedExit (a spurious restart onto a still-running core).
+    const onUnexpectedExit = vi.fn();
+    const sup = new JvmSupervisor({ onLog: () => {}, onUnexpectedExit });
+    await sup.start();
+
+    children[0].emit('error', new Error('post-startup hiccup'));
+    expect(onUnexpectedExit).not.toHaveBeenCalled();
+
+    const stopped = sup.stop();
+    children[0].emit('exit', 0, 'SIGTERM'); // satisfy the graceful-exit wait
+    await stopped;
+    expect(children[0].kill).toHaveBeenCalledWith('SIGTERM'); // stop() still saw the live child and reaped it
   });
 
   it('scrubs the bridge token from emitted log lines', async () => {
