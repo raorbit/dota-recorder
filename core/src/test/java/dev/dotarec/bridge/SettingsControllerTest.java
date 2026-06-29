@@ -526,6 +526,63 @@ class SettingsControllerTest {
         assertThat(store.get().videoDir).isNotBlank();
     }
 
+    // ---- clip settings (auto-clip + padding) -------------------------------
+
+    @Test
+    void putSettings_roundTripsClipFields() {
+        // autoClipOnRampage true with an in-range padding.
+        SettingsView updated =
+                controller.putSettings(
+                        new SettingsPatch(
+                                null, null, null, null, null, null, null, null, null, null, null,
+                                true, 12));
+
+        assertThat(updated.autoClipOnRampage()).isTrue();
+        assertThat(updated.clipPaddingSeconds()).isEqualTo(12);
+        // Persisted to the store, not just echoed.
+        assertThat(store.get().autoClipOnRampage).isTrue();
+        assertThat(store.get().clipPaddingSeconds).isEqualTo(12);
+
+        // ...and flipping the flag back off round-trips too.
+        SettingsView off =
+                controller.putSettings(
+                        new SettingsPatch(
+                                null, null, null, null, null, null, null, null, null, null, null,
+                                false, 45));
+
+        assertThat(off.autoClipOnRampage()).isFalse();
+        assertThat(off.clipPaddingSeconds()).isEqualTo(45);
+        assertThat(store.get().autoClipOnRampage).isFalse();
+        assertThat(store.get().clipPaddingSeconds).isEqualTo(45);
+    }
+
+    @Test
+    void putSettings_clampsClipPaddingBelowRangeToMin() {
+        // A cleared "padding" field arrives as 0; clamp up to the [1,60] floor rather than reject —
+        // out-of-range padding only narrows a clip, it never breaks recording.
+        SettingsView updated =
+                controller.putSettings(
+                        new SettingsPatch(
+                                null, null, null, null, null, null, null, null, null, null, null,
+                                null, 0));
+
+        assertThat(updated.clipPaddingSeconds()).isEqualTo(1);
+        assertThat(store.get().clipPaddingSeconds).isEqualTo(1);
+    }
+
+    @Test
+    void putSettings_clampsClipPaddingAboveRangeToMax() {
+        // Above the [1,60] ceiling clamps down to 60.
+        SettingsView updated =
+                controller.putSettings(
+                        new SettingsPatch(
+                                null, null, null, null, null, null, null, null, null, null, null,
+                                null, 100));
+
+        assertThat(updated.clipPaddingSeconds()).isEqualTo(60);
+        assertThat(store.get().clipPaddingSeconds).isEqualTo(60);
+    }
+
     @Test
     void putSettings_acceptsDistinctPositiveStorageLocationsAndRoundTrips() {
         // The happy path: distinct, non-nested archive paths with positive caps, plus a positive

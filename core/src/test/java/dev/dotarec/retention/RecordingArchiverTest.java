@@ -99,6 +99,38 @@ class RecordingArchiverTest {
     }
 
     @Test
+    void relocatesOldestActiveClipToArchiveAndRepointsPaths() throws Exception {
+        Path archive = configureArchive("hdd", 10);
+        settings.get().retentionCapGb = 1; // active holds 1 GiB; a 1 GiB clip + 1 GiB VOD forces a move
+
+        // A parent match (its VOD is the NEWER, so the older clip is the one that gets relocated) plus a
+        // ready clip with on-disk video + thumb files, both on the active drive.
+        long parent = seed(videoDir, "match.mp4", "match.jpg", GIB, 2_000L, false);
+        long clip = seedClip(videoDir, parent, "clip.mp4", "clip.jpg", GIB, 1_000L, false);
+
+        RecordingArchiver.ArchiveResult result = archiver.archive(null);
+
+        // Only the match VOD relocation is reported via movedIds (clips are counted separately), so the
+        // assertions read the clip row directly. The clip's older age makes it the first move candidate,
+        // so it spills to the archive while the newer parent VOD stays on the fast drive.
+        assertThat(result.movedIds()).isEmpty();
+        assertThat(Files.exists(videoDir.resolve("clip.mp4"))).isFalse();
+        // Clip destinations are namespaced with a "clip-" prefix (a separate id space from match ids).
+        assertThat(Files.exists(archive.resolve("clip-" + clip + "-clip.mp4"))).isTrue();
+        assertThat(Files.exists(archive.resolve("thumbs").resolve("clip-" + clip + "-clip.jpg")))
+                .isTrue();
+
+        // The clip row is repointed to the archive (video + thumb), and the parent VOD stays put.
+        var movedClip = clips.findById(clip).orElseThrow();
+        assertThat(movedClip.videoPath())
+                .isEqualTo(archive.resolve("clip-" + clip + "-clip.mp4").toString());
+        assertThat(movedClip.thumbPath())
+                .isEqualTo(archive.resolve("thumbs").resolve("clip-" + clip + "-clip.jpg").toString());
+        assertThat(matches.findById(parent).orElseThrow().videoPath())
+                .isEqualTo(videoDir.resolve("match.mp4").toString());
+    }
+
+    @Test
     void fillsArchivesInListOrder() throws Exception {
         Path first = configureArchive("hdd1", 1); // holds exactly one 1 GiB VOD
         Path second = configureArchive("hdd2", 10);
@@ -407,6 +439,24 @@ class RecordingArchiverTest {
                 "win", 7, 22, null, null, 1800,
                 playedAt, videoPath.toString(), thumbPath.toString(), sizeBytes, starred, playedAt,
                 null));
+    }
+
+    /** Seeds a ready clip of {@code parentMatchId} with on-disk video + thumb files; returns its id. */
+    private long seedClip(Path dir, long parentMatchId, String video, String thumb, long sizeBytes,
+                          long createdAt, boolean starred) throws Exception {
+        Path videoPath = dir.resolve(video);
+        Path thumbDir = Files.createDirectories(dir.resolve("thumbs"));
+        Path thumbPath = thumbDir.resolve(thumb);
+        try (RandomAccessFile f = new RandomAccessFile(videoPath.toFile(), "rw")) {
+            f.setLength(sizeBytes);
+        }
+        Files.createFile(thumbPath);
+        long id = clips.insert(parentMatchId, "manual", null, 0.0, 10.0, null,
+                videoPath.toString(), thumbPath.toString(), sizeBytes, "ready", null, createdAt);
+        if (starred) {
+            clips.setStarred(id, true);
+        }
+        return id;
     }
 
     /** The default huge-free probe wired in {@link #setUp}, reusable for spy-built archivers. */

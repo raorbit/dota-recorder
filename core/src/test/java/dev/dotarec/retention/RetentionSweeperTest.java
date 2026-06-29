@@ -121,6 +121,48 @@ class RetentionSweeperTest {
     }
 
     @Test
+    void clipsAreEvictedOldestFirstAndNewestPlusStarredSurvive() throws Exception {
+        // Cap 1 GiB. Seed four NON-starred clips at increasing createdAt plus one starred clip, each
+        // 0.4 GiB -> 2.0 GiB total, all over a single parent match VOD with no on-disk file (so the
+        // budget is driven purely by the clips). The clip phase evicts oldest-first (created_at ASC):
+        // it removes the three oldest non-starred clips (2.0 -> 1.6 -> 1.2 -> 0.8 GiB, now under cap),
+        // stops there so the NEWEST non-starred clip survives, and never touches the starred clip.
+        settings.get().retentionCapGb = 1;
+        long gib = 1024L * 1024 * 1024;
+        long unit = 4 * gib / 10;
+
+        // Parent row only, no VOD file: keeps the budget entirely in the clip phase.
+        long match = matches.insert(new NewMatch(
+                null, "match", "enriched", "puck",
+                1, 2, 3, 400, 500, 10000, 120,
+                "win", 7, 22, null, null, 1800,
+                1_000L, null, null, null, false, 1_000L, null));
+
+        long oldest = seedClip(match, "c-oldest.mp4", "c-oldest.jpg", unit, 100L, false);
+        long middle = seedClip(match, "c-middle.mp4", "c-middle.jpg", unit, 200L, false);
+        long older = seedClip(match, "c-older.mp4", "c-older.jpg", unit, 300L, false);
+        long newest = seedClip(match, "c-newest.mp4", "c-newest.jpg", unit, 400L, false);
+        // Starred and the OLDEST of all -> must still survive untouched.
+        long starred = seedClip(match, "c-starred.mp4", "c-starred.jpg", unit, 50L, true);
+
+        sweeper.sweep(null);
+
+        // The three oldest non-starred clips are evicted: files AND rows gone.
+        assertThat(Files.exists(videoDir.resolve("c-oldest.mp4"))).isFalse();
+        assertThat(Files.exists(videoDir.resolve("c-middle.mp4"))).isFalse();
+        assertThat(Files.exists(videoDir.resolve("c-older.mp4"))).isFalse();
+        assertThat(clips.findById(oldest)).isEmpty();
+        assertThat(clips.findById(middle)).isEmpty();
+        assertThat(clips.findById(older)).isEmpty();
+        // The newest non-starred clip survives: the budget went under cap before reaching it.
+        assertThat(Files.exists(videoDir.resolve("c-newest.mp4"))).isTrue();
+        assertThat(clips.findById(newest)).isPresent();
+        // The starred clip is kept even though it is the oldest of all.
+        assertThat(Files.exists(videoDir.resolve("c-starred.mp4"))).isTrue();
+        assertThat(clips.findById(starred)).isPresent();
+    }
+
+    @Test
     void sweepUsesFilesystemSizeWhenDatabaseSizeIsStale() throws Exception {
         settings.get().retentionCapGb = 1;
         long gib = 1024L * 1024 * 1024;
