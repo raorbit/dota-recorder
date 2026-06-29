@@ -174,13 +174,24 @@ public class MatchController {
         matches.delete(id);
     }
 
-    /** Best-effort unlink: ignores a null/blank/missing path; logs (never throws) on an I/O failure. */
-    private static void deleteFileQuietly(String path) {
+    /**
+     * Best-effort unlink: ignores a null/blank/missing path; logs (never throws) on an I/O failure.
+     * Mirrors the read-side containment guard — a path outside every configured storage root (a
+     * tampered DB row, a {@code ..} escape) is skipped, never unlinked, so a delete can't be coerced
+     * into removing an arbitrary file on disk.
+     */
+    private void deleteFileQuietly(String path) {
         if (path == null || path.isBlank()) {
             return;
         }
+        Path file = new File(path).toPath();
+        if (!VideoStreamSupport.isUnderAnyRoot(file, storageRoots())) {
+            log.warn("Skipping delete of {} while deleting a match: outside the configured storage roots",
+                    path);
+            return;
+        }
         try {
-            Files.deleteIfExists(new File(path).toPath());
+            Files.deleteIfExists(file);
         } catch (IOException e) {
             log.warn("Could not delete file {} while deleting a match: {}", path, e.toString());
         }

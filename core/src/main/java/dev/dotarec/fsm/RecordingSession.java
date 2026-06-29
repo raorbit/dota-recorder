@@ -8,10 +8,12 @@ import java.util.List;
 /**
  * Mutable holder for the in-flight recording, owned by the FSM while in RECORDING/STOPPING.
  *
- * <p>{@code recordConfirmedWallMs} is the local wall-clock instant OBS confirmed OUTPUT_STARTED;
- * it is the anchor every {@code markers.video_offset_s} is computed against (plan + see
- * {@code VideoOffsetCalculator}). {@code surrogateId} keys the in-progress recording before the
- * official Dota match_id is known/confirmed by enrichment.
+ * <p>{@code recordConfirmedWallMs} is the local wall-clock instant OBS confirmed OUTPUT_STARTED,
+ * kept for storage/display (the persisted {@code recordStartedWallMs}, journal rows, finalize
+ * duration). {@code recordConfirmedNanos} is the matching {@code System.nanoTime()} stamp and is the
+ * anchor every {@code markers.video_offset_s} is computed against -- a monotonic source so a clock
+ * step can't shift markers (plan + see {@code VideoOffsetCalculator}). {@code surrogateId} keys the
+ * in-progress recording before the official Dota match_id is known/confirmed by enrichment.
  *
  * <p>It also carries the live-tagging working set: the {@code lastFrame} the {@code EventTagger}
  * diffs against and the buffered {@link PendingMarker}s flushed to the DB in one batch at finalize.
@@ -22,6 +24,7 @@ public class RecordingSession {
 
     private String surrogateId;
     private long recordConfirmedWallMs;
+    private long recordConfirmedNanos;
     private long recordStartedWallMs;
     private String videoPath;
     private String scene;
@@ -72,6 +75,15 @@ public class RecordingSession {
 
     public void setRecordConfirmedWallMs(long recordConfirmedWallMs) {
         this.recordConfirmedWallMs = recordConfirmedWallMs;
+    }
+
+    /** The monotonic ({@code System.nanoTime()}) anchor every marker's video offset is measured from. */
+    public long getRecordConfirmedNanos() {
+        return recordConfirmedNanos;
+    }
+
+    public void setRecordConfirmedNanos(long recordConfirmedNanos) {
+        this.recordConfirmedNanos = recordConfirmedNanos;
     }
 
     public long getRecordStartedWallMs() {

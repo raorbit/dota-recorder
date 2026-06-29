@@ -110,6 +110,7 @@ export class SupervisionController {
       try {
         await this.deps.startCore();
         this.deps.log('[core] restarted; relaunching OBS');
+        this.coreRestartAttempts = 0; // a recovered core gets its restart budget back (over a long tray session)
         this.obsRestartAttempts = 0; // a fresh core epoch gets a fresh OBS restart budget
         void this.launchObs();
       } catch (err) {

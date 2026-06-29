@@ -20,7 +20,7 @@ class GsiPayloadTest {
         Path fixture = Path.of("src/test/resources/gsi/game_in_progress.json");
         String body = Files.readString(fixture);
         GsiPayload payload = MAPPER.readValue(body, GsiPayload.class);
-        return payload.toFrame(1_700_000_000_000L);
+        return payload.toFrame(1_700_000_000_000L, 5_000_000_000L);
     }
 
     @Test
@@ -48,8 +48,9 @@ class GsiPayloadTest {
         assertThat(frame.radiantScore()).isEqualTo(8);
         assertThat(frame.direScore()).isZero();
 
-        // wallClockMillis is the caller-supplied arrival stamp, not anything from the wire.
+        // wallClockMillis / monotonicNanos are caller-supplied arrival stamps, not from the wire.
         assertThat(frame.wallClockMillis()).isEqualTo(1_700_000_000_000L);
+        assertThat(frame.monotonicNanos()).isEqualTo(5_000_000_000L);
     }
 
     @Test
@@ -63,7 +64,7 @@ class GsiPayloadTest {
                 }
                 """;
         GsiPayload payload = MAPPER.readValue(body, GsiPayload.class);
-        GsiFrame frame = payload.toFrame(42L);
+        GsiFrame frame = payload.toFrame(42L, 99L);
 
         assertThat(frame.heroPresent()).isFalse();
         // Absent hero must NOT read as dead-but-present; alive is false because the block is gone.
@@ -79,11 +80,11 @@ class GsiPayloadTest {
     void absentGameState_mapsToUnknown_soFsmNoOps() throws Exception {
         // A frame with no game_state at all (e.g. INIT ping) must flatten to "UNKNOWN", never null.
         GsiPayload payload = MAPPER.readValue("{\"map\": {}}", GsiPayload.class);
-        assertThat(payload.toFrame(1L).gameState()).isEqualTo("UNKNOWN");
+        assertThat(payload.toFrame(1L, 1L).gameState()).isEqualTo("UNKNOWN");
 
         // An entirely empty body is also safe.
         GsiPayload empty = MAPPER.readValue("{}", GsiPayload.class);
-        assertThat(empty.toFrame(1L).gameState()).isEqualTo("UNKNOWN");
+        assertThat(empty.toFrame(1L, 1L).gameState()).isEqualTo("UNKNOWN");
     }
 
     @Test

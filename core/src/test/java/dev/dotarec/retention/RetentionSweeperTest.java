@@ -392,6 +392,38 @@ class RetentionSweeperTest {
     }
 
     @Test
+    void offlineClipBytesDoNotDriveEvictionOfReachableVods() throws Exception {
+        // The over-cap amount is held ENTIRELY by a clip on an UNPLUGGED drive (its directory does not
+        // exist; only a DB size snapshot remains). A reachable, non-starred VOD sits comfortably under
+        // cap on its own. The sweep must NOT delete that reachable VOD chasing budget that only the
+        // unreclaimable offline clip holds above cap — offline clip bytes must be excluded from total.
+        long gib = 1024L * 1024 * 1024;
+        settings.get().retentionCapGb = 1;
+
+        // Reachable active-drive VOD, 0.5 GiB: under the 1 GiB cap by itself.
+        long reachableVod = seedWithFiles("keep.mp4", "keep.jpg", gib / 2, 2_000L, false);
+
+        // Offline clip, 1 GiB recorded size, on a directory that does NOT exist (drive unplugged). No
+        // file created. Older than the VOD so it would be the first clip candidate if reached.
+        Path offlineClipFile =
+                videoDir.getParent().resolve("unplugged-archive").resolve("offline-clip.mp4");
+        long offlineClip = clips.insert(reachableVod, "manual", null, 0.0, 10.0, null,
+                offlineClipFile.toString(), null, gib, "ready", null, 100L);
+
+        RetentionSweeper.SweepResult result = sweeper.sweep(null);
+
+        // Nothing evicted: total counts only the reachable 0.5 GiB VOD, which is under the 1 GiB cap.
+        assertThat(result.deletedIds()).isEmpty();
+        assertThat(result.freedBytes()).isZero();
+        assertThat(Files.exists(videoDir.resolve("keep.mp4")))
+                .as("a reachable VOD must not be evicted for unreclaimable offline clip bytes")
+                .isTrue();
+        assertThat(matches.findById(reachableVod).orElseThrow().videoPath()).isNotNull();
+        // The offline clip row is untouched.
+        assertThat(clips.findById(offlineClip)).isPresent();
+    }
+
+    @Test
     void freeSpaceCheckNeverThrowsAndReturnsNullWhenHealthy() {
         // The temp video drive has plenty of space in CI; the check must not throw and (almost
         // always) reports healthy. We only assert it doesn't blow up and returns a String-or-null.

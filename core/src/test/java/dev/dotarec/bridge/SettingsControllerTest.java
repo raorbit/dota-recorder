@@ -225,6 +225,39 @@ class SettingsControllerTest {
     }
 
     @Test
+    void putSettings_rejectsAccountIdLargerThan32Bit() {
+        // A pasted 64-bit SteamID (76561198057093850) is not a Dota account id; Number() in the UI
+        // corrupts it to an imprecise float. Reject it server-side too rather than persist a wrong id
+        // the tagger keys the player's own events off of.
+        assertThatThrownBy(
+                        () ->
+                                controller.putSettings(
+                                        new SettingsPatch(
+                                                null, null, null, null, 76561198057093850L, null, null,
+                                                null, null, null, null, null, null)))
+                .isInstanceOfSatisfying(
+                        ResponseStatusException.class,
+                        e -> assertThat(e.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST));
+        // Nothing persisted: the account id stays unset.
+        assertThat(store.get().accountId).isNull();
+    }
+
+    @Test
+    void putSettings_rejectsNonPositiveAccountId() {
+        // 0 (and zero-padded inputs) slip past the UI guard but is not a real account id; reject it.
+        assertThatThrownBy(
+                        () ->
+                                controller.putSettings(
+                                        new SettingsPatch(
+                                                null, null, null, null, 0L, null, null, null, null,
+                                                null, null, null, null)))
+                .isInstanceOfSatisfying(
+                        ResponseStatusException.class,
+                        e -> assertThat(e.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST));
+        assertThat(store.get().accountId).isNull();
+    }
+
+    @Test
     void putSettings_nullAccountIdLeavesItUnchanged() {
         store.update(s -> { s.accountId = 96828122L; return s; });
 

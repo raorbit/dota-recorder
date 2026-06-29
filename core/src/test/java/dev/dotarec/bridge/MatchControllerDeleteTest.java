@@ -99,6 +99,24 @@ class MatchControllerDeleteTest {
         assertThat(repo.findById(ghostFile)).isEmpty();
     }
 
+    @Test
+    void delete_skipsFilesOutsideStorageRoots_butStillRemovesRow() throws Exception {
+        // A real, readable file OUTSIDE videoDir (a tampered DB row / .. escape): the delete must NOT
+        // unlink it — the containment guard skips it, matching the read-side guard — yet the row goes.
+        Path outside = Files.createTempFile("match-outside-", ".mp4");
+        Files.write(outside, new byte[] {1, 2, 3});
+        try {
+            long id = insert(outside.toString(), null);
+
+            controller.delete(id);
+
+            assertThat(repo.findById(id)).isEmpty();
+            assertThat(Files.exists(outside)).isTrue();
+        } finally {
+            Files.deleteIfExists(outside);
+        }
+    }
+
     // ── helpers ─────────────────────────────────────────────────────────────
 
     private Path writeFile(String name, byte[] data) throws Exception {

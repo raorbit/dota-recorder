@@ -165,10 +165,11 @@ public class ClipService {
         ClipRow clip = found.get();
         long parentMatchId = clip.parentMatchId();
 
-        // Atomically claim the row (pending -> generating). If we don't win, another dispatch already
-        // took it (the create dispatch racing the ClipQueue retry sweep) or it's already done/deleted —
-        // skip, so a completed clip is never re-cut and its output overwritten.
-        if (!clips.claimForGeneration(clipId)) {
+        // Atomically claim the row (pending -> generating), stamping the generation-start time so the
+        // ClipQueue stale-row self-heal anchors its cutoff on when this render began, not on insert time.
+        // If we don't win, another dispatch already took it (the create dispatch racing the ClipQueue
+        // retry sweep) or it's already done/deleted — skip, so a completed clip is never re-cut.
+        if (!clips.claimForGeneration(clipId, System.currentTimeMillis())) {
             log.debug("Clip {} not claimable (already generating/ready/failed or removed); skipping", clipId);
             return;
         }
@@ -274,7 +275,16 @@ public class ClipService {
     }
 
     private void failClip(long clipId, long parentMatchId, String error) {
-        clips.updateStatus(clipId, "failed", null, null, null, error);
+        // The status write itself can fail (e.g. a back-to-back SQLITE_BUSY under WAL contention). Swallow
+        // it here so the exception never escapes the @Async method — otherwise the row would stay stuck in
+        // 'generating' forever. ClipQueue.sweep re-pends such a wedged row past its stale cutoff.
+        try {
+            clips.updateStatus(clipId, "failed", null, null, null, error);
+        } catch (Exception e) {
+            log.warn("Failed to mark clip {} (match {}) failed; ClipQueue will re-pend it once stale: {}",
+                    clipId, parentMatchId, e.getMessage());
+            return;
+        }
         events.publish("clip.ready", ready(clipId, parentMatchId, "failed", null));
     }
 

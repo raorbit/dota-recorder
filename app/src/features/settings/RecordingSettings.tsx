@@ -486,10 +486,24 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
       return;
     }
 
+    // A Dota account id is a 32-bit number (<=10 digits). The field strips non-digits but
+    // doesn't bound length, so a long paste (e.g. a 17-digit SteamID64) coerces through
+    // Number() to an imprecise float and would persist a WRONG id — silently mis-tagging
+    // every death/kill. Reject anything that isn't a safe integer of sane length before we
+    // build the patch, instead of letting the corrupted value round-trip.
+    const trimmedAccount = accountId.trim();
+    if (trimmedAccount !== '') {
+      const parsedAccount = Number(trimmedAccount);
+      if (trimmedAccount.length > 10 || !Number.isSafeInteger(parsedAccount)) {
+        setError('Account ID looks invalid — enter your numeric Dota account ID, not a SteamID64.');
+        setSaveState('error');
+        return;
+      }
+    }
+
     setSaveState('saving');
     setError(null);
 
-    const trimmedAccount = accountId.trim();
     const patch: SettingsPatch = {
       resolution: resolution.trim(),
       videoDir: videoDir.trim(),

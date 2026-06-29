@@ -18,8 +18,10 @@ import org.springframework.web.bind.annotation.RestController;
  * <p>Dota POSTs JSON ~10x/sec. The handler does the minimum on the request thread to keep the GSI
  * feed snappy:
  * <ol>
- *   <li>Stamp {@code wallClockMillis} at entry -- this is the local arrival time the video-offset
- *       math anchors against, so it must be captured before any parsing latency.</li>
+ *   <li>Stamp {@code wallClockMillis} (storage/display) AND {@code monotonicNanos} at entry --
+ *       the latter is the local arrival time the video-offset math anchors against (a monotonic
+ *       source so a clock step can't shift markers), so both must be captured before any parsing
+ *       latency.</li>
  *   <li>{@link GsiHeartbeat#mark()} FIRST, so the UI status card reflects connectivity even for a
  *       heartbeat ping that carries no parseable game state.</li>
  *   <li>Parse the body into a {@link GsiPayload}, validate its {@code auth { token }} against the
@@ -59,6 +61,7 @@ public class GsiController {
     @PostMapping("/gsi")
     public ResponseEntity<Void> ingest(@RequestBody(required = false) String body) {
         long wallClockMillis = System.currentTimeMillis();
+        long monotonicNanos = System.nanoTime();
         heartbeat.mark();
         if (body == null || body.isBlank()) {
             return ResponseEntity.ok().build();
@@ -74,7 +77,7 @@ public class GsiController {
             // to the token-exempt /gsi endpoint can't suppress force-finalization during a real silence.
             heartbeat.markAuthorized();
             captureAccountId(payload);
-            GsiFrame frame = payload.toFrame(wallClockMillis);
+            GsiFrame frame = payload.toFrame(wallClockMillis, monotonicNanos);
             matchFsm.onFrame(frame);
         } catch (Exception e) {
             // Malformed/partial body, or an FSM hiccup: log and still ack. Dota discards the

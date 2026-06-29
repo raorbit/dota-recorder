@@ -27,7 +27,7 @@ import org.springframework.stereotype.Service;
  * </ul>
  *
  * <p>Each marker's {@code video_offset_s} comes from {@link VideoOffsetCalculator} anchored on the
- * OBS record-confirmed wall clock; {@code game_clock} is stored as a display label only. The FSM
+ * OBS record-confirmed monotonic stamp; {@code game_clock} is stored as a display label only. The FSM
  * buffers the returned {@link PendingMarker}s on the {@code RecordingSession} and persists them at
  * finalize. This class is stateless and pure so it is trivial to unit-test on synthetic frame pairs.
  */
@@ -38,15 +38,16 @@ public class EventTagger {
      * Diffs {@code prev} -&gt; {@code curr} for the own player and returns the markers detected on
      * this tick (possibly empty, never null).
      *
-     * @param prev                  the previous frame, or null for the first frame of a recording
-     *                              (no diff is possible, so no markers)
-     * @param curr                  the current frame
-     * @param recordConfirmedWallMs wall-clock millis OBS confirmed OUTPUT_STARTED (the offset anchor)
-     * @param durationS             upper clamp bound passed to {@link VideoOffsetCalculator}; live
-     *                              callers pass a generous bound, finalize re-clamps to real duration
+     * @param prev                   the previous frame, or null for the first frame of a recording
+     *                               (no diff is possible, so no markers)
+     * @param curr                   the current frame
+     * @param recordConfirmedNanos   {@code System.nanoTime()} stamp OBS confirmed OUTPUT_STARTED (the
+     *                               offset anchor; same monotonic clock as {@code curr.monotonicNanos()})
+     * @param durationS              upper clamp bound passed to {@link VideoOffsetCalculator}; live
+     *                               callers pass a generous bound, finalize re-clamps to real duration
      */
     public List<PendingMarker> diff(
-            GsiFrame prev, GsiFrame curr, long recordConfirmedWallMs, double durationS) {
+            GsiFrame prev, GsiFrame curr, long recordConfirmedNanos, double durationS) {
         List<PendingMarker> markers = new ArrayList<>();
         if (prev == null || curr == null) {
             return markers;
@@ -54,7 +55,7 @@ public class EventTagger {
 
         double offset =
                 VideoOffsetCalculator.offsetSeconds(
-                        curr.wallClockMillis(), recordConfirmedWallMs, durationS);
+                        curr.monotonicNanos(), recordConfirmedNanos, durationS);
         Integer gameClock = curr.gameClock();
 
         // Running-total counters: one marker per increment, each counter independent. Gated on the

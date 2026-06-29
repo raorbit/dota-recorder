@@ -14,6 +14,7 @@ import dev.dotarec.config.SettingsStore;
 import dev.dotarec.config.SettingsStore.AudioSource;
 import io.obswebsocket.community.client.OBSRemoteController;
 import io.obswebsocket.community.client.message.response.inputs.GetInputListResponse;
+import io.obswebsocket.community.client.message.response.record.GetRecordStatusResponse;
 import io.obswebsocket.community.client.message.response.record.StartRecordResponse;
 import io.obswebsocket.community.client.message.response.record.StopRecordResponse;
 import io.obswebsocket.community.client.message.response.scenes.GetCurrentProgramSceneResponse;
@@ -275,6 +276,78 @@ class ObsControllerTest {
     }
 
     @Test
+    void startRecording_holdsTheLockSoAReconnectCannotTearDownTheControllerMidSequence()
+            throws Exception {
+        // The concurrency fix: startRecording() is synchronized on the same monitor as connect(), so a
+        // scheduler reconnect tick cannot run disconnectQuietly() (which nulls/replaces the controller)
+        // while a start sequence is blocked in awaitRecordConfirmed. We prove mutual exclusion by
+        // parking startRecording mid-flight (inside the mocked startRecord, before OUTPUT_STARTED) and
+        // showing a concurrent connect() cannot enter until the start completes.
+        ObsHealth health = new ObsHealth();
+        ObsEvents events = new ObsEvents(health);
+
+        CountDownLatch startInFlight = new CountDownLatch(1); // start has entered startRecord
+        CountDownLatch releaseStart = new CountDownLatch(1); // let start confirm + return
+
+        SettingsStore settings = mock(SettingsStore.class);
+        when(settings.get()).thenReturn(new SettingsStore.Settings());
+
+        // connect() rebuilds via buildController; capture whether it ran (it must NOT until start ends).
+        java.util.concurrent.atomic.AtomicBoolean connectRebuilt =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
+        ObsController controller =
+                new ObsController(settings, health, events, sceneConfigurer()) {
+                    @Override
+                    OBSRemoteController buildController(SettingsStore.Settings s, CountDownLatch latch) {
+                        connectRebuilt.set(true);
+                        latch.countDown();
+                        return mock(OBSRemoteController.class);
+                    }
+                };
+
+        OBSRemoteController obs = mock(OBSRemoteController.class);
+        StartRecordResponse startOk = mock(StartRecordResponse.class);
+        when(startOk.isSuccessful()).thenReturn(true);
+        when(obs.startRecord(anyLong()))
+                .thenAnswer(
+                        inv -> {
+                            startInFlight.countDown();
+                            // Block here as if waiting on a slow OBS; we hold the controller's lock.
+                            releaseStart.await();
+                            // Now confirm OUTPUT_STARTED so awaitRecordConfirmed returns.
+                            events.onRecordStateChanged("OBS_WEBSOCKET_OUTPUT_STARTED", null);
+                            return startOk;
+                        });
+        ReflectionTestUtils.setField(controller, "controller", obs);
+        health.setConnected(true);
+
+        Thread starter = new Thread(controller::startRecording, "starter");
+        starter.start();
+        assertThat(startInFlight.await(2, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+
+        // A reconnect tick fires WHILE the start is parked. Because connect() needs the same monitor
+        // startRecording holds, this call must block; the rebuild must not happen yet.
+        Thread reconnector = new Thread(controller::connect, "reconnector");
+        reconnector.start();
+        // Give the reconnect thread a moment to (try to) acquire the lock.
+        Thread.sleep(100);
+        assertThat(connectRebuilt.get())
+                .as("connect() must not tear down/rebuild the controller while a start holds the lock")
+                .isFalse();
+
+        // Let the start finish; only now may the reconnect proceed.
+        releaseStart.countDown();
+        starter.join(2_000);
+        reconnector.join(2_000);
+
+        assertThat(starter.isAlive()).isFalse();
+        assertThat(reconnector.isAlive()).isFalse();
+        assertThat(connectRebuilt.get())
+                .as("connect() runs once the start releases the lock")
+                .isTrue();
+    }
+
+    @Test
     void ensureConnected_whenConnectFailsWithoutReadyEvent_failsFastAndSkipsProtocolCheck() {
         ObsHealth health = new ObsHealth();
         SettingsStore settings = mock(SettingsStore.class);
@@ -300,5 +373,50 @@ class ObsControllerTest {
         // Asserting getVersion is never called is the real fail-fast guard (a wall-clock timing bound
         // would only measure the mock, and flakes on a loaded CI box).
         verify(obs, never()).getVersion(anyLong());
+    }
+
+    @Test
+    void refreshRecordingActive_resyncsHealthFromLiveObsRecordState() {
+        // A websocket blip fired onConnectionLost(), optimistically clearing health.recording -- but OBS
+        // kept recording across the drop. On reconnect, refreshRecordingActive must re-sync the flag from
+        // OBS's live GetRecordStatus so the next match's corrective StopRecord fires instead of OBS
+        // rejecting StartRecord ("output already active").
+        ObsHealth health = new ObsHealth();
+        ObsController controller =
+                new ObsController(null, health, new ObsEvents(health), sceneConfigurer());
+        OBSRemoteController obs = mock(OBSRemoteController.class);
+        GetRecordStatusResponse status = mock(GetRecordStatusResponse.class);
+        when(status.isSuccessful()).thenReturn(true);
+        when(status.getOutputActive()).thenReturn(true);
+        when(obs.getRecordStatus(anyLong())).thenReturn(status);
+        ReflectionTestUtils.setField(controller, "controller", obs);
+
+        health.setRecording(false); // the optimistic clear from the disconnect
+
+        ReflectionTestUtils.invokeMethod(controller, "refreshRecordingActive");
+
+        assertThat(health.isRecording())
+                .as("a reconnect must re-sync recording=true from live OBS so the next corrective stop fires")
+                .isTrue();
+    }
+
+    @Test
+    void refreshRecordingActive_isBestEffort_leavesFlagUnchangedOnFailedStatus() {
+        // Best-effort: a null/failed GetRecordStatus (a wedged OBS at the connect's status probe) must
+        // not clobber the flag -- the corrective StopRecord guard remains the backstop.
+        ObsHealth health = new ObsHealth();
+        ObsController controller =
+                new ObsController(null, health, new ObsEvents(health), sceneConfigurer());
+        OBSRemoteController obs = mock(OBSRemoteController.class);
+        when(obs.getRecordStatus(anyLong())).thenReturn(null);
+        ReflectionTestUtils.setField(controller, "controller", obs);
+
+        health.setRecording(true);
+
+        ReflectionTestUtils.invokeMethod(controller, "refreshRecordingActive");
+
+        assertThat(health.isRecording())
+                .as("a failed status answer must leave health.recording as-is")
+                .isTrue();
     }
 }

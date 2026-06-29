@@ -4,10 +4,13 @@ package dev.dotarec.gsi;
  * Normalized, FSM-facing view of a single GSI sample.
  *
  * <p>This is the flattened shape the FSM and tagger consume, decoupled from the raw
- * {@link GsiPayload} wire DTO. {@code wallClockMillis} is the local arrival time used to anchor
- * video offsets (plan: {@code markers.video_offset_s} "maps a game event to a frame in the
- * recorded .mp4"); {@code gameClock} is kept for display/enrichment only and is never used for
- * offset math (see {@code VideoOffsetCalculator}).
+ * {@link GsiPayload} wire DTO. {@code wallClockMillis} is the local arrival time kept for
+ * storage/display (journal rows, pause spans). {@code monotonicNanos} is the arrival stamp from
+ * {@code System.nanoTime()} used for the video-offset delta (plan: {@code markers.video_offset_s}
+ * "maps a game event to a frame in the recorded .mp4") -- a monotonic source so an OS/NTP clock
+ * step between the record-confirmed anchor and a frame cannot shift markers. {@code gameClock} is
+ * kept for display/enrichment only and is never used for offset math (see
+ * {@code VideoOffsetCalculator}).
  *
  * <p>Null-safety contract (built from the real fixture + heartbeat samples):
  * <ul>
@@ -26,6 +29,7 @@ package dev.dotarec.gsi;
  */
 public record GsiFrame(
         long wallClockMillis,
+        long monotonicNanos,
         String gameState,
         int gameClock,
         boolean paused,

@@ -46,15 +46,21 @@ describe('SupervisionController — core crash', () => {
   });
 
   it('stops after the bounded restart budget and notifies the user', async () => {
-    const deps = makeDeps();
+    // A core that never recovers (startCore keeps failing) must exhaust the budget. A successful restart
+    // would reset the counter, so budget exhaustion is specifically the crash-loop-without-recovery case.
+    const deps = makeDeps({
+      startCore: vi.fn(async () => {
+        throw new Error('health timeout');
+      }),
+    });
     const controller = new SupervisionController(deps, 2);
 
-    await controller.handleCoreCrash(exit); // attempt 1
-    await controller.handleCoreCrash(exit); // attempt 2
-    await controller.handleCoreCrash(exit); // budget exhausted
+    await controller.handleCoreCrash(exit); // attempt 1 (restart fails -> notifyDown)
+    await controller.handleCoreCrash(exit); // attempt 2 (restart fails -> notifyDown)
+    await controller.handleCoreCrash(exit); // budget exhausted -> notifyDown
 
     expect(deps.startCore).toHaveBeenCalledTimes(2);
-    expect(deps.notifyDown).toHaveBeenCalledTimes(1);
+    expect(deps.notifyDown).toHaveBeenCalledTimes(3);
   });
 
   it('does not run a second startCore when a crash lands during an in-flight restart', async () => {
@@ -179,6 +185,27 @@ describe('SupervisionController — OBS crash & launch', () => {
     expect(deps.startObs).not.toHaveBeenCalled();
   });
 
+  it('resets the core restart budget after a successful restart, so a later crash still restarts', async () => {
+    // Over a long-lived tray session each restart that recovers should hand the budget back; otherwise
+    // the core stops being restarted after maxRestarts LIFETIME crashes even though every prior one recovered.
+    const deps = makeDeps();
+    const controller = new SupervisionController(deps, 2);
+
+    // Two successful restarts (each resolves startCore) — without the reset these would exhaust the budget.
+    await controller.handleCoreCrash(exit);
+    await flush();
+    await controller.handleCoreCrash(exit);
+    await flush();
+    expect(deps.startCore).toHaveBeenCalledTimes(2);
+    expect(deps.notifyDown).not.toHaveBeenCalled();
+
+    // A third, much-later crash must STILL restart (budget was reset by the prior recoveries).
+    await controller.handleCoreCrash(exit);
+    await flush();
+    expect(deps.startCore).toHaveBeenCalledTimes(3);
+    expect(deps.notifyDown).not.toHaveBeenCalled();
+  });
+
   it('gives a freshly-restarted core a fresh OBS restart budget', async () => {
     const deps = makeDeps();
     const controller = new SupervisionController(deps, 2);
@@ -230,14 +257,19 @@ describe('SupervisionController — OBS crash & launch', () => {
   it('honors a custom maxRestarts on both the core and OBS budgets', async () => {
     // Every other test passes 2 (== the default), so the constructor param flowing into the budget
     // checks is otherwise indistinguishable from the hardcoded default. maxRestarts=1 proves it.
-    const coreDeps = makeDeps();
+    // A failing startCore keeps the budget from resetting, so maxRestarts=1 exhausts after one attempt.
+    const coreDeps = makeDeps({
+      startCore: vi.fn(async () => {
+        throw new Error('health timeout');
+      }),
+    });
     const coreController = new SupervisionController(coreDeps, 1);
 
-    await coreController.handleCoreCrash(exit); // attempt 1
+    await coreController.handleCoreCrash(exit); // attempt 1 (restart fails)
     await coreController.handleCoreCrash(exit); // budget exhausted
 
     expect(coreDeps.startCore).toHaveBeenCalledTimes(1);
-    expect(coreDeps.notifyDown).toHaveBeenCalledTimes(1);
+    expect(coreDeps.notifyDown).toHaveBeenCalledTimes(2);
 
     const obsDeps = makeDeps();
     const obsController = new SupervisionController(obsDeps, 1);

@@ -119,6 +119,9 @@ class MatchFsmTest {
     private MatchFsm fsm;
     private Path tempDir;
 
+    /** Pinned monotonic anchor the FSM stamps the record-confirmed offset base with (see setUp). */
+    private static final long ANCHOR_NANOS = 5_000_000_000_000L;
+
     @BeforeEach
     void setUp(@TempDir Path dir) throws Exception {
         tempDir = dir;
@@ -135,8 +138,11 @@ class MatchFsmTest {
         // these tests stay focused on the record/tag/persist path.
         settings = mock(SettingsStore.class);
         when(settings.get()).thenReturn(new SettingsStore.Settings());
+        // Pin the monotonic anchor so marker-offset assertions are deterministic: the FSM stamps the
+        // record-confirmed offset base from this clock and synthetic frames carry .mono() stamps
+        // relative to ANCHOR_NANOS (the wall path is exercised separately via FakeObs.confirmedAt).
         fsm = new MatchFsm(obs, thumbs, new EventTagger(), matches, markers, pauses, journal, events,
-                ds, clipService, settings);
+                ds, clipService, settings, () -> ANCHOR_NANOS);
     }
 
     @Test
@@ -387,10 +393,12 @@ class MatchFsmTest {
         long confirmedMs = System.currentTimeMillis() - 10_000L;
         obs.nextConfirmedAt = Instant.ofEpochMilli(confirmedMs);
 
-        // Deliberately make the first GSI frame much earlier than OBS's confirmed start. If the FSM
-        // regresses to the frame wall as its anchor, the marker offset below would be 23.5s instead
-        // of the correct 3.5s.
+        // The marker offset is the MONOTONIC delta from the record-confirmed anchor (ANCHOR_NANOS,
+        // pinned in setUp). The kill frame's mono stamp sits a clean 3.5s after the anchor, while its
+        // wall stamp is deliberately a wildly different value -- if the offset regressed to wall-clock
+        // it would read 13.5s, not 3.5s.
         fsm.onFrame(frame().wall(confirmedMs - 20_000L)
+                .mono(ANCHOR_NANOS)
                 .state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")
                 .activity("playing")
                 .hero("npc_dota_hero_rubick")
@@ -399,7 +407,8 @@ class MatchFsmTest {
                 .assists(0)
                 .build());
 
-        fsm.onFrame(frame().wall(confirmedMs + 3_500L)
+        fsm.onFrame(frame().wall(confirmedMs + 10_000L)
+                .mono(ANCHOR_NANOS + 3_500_000_000L)
                 .state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")
                 .activity("playing")
                 .hero("npc_dota_hero_rubick")
@@ -408,11 +417,13 @@ class MatchFsmTest {
                 .assists(0)
                 .build());
         fsm.onFrame(frame().wall(confirmedMs + 8_000L)
+                .mono(ANCHOR_NANOS + 8_000_000_000L)
                 .state("DOTA_GAMERULES_STATE_POST_GAME")
                 .noHero()
                 .build());
 
         MatchSummary row = matches.findAll().get(0);
+        // The persisted record-started wall anchor is still OBS's confirmed wall instant (storage).
         assertThat(row.recordStartedWallMs()).isEqualTo(confirmedMs);
         assertThat(markers.findByMatchId(row.id()))
                 .singleElement()

@@ -29,6 +29,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.LongSupplier;
 import javax.sql.DataSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -89,6 +90,10 @@ public class MatchFsm {
     private final ClipService clipService;
     private final SettingsStore settings;
 
+    /** Monotonic clock for the record-confirmed anchor; {@code System::nanoTime} in production,
+     * overridable so a test can pin the anchor to the same stamps its synthetic frames carry. */
+    private final LongSupplier nanoClock;
+
     private volatile MatchState state = MatchState.IDLE;
     private RecordingSession session;
 
@@ -104,6 +109,24 @@ public class MatchFsm {
             DataSource dataSource,
             ClipService clipService,
             SettingsStore settings) {
+        this(obs, thumbnails, tagger, matches, markers, pauses, journal, events, dataSource,
+                clipService, settings, System::nanoTime);
+    }
+
+    // Test seam: injects the monotonic clock used for the record-confirmed offset anchor.
+    MatchFsm(
+            ObsRecorder obs,
+            ThumbnailCapturer thumbnails,
+            EventTagger tagger,
+            MatchRepository matches,
+            MarkerRepository markers,
+            PauseRepository pauses,
+            RecordingSessionRepository journal,
+            EventPublisher events,
+            DataSource dataSource,
+            ClipService clipService,
+            SettingsStore settings,
+            LongSupplier nanoClock) {
         this.obs = obs;
         this.thumbnails = thumbnails;
         this.tagger = tagger;
@@ -115,6 +138,7 @@ public class MatchFsm {
         this.dataSource = dataSource;
         this.clipService = clipService;
         this.settings = settings;
+        this.nanoClock = nanoClock;
     }
 
     public MatchState getState() {
@@ -221,10 +245,15 @@ public class MatchFsm {
                             + " staying IDLE, will retry on next frame");
             return;
         }
+        long confirmedNanos;
         try {
             // startRecording() blocks until OBS confirms OUTPUT_STARTED (or throws on timeout/reject),
             // so reaching the next line means a real recording is rolling.
             obs.startRecording();
+            // Monotonic anchor stamped the instant OUTPUT_STARTED is confirmed -- the same clock the
+            // GsiController stamps each frame's monotonicNanos with, so the per-marker delta is
+            // immune to an OS/NTP wall-clock step (the wall anchor below is for storage/display only).
+            confirmedNanos = nanoClock.getAsLong();
         } catch (ObsException e) {
             log.warn("Recording not confirmed by OBS: {}; staying IDLE", e.getMessage());
             return;
@@ -238,6 +267,7 @@ public class MatchFsm {
         Instant confirmed = obs.recordConfirmedAt();
         long anchor = confirmed != null ? confirmed.toEpochMilli() : frame.wallClockMillis();
         s.setRecordConfirmedWallMs(anchor);
+        s.setRecordConfirmedNanos(confirmedNanos);
         s.setRecordStartedWallMs(anchor);
         s.observe(frame);
         s.setLastFrame(frame);
@@ -269,7 +299,7 @@ public class MatchFsm {
         }
         GsiFrame last = s.getLastFrame();
         List<PendingMarker> detected =
-                tagger.diff(last, frame, s.getRecordConfirmedWallMs(), LIVE_DURATION_CLAMP);
+                tagger.diff(last, frame, s.getRecordConfirmedNanos(), LIVE_DURATION_CLAMP);
         if (!detected.isEmpty()) {
             s.addMarkers(detected);
             for (PendingMarker marker : detected) {

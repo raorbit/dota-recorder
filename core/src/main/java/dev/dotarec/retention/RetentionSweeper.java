@@ -186,7 +186,10 @@ public class RetentionSweeper {
                     break;
                 }
                 if (!driveReachable(clip.videoPath())) {
-                    continue; // file on an offline drive: can't delete, but its bytes still count toward the budget (via clips.sumFileSizeBytes())
+                    // File on an offline drive: can't delete it. Its bytes are also excluded from the
+                    // budget (reachableClipBytes), so an offline clip can neither drive eviction nor be
+                    // skipped-without-subtraction — symmetric with the offline-VOD handling above.
+                    continue;
                 }
                 long clipSize = clipSizeBytes(clip);
                 boolean clipGone = deleteFileQuietly(clip.videoPath());
@@ -345,9 +348,31 @@ public class RetentionSweeper {
             total += videoSizeBytes(m);
         }
         // Clips are first-class stored bytes too: their rendered .mp4s count against the same cap as
-        // VODs. Use the DB-recorded sizes (cheap, no per-file stat) — a clip on an unplugged drive is a
-        // rare edge whose recorded bytes still over-count toward eviction, which is the safe direction.
-        total += clips.sumFileSizeBytes();
+        // VODs. Only REACHABLE clips count: a clip on an unplugged drive can't be evicted (the clip
+        // phase skips it), so counting its bytes would inflate the over-cap amount with unreclaimable
+        // budget and force eviction of reachable VODs chasing a target only offline bytes hold. Symmetric
+        // with the offline-VOD exclusion above and the 0-headroom an unreachable archive contributes.
+        total += reachableClipBytes();
+        return total;
+    }
+
+    /**
+     * Sum of DB-recorded clip sizes whose drive is currently reachable. Uses the recorded sizes (cheap,
+     * no per-file stat) but filters by {@link #driveReachable}, so a clip on an unplugged drive — which
+     * the clip-eviction phase can't reclaim — never inflates the eviction budget. Mirrors how
+     * {@link #totalStoredVideoBytes()} excludes offline VODs.
+     */
+    private long reachableClipBytes() {
+        long total = 0L;
+        for (ClipRow clip : clips.findAll()) {
+            if (clip.videoPath() == null || clip.videoPath().isBlank()) {
+                continue;
+            }
+            if (!driveReachable(clip.videoPath())) {
+                continue;
+            }
+            total += clip.fileSizeBytes() != null ? clip.fileSizeBytes() : 0L;
+        }
         return total;
     }
 
