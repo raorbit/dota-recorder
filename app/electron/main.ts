@@ -4,13 +4,14 @@
 // TODO(plan Step 1+): surface a loud, actionable error window when the core fails
 // to start or crashes mid-session ("core stopped - recordings paused") instead of
 // the bare dialog used here.
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Tray } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell, Tray } from 'electron';
 import { randomBytes } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { JvmSupervisor } from './jvm-supervisor';
 import { ObsSupervisor } from './obs-supervisor';
 import { SupervisionController } from './supervision';
+import { revealablePath } from './reveal-path-guard';
 import {
   applyLaunchAtLogin,
   getLaunchAtLogin,
@@ -130,6 +131,17 @@ function registerPrefsIpc(): void {
   ipcMain.handle('prefs:setLaunchAtLogin', (_event, value: unknown) =>
     setLaunchAtLogin(value === true),
   );
+  // Reveal a recording in Explorer (right-click "Reveal in folder"): selects the file in its folder.
+  // shell.showItemInFolder only opens the OS file manager — it never reads, writes, or executes the
+  // target — but the path is renderer-supplied (ultimately a DB video_path), so revealablePath()
+  // gates it (non-blank, absolute, no `..`) rather than trusting it blindly. See reveal-path-guard.ts.
+  ipcMain.removeHandler('shell:revealPath');
+  ipcMain.handle('shell:revealPath', (_event, p: unknown) => {
+    const target = revealablePath(p);
+    // Also require the file to still exist: a retention-swept row can keep its path in the UI until
+    // the next reload, and revealing a missing file just opens an empty folder — so no-op instead.
+    if (target !== null && fs.existsSync(target)) shell.showItemInFolder(target);
+  });
 }
 
 /**

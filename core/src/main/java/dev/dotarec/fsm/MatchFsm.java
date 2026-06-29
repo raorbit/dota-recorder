@@ -33,6 +33,7 @@ import java.util.function.LongSupplier;
 import javax.sql.DataSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 /**
@@ -97,6 +98,15 @@ public class MatchFsm {
     private volatile MatchState state = MatchState.IDLE;
     private RecordingSession session;
 
+    // MatchFsm declares two constructors (this production one + the package-private test seam below),
+    // so Spring can't auto-select one — @Autowired marks the production ctor. Without it the real app
+    // fails to boot ("No default constructor found": Spring falls back to a missing no-arg ctor). The
+    // catch: this only bites with @EnableScheduling active (the production default). The
+    // DotaRecorderApplicationTests smoke test boots with scheduling DISABLED, which masks it — the
+    // context loads fine there WITHOUT this annotation — so green CI does NOT guard this (verified live,
+    // and by flipping app.scheduling.enabled=true in that test). Same two-ctor + @Autowired pattern as
+    // RetentionSweeper / RecordingArchiver / OpenDotaClient.
+    @Autowired
     public MatchFsm(
             ObsRecorder obs,
             ThumbnailCapturer thumbnails,

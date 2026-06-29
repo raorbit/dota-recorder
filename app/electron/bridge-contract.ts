@@ -18,4 +18,8 @@ export interface DotaRecBridge {
   // process applied (so the UI stays in sync with the OS).
   readonly getLaunchAtLogin: () => Promise<boolean>;
   readonly setLaunchAtLogin: (value: boolean) => Promise<boolean>;
+  // Reveals a file in the OS file manager (Explorer), selecting it. Backs the recording
+  // right-click "Reveal in folder" action. A blank/missing path is a no-op. The renderer
+  // is sandboxed and has no shell access, so this round-trips to the main process.
+  readonly revealPath: (path: string) => Promise<void>;
 }
