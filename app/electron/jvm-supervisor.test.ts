@@ -16,7 +16,6 @@ vi.mock('./job-object', () => ({ assign: vi.fn() }));
 vi.mock('./paths', () => ({
   BRIDGE_TOKEN_ENV: 'DOTAREC_BRIDGE_TOKEN',
   BRIDGE_TOKEN_HEADER: 'X-Dotarec-Token',
-  FFMPEG_PATH_ENV: 'DOTAREC_FFMPEG_PATH',
   HEALTH_URL: 'http://127.0.0.1:3224/health',
   bundledJavawPath: () => null,
   ffmpegPath: ffmpegPathMock,
