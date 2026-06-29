@@ -210,19 +210,6 @@ public class ClipRepository {
         }
     }
 
-    /** Total bytes of all clips with a known file size — feeds retention disk accounting. */
-    public long sumFileSizeBytes() {
-        String sql = "SELECT COALESCE(SUM(file_size_bytes), 0) FROM clips "
-                + "WHERE file_size_bytes IS NOT NULL AND video_path IS NOT NULL";
-        try (Connection conn = dataSource.getConnection();
-             PreparedStatement ps = conn.prepareStatement(sql);
-             ResultSet rs = ps.executeQuery()) {
-            return rs.next() ? rs.getLong(1) : 0L;
-        } catch (SQLException e) {
-            throw new IllegalStateException("Failed to sum clip file sizes", e);
-        }
-    }
-
     /**
      * Flips a clip's lifecycle status and (null-safely) the generator outputs. Used by the clip
      * generator to move a row through {@code generating} → {@code ready}/{@code failed}; pass null
