@@ -12,6 +12,7 @@ import {
   loadVisibleByBucket,
   pathDirname,
   sanitizeKeys,
+  sortMatches,
   storageInfoOf,
   type ColumnMeta,
 } from './match-columns';
@@ -63,8 +64,12 @@ describe('pathDirname', () => {
   it('returns the immediate parent folder for a deeper path', () => {
     expect(pathDirname('D:\\dota-archive\\2026\\m.mp4')).toBe('D:\\dota-archive\\2026');
   });
-  it('strips a trailing separator first (defensive; real inputs are file paths)', () => {
-    expect(pathDirname('D:\\dota-archive\\')).toBe('D:');
+  it('keeps the root separator for a file directly under a drive root', () => {
+    expect(pathDirname('C:\\m.mp4')).toBe('C:\\');
+    expect(pathDirname('/m.mp4')).toBe('/');
+  });
+  it('strips a trailing separator first, then keeps the root (defensive; real inputs are files)', () => {
+    expect(pathDirname('D:\\dota-archive\\')).toBe('D:\\');
   });
   it('returns the whole string when there is no separator', () => {
     expect(pathDirname('m.mp4')).toBe('m.mp4');
@@ -167,6 +172,32 @@ describe('compareMatches', () => {
     expect(ascIds).toEqual([3, 1, 2]); // 100, 300, then null last
     const descIds = [...rows].sort((a, b) => compareMatches(a, b, gpmCol, 'desc')).map((m) => m.id);
     expect(descIds).toEqual([1, 3, 2]); // 300, 100, then null last
+  });
+});
+
+describe('sortMatches', () => {
+  const dateCol = COLUMN_META_BY_KEY.get('date') as ColumnMeta;
+
+  it('matches compareMatches ordering while deriving each key once', () => {
+    const rows = [mk({ id: 1, gpm: 300 }), mk({ id: 2, gpm: null }), mk({ id: 3, gpm: 100 })];
+    expect(sortMatches(rows, gpmCol, 'asc').map((m) => m.id)).toEqual([3, 1, 2]);
+    expect(sortMatches(rows, gpmCol, 'desc').map((m) => m.id)).toEqual([1, 3, 2]);
+  });
+
+  it('does not mutate the input array', () => {
+    const rows = [mk({ id: 1, gpm: 100 }), mk({ id: 2, gpm: 200 })];
+    sortMatches(rows, gpmCol, 'desc');
+    expect(rows.map((m) => m.id)).toEqual([1, 2]);
+  });
+
+  it('default date sort keeps an un-enriched (playedAt=null) recording on top via createdAt', () => {
+    // The C1 regression guard: a freshly recorded row (not yet enriched, playedAt null) must NOT
+    // sink below older enriched rows under the default date-desc sort — it falls back to createdAt.
+    const olderEnriched = mk({ id: 1, playedAt: 1000, createdAt: 1000 });
+    const freshUnenriched = mk({ id: 2, playedAt: null, createdAt: 5000 });
+    expect(sortMatches([olderEnriched, freshUnenriched], dateCol, 'desc').map((m) => m.id)).toEqual([
+      2, 1,
+    ]);
   });
 });
 

@@ -48,7 +48,11 @@ export function formatDuration(seconds: number | null): string {
 export function pathDirname(p: string): string {
   const trimmed = p.replace(/[\\/]+$/, '');
   const idx = Math.max(trimmed.lastIndexOf('\\'), trimmed.lastIndexOf('/'));
-  return idx >= 0 ? trimmed.slice(0, idx) : trimmed;
+  if (idx < 0) return trimmed;
+  const dir = trimmed.slice(0, idx);
+  // Keep the root separator for a file directly under a drive root (C:\) or filesystem root (\, /),
+  // so the folder reads as a real path rather than "C:" or "".
+  return dir === '' || dir.endsWith(':') ? dir + trimmed[idx] : dir;
 }
 
 export interface StorageInfo {
@@ -106,6 +110,9 @@ export interface ColumnMeta {
   // Whether the column is in the base default set (consulted only for non-fixed columns — fixed
   // columns like HERO are always rendered, so this is ignored for them and omitted there).
   readonly defaultVisible?: boolean;
+  // Buckets where this column is default-on IN ADDITION to the base set (e.g. MMR only matters for
+  // ranked play). Keeps per-tab default logic as data rather than a bucket-name branch.
+  readonly defaultBuckets?: readonly string[];
   // Clicking a fresh column starts descending for numeric/date columns (largest/newest first),
   // ascending for text columns.
   readonly descFirst?: boolean;
@@ -135,9 +142,10 @@ export const COLUMN_META: readonly ColumnMeta[] = [
     headerLabel: 'MMR',
     menuLabel: 'MMR',
     width: '0.7fr',
-    // Ranked-only stat: excluded from the base default set and added back only for the Ranked tab
-    // (see defaultVisibleKeysFor). Still toggleable on any tab.
+    // Ranked-only stat: not in the base default set, default-on only for the Ranked tab. Still
+    // toggleable on any tab.
     defaultVisible: false,
+    defaultBuckets: ['ranked'],
     descFirst: true,
     sortValue: (m) => m.mmrDelta,
   },
@@ -152,7 +160,11 @@ export const COLUMN_META: readonly ColumnMeta[] = [
       return info.removed ? null : info.label.toLowerCase();
     },
   },
-  { key: 'date', headerLabel: 'DATE', menuLabel: 'Date', width: '1fr', defaultVisible: true, descFirst: true, sortValue: (m) => m.playedAt },
+  // DATE sorts by playedAt but falls back to createdAt when a row isn't enriched yet (playedAt
+  // null), mirroring the core list order (ORDER BY COALESCE(played_at, created_at) DESC). Without the
+  // fallback a freshly-recorded row would sink to the bottom of the default date-desc view instead of
+  // appearing on top. (Display still uses formatPlayedAt(playedAt), so an un-enriched row shows "—".)
+  { key: 'date', headerLabel: 'DATE', menuLabel: 'Date', width: '1fr', defaultVisible: true, descFirst: true, sortValue: (m) => m.playedAt ?? m.createdAt },
 ];
 
 export const COLUMN_META_BY_KEY = new Map<ColumnKey, ColumnMeta>(COLUMN_META.map((c) => [c.key, c]));
@@ -164,17 +176,19 @@ export const DEFAULT_SORT: SortState = { key: 'date', dir: 'desc' };
 export const COLS_PREF_KEY = 'dotarec.matchTable.columnsByBucket';
 export const SORT_PREF_KEY = 'dotarec.matchTable.sortByBucket';
 
-// The base toggleable columns shown by default (HERO is fixed and not stored). MMR is excluded from
-// the base set — it's only meaningful for ranked play — so only the Ranked tab gets it by default
-// (see defaultVisibleKeysFor).
+// The base toggleable columns shown by default on every tab (HERO is fixed and not stored).
 export const BASE_DEFAULT_KEYS: ColumnKey[] = COLUMN_META.filter(
   (c) => c.defaultVisible && c.fixed !== true,
 ).map((c) => c.key);
 
-// The default visible columns for a given tab/bucket. Every tab starts from the base set; the Ranked
-// tab additionally shows MMR. Other tabs omit it by default (still toggleable per tab).
+// The default visible columns for a given tab/bucket: the base set plus any column that opts into
+// this bucket via its `defaultBuckets` (e.g. MMR on 'ranked'). All per-tab default rules live in the
+// column metadata, not here.
 export function defaultVisibleKeysFor(bucket: string): ColumnKey[] {
-  return bucket === 'ranked' ? [...BASE_DEFAULT_KEYS, 'mmr'] : [...BASE_DEFAULT_KEYS];
+  const extra = COLUMN_META.filter(
+    (c) => c.fixed !== true && !c.defaultVisible && c.defaultBuckets?.includes(bucket),
+  ).map((c) => c.key);
+  return [...BASE_DEFAULT_KEYS, ...extra];
 }
 
 // Keep only known, non-fixed column keys so a renamed/removed column in a stale pref can't break
@@ -187,18 +201,19 @@ export function sanitizeKeys(value: unknown): ColumnKey[] | null {
   );
 }
 
-// Load the per-bucket visible-column map (bucket -> column keys). A missing entry falls back to that
-// bucket's default at read time, so only customized tabs are stored.
-export function loadVisibleByBucket(): Record<string, ColumnKey[]> {
+// Shared parse for the per-bucket pref maps: read the key, JSON-parse, require a plain object (not an
+// array), and keep each entry whose value `parseEntry` accepts (returns non-null). Any failure
+// (missing/corrupt/non-object) yields {} so per-bucket defaults apply.
+function loadBucketMap<T>(key: string, parseEntry: (value: unknown) => T | null): Record<string, T> {
   try {
-    const raw = localStorage.getItem(COLS_PREF_KEY);
+    const raw = localStorage.getItem(key);
     if (raw !== null) {
       const parsed = JSON.parse(raw) as unknown;
       if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        const out: Record<string, ColumnKey[]> = {};
-        for (const [bucket, keys] of Object.entries(parsed as Record<string, unknown>)) {
-          const clean = sanitizeKeys(keys);
-          if (clean !== null) out[bucket] = clean;
+        const out: Record<string, T> = {};
+        for (const [bucket, value] of Object.entries(parsed as Record<string, unknown>)) {
+          const entry = parseEntry(value);
+          if (entry !== null) out[bucket] = entry;
         }
         return out;
       }
@@ -209,42 +224,34 @@ export function loadVisibleByBucket(): Record<string, ColumnKey[]> {
   return {};
 }
 
-// Load the per-bucket sort map (bucket -> sort state). Invalid entries are dropped.
-export function loadSortByBucket(): Record<string, SortState> {
-  try {
-    const raw = localStorage.getItem(SORT_PREF_KEY);
-    if (raw !== null) {
-      const parsed = JSON.parse(raw) as unknown;
-      if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        const out: Record<string, SortState> = {};
-        for (const [bucket, s] of Object.entries(parsed as Record<string, unknown>)) {
-          const sv = s as { key?: unknown; dir?: unknown };
-          if (COLUMN_META_BY_KEY.has(sv.key as ColumnKey) && (sv.dir === 'asc' || sv.dir === 'desc')) {
-            out[bucket] = { key: sv.key as ColumnKey, dir: sv.dir };
-          }
-        }
-        return out;
-      }
-    }
-  } catch {
-    /* unreadable/corrupt pref — start empty (default sort applies per bucket) */
-  }
-  return {};
+// Per-bucket visible-column map (bucket -> column keys). A missing entry falls back to that bucket's
+// default at read time, so only customized tabs are stored.
+export function loadVisibleByBucket(): Record<string, ColumnKey[]> {
+  return loadBucketMap(COLS_PREF_KEY, sanitizeKeys);
 }
 
-// Compare two matches by a column's sort value for the given direction. Null/blank values always
-// sort last (in both directions); ties fall back to newest-id-first for stability.
-export function compareMatches(
-  a: MatchSummary,
-  b: MatchSummary,
-  col: ColumnMeta,
+// Per-bucket sort map (bucket -> sort state). Invalid entries are dropped.
+export function loadSortByBucket(): Record<string, SortState> {
+  return loadBucketMap(SORT_PREF_KEY, (value) => {
+    const sv = value as { key?: unknown; dir?: unknown };
+    return COLUMN_META_BY_KEY.has(sv.key as ColumnKey) && (sv.dir === 'asc' || sv.dir === 'desc')
+      ? { key: sv.key as ColumnKey, dir: sv.dir }
+      : null;
+  });
+}
+
+// Core 3-way compare over already-extracted sort values. Null/blank sorts last in BOTH directions;
+// ties fall back to newest-id-first (stable, direction-independent).
+function compareValues(
+  va: string | number | null,
+  vb: string | number | null,
   dir: SortDir,
+  aId: number,
+  bId: number,
 ): number {
-  const va = col.sortValue(a);
-  const vb = col.sortValue(b);
   const aEmpty = va === null || va === undefined || va === '';
   const bEmpty = vb === null || vb === undefined || vb === '';
-  if (aEmpty && bEmpty) return b.id - a.id;
+  if (aEmpty && bEmpty) return bId - aId;
   if (aEmpty) return 1;
   if (bEmpty) return -1;
   let cmp: number;
@@ -254,5 +261,29 @@ export function compareMatches(
     cmp = String(va).localeCompare(String(vb));
   }
   if (cmp !== 0) return dir === 'asc' ? cmp : -cmp;
-  return b.id - a.id; // stable tiebreak, independent of direction
+  return bId - aId; // stable tiebreak, independent of direction
+}
+
+// Compare two matches by a column's sort value. Re-derives the value per call — fine for spot
+// comparisons; for bulk sorting use sortMatches (derives each key once).
+export function compareMatches(
+  a: MatchSummary,
+  b: MatchSummary,
+  col: ColumnMeta,
+  dir: SortDir,
+): number {
+  return compareValues(col.sortValue(a), col.sortValue(b), dir, a.id, b.id);
+}
+
+// Sort matches by a column, deriving each row's sort key exactly once (decorate-sort-undecorate)
+// rather than recomputing it on every O(N log N) comparison. Does not mutate the input array.
+export function sortMatches(
+  rows: readonly MatchSummary[],
+  col: ColumnMeta,
+  dir: SortDir,
+): MatchSummary[] {
+  return rows
+    .map((m) => ({ m, key: col.sortValue(m) }))
+    .sort((x, y) => compareValues(x.key, y.key, dir, x.m.id, y.m.id))
+    .map((d) => d.m);
 }

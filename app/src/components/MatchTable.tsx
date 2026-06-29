@@ -9,11 +9,12 @@ import {
   formatDuration,
   formatPlayedAt,
   storageInfoOf,
-  compareMatches,
+  sortMatches,
   defaultVisibleKeysFor,
   loadVisibleByBucket,
   loadSortByBucket,
   COLUMN_META,
+  COLUMN_META_BY_KEY,
   DEFAULT_SORT,
   COLS_PREF_KEY,
   SORT_PREF_KEY,
@@ -126,10 +127,8 @@ const CELL: Record<
 };
 
 // The full column list the table renders: pure metadata + the matching cell renderer per key.
+// (Per-key lookups use the imported COLUMN_META_BY_KEY — sort only needs ColumnMeta, not renderers.)
 const ALL_COLUMNS: readonly ColumnDef[] = COLUMN_META.map((meta) => ({ ...meta, ...CELL[meta.key] }));
-
-// Built from ALL_COLUMNS so lookups by key resolve to the full ColumnDef (meta + renderer).
-const COLUMN_BY_KEY = new Map<ColumnKey, ColumnDef>(ALL_COLUMNS.map((c) => [c.key, c]));
 
 // Hero portrait with graceful fallback: shows the CDN icon, degrading to the plain chip
 // placeholder when there's no hero or the image can't load (e.g. offline / unknown hero).
@@ -172,7 +171,9 @@ interface PopupMenuProps {
 // the action menu; checkboxes for the column picker).
 function popupItems(panel: HTMLElement | null): HTMLElement[] {
   if (!panel) return [];
-  return Array.from(panel.querySelectorAll<HTMLElement>('[role="menuitem"], input, button'));
+  // Exactly the two popup item kinds: action-menu items and column-picker checkboxes. Kept narrow so
+  // an incidental future child (a stray button / text input) can't slip into the roving-focus ring.
+  return Array.from(panel.querySelectorAll<HTMLElement>('[role="menuitem"], input[type="checkbox"]'));
 }
 
 function PopupMenu({ x, y, onClose, ariaLabel, role = 'menu', children }: PopupMenuProps): React.JSX.Element {
@@ -501,7 +502,13 @@ export function MatchTable(): React.JSX.Element {
   // permanent delete can't fire on a single accidental click.
   const [menuDeleteArmed, setMenuDeleteArmed] = useState(false);
 
+  // Skip the persistence writes on the initial mount (they'd just rewrite the values we just
+  // loaded); persist only after a real user edit. hydratedRef is flipped true by the effect below,
+  // which runs AFTER these two on mount (effects fire in declaration order).
+  const hydratedRef = useRef(false);
+
   useEffect(() => {
+    if (!hydratedRef.current) return;
     try {
       localStorage.setItem(COLS_PREF_KEY, JSON.stringify(visibleByBucket));
     } catch {
@@ -510,12 +517,17 @@ export function MatchTable(): React.JSX.Element {
   }, [visibleByBucket]);
 
   useEffect(() => {
+    if (!hydratedRef.current) return;
     try {
       localStorage.setItem(SORT_PREF_KEY, JSON.stringify(sortByBucket));
     } catch {
       /* persistence is best-effort */
     }
   }, [sortByBucket]);
+
+  useEffect(() => {
+    hydratedRef.current = true;
+  }, []);
 
   const visibleSet = useMemo(() => new Set(visibleKeys), [visibleKeys]);
   // Render columns in the canonical ALL_COLUMNS order (stable regardless of toggle order);
@@ -533,8 +545,8 @@ export function MatchTable(): React.JSX.Element {
         matchesResultFilter(m, resultFilter) &&
         matchesSearch(m, search),
     );
-    const col = COLUMN_BY_KEY.get(sort.key) ?? COLUMN_BY_KEY.get('date')!;
-    return [...filtered].sort((a, b) => compareMatches(a, b, col, sort.dir));
+    const col = COLUMN_META_BY_KEY.get(sort.key) ?? COLUMN_META_BY_KEY.get('date')!;
+    return sortMatches(filtered, col, sort.dir);
   }, [matches, bucket, resultFilter, search, sort]);
 
   const cellCtx = useMemo<CellCtx>(
@@ -554,12 +566,13 @@ export function MatchTable(): React.JSX.Element {
       const next: SortState =
         current.key === key
           ? { key, dir: current.dir === 'asc' ? 'desc' : 'asc' }
-          : { key, dir: COLUMN_BY_KEY.get(key)?.descFirst ? 'desc' : 'asc' };
+          : { key, dir: COLUMN_META_BY_KEY.get(key)?.descFirst ? 'desc' : 'asc' };
       return { ...prev, [bucket]: next };
     });
   };
 
   const toggleColumn = (key: ColumnKey): void => {
+    const removing = visibleKeys.includes(key);
     setVisibleByBucket((prev) => {
       const current = prev[bucket] ?? defaultVisibleKeysFor(bucket);
       const next = current.includes(key)
@@ -567,6 +580,11 @@ export function MatchTable(): React.JSX.Element {
         : [...current, key];
       return { ...prev, [bucket]: next };
     });
+    // Hiding the column this tab is sorted by would leave the list ordered by an invisible column
+    // with no header/caret to change it — fall back to the default sort in that case.
+    if (removing && sort.key === key) {
+      setSortByBucket((prev) => ({ ...prev, [bucket]: DEFAULT_SORT }));
+    }
   };
 
   const openColumnsMenu = (e: React.MouseEvent<HTMLButtonElement>): void => {
@@ -584,8 +602,9 @@ export function MatchTable(): React.JSX.Element {
     setMenuDeleteArmed(false);
   };
 
-  // Reveal is only available inside Electron (the preload exposes it) and only for a
-  // recording whose file still exists on disk.
+  // Reveal is only available inside Electron (the preload exposes it) and only when the row still
+  // carries a videoPath. The main process additionally verifies the file exists on disk before
+  // revealing (see the shell:revealPath handler), so a row whose file was swept is a harmless no-op.
   const canReveal = (match: MatchSummary): boolean =>
     typeof window.dotarec?.revealPath === 'function' &&
     match.videoPath !== null &&
