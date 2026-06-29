@@ -214,6 +214,12 @@ public class Clipper {
             }
         } catch (InterruptedException e) {
             proc.destroyForcibly();
+            try {
+                drainer.join(TimeUnit.SECONDS.toMillis(5));
+            } catch (InterruptedException joinInterrupted) {
+                // Re-interrupted while waiting for the drainer; stop waiting and fall through —
+                // the interrupt flag is reasserted below.
+            }
             Thread.currentThread().interrupt();
             log.warn("Interrupted while running ffmpeg for {}", output);
             return new Attempt(-1, 0L, "interrupted");
