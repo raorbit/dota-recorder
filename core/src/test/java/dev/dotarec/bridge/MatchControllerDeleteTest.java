@@ -3,6 +3,7 @@ package dev.dotarec.bridge;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import dev.dotarec.data.ClipRepository;
 import dev.dotarec.data.MarkerRepository;
 import dev.dotarec.data.MatchRepository;
 import dev.dotarec.data.MatchRepository.NewMatch;
@@ -27,6 +28,7 @@ class MatchControllerDeleteTest {
     private DataSource ds;
     private MatchRepository repo;
     private MarkerRepository markers;
+    private ClipRepository clips;
     private MatchController controller;
 
     @BeforeEach
@@ -34,7 +36,8 @@ class MatchControllerDeleteTest {
         ds = TestDb.migrated(dir);
         repo = new MatchRepository(ds);
         markers = new MarkerRepository(ds);
-        controller = new MatchController(repo, markers, new PauseRepository(ds));
+        clips = new ClipRepository(ds);
+        controller = new MatchController(repo, markers, new PauseRepository(ds), clips);
     }
 
     @Test
@@ -52,6 +55,26 @@ class MatchControllerDeleteTest {
         assertThat(Files.exists(thumb)).isFalse();
         // Markers cascade away with the parent row (ON DELETE CASCADE + foreign_keys=ON).
         assertThat(markers.findByMatchId(id)).isEmpty();
+    }
+
+    @Test
+    void delete_unlinksChildClipFiles_andCascadesClipRows() throws Exception {
+        Path vod = writeFile("match.mp4", new byte[] {1, 2, 3});
+        long id = insert(vod.toString(), null);
+        Path clipVod = writeFile("clip.mp4", new byte[] {7, 8, 9});
+        Path clipThumb = writeFile("clip.jpg", new byte[] {6});
+        clips.insert(id, "manual", null, 10.0, 20.0, "carve",
+                clipVod.toString(), clipThumb.toString(), 3L, "ready", null, 1L);
+        assertThat(clips.findByParentMatchId(id)).hasSize(1);
+
+        controller.delete(id);
+
+        assertThat(repo.findById(id)).isEmpty();
+        // The clip's .mp4 + thumbnail are unlinked from disk (not orphaned)...
+        assertThat(Files.exists(clipVod)).isFalse();
+        assertThat(Files.exists(clipThumb)).isFalse();
+        // ...and the clip rows cascade away with the parent match row.
+        assertThat(clips.findByParentMatchId(id)).isEmpty();
     }
 
     @Test

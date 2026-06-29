@@ -32,6 +32,8 @@ import java.util.List;
  *
  * <p>Contract:
  * <ul>
+ *   <li>{@code GET /clips} -- every clip across all matches, newest first. Backs the library "Clips"
+ *       bucket's flat list.</li>
  *   <li>{@code GET /matches/{id}/clips} -- the match's clips, ordered by start offset (timeline
  *       order). 404 when the match is unknown.</li>
  *   <li>{@code POST /matches/{id}/clips} {@code { startOffsetS, endOffsetS, label }} -- carves a
@@ -45,6 +47,11 @@ import java.util.List;
  *       {@code ready}/has a null {@code video_path}, or the file is gone from disk. A {@code <video src>}
  *       can't set the {@code X-Dotarec-Token} header, so the renderer passes the bridge token on the
  *       {@code ?token=} query param -- {@code BridgeAuthFilter} already accepts the token there.</li>
+ *   <li>{@code GET /clips/{clipId}/thumb} -- streams the clip's generated thumbnail (a single JPEG
+ *       frame grab) over the authed loopback bridge, mirroring the clip video stream (ranged via
+ *       {@link VideoStreamSupport}, {@code ?token=} auth). 404 when the clip is unknown, its
+ *       {@code thumb_path} is null/blank (not yet rendered or thumbnail generation failed), or the
+ *       file is gone from disk.</li>
  * </ul>
  */
 @RestController
@@ -60,6 +67,12 @@ public class ClipController {
         this.clips = clips;
         this.clipService = clipService;
         this.matches = matches;
+    }
+
+    /** Every clip across all matches, newest first — backs the library "Clips" bucket's flat list. */
+    @GetMapping("/clips")
+    public List<ClipRow> allClips() {
+        return clips.findAll();
     }
 
     @GetMapping("/matches/{id}/clips")
@@ -117,6 +130,32 @@ public class ClipController {
         if (!Files.isRegularFile(file)) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND,
                     "Video for clip " + clipId + " is unavailable (file missing on disk)");
+        }
+        return VideoStreamSupport.stream(file, headers);
+    }
+
+    /**
+     * Streams a clip's generated thumbnail (a single JPEG frame grab) over the authed loopback bridge,
+     * mirroring the clip video stream (ranged via {@link VideoStreamSupport}, served as
+     * {@code image/jpeg}). 404 when the clip is unknown, its {@code thumb_path} is null/blank (not yet
+     * rendered or thumbnail generation failed), or the file is gone from disk. A {@code <img src>}
+     * can't set the {@code X-Dotarec-Token} header, so the renderer passes the bridge token on the
+     * {@code ?token=} query param -- {@code BridgeAuthFilter} already accepts the token there.
+     */
+    @GetMapping("/clips/{clipId}/thumb")
+    public ResponseEntity<StreamingResponseBody> thumb(
+            @PathVariable long clipId, @RequestHeader HttpHeaders headers) {
+        ClipRow c = clips.findById(clipId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "No clip " + clipId));
+        String path = c.thumbPath();
+        if (path == null || path.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND,
+                    "Thumbnail for clip " + clipId + " is unavailable (not yet rendered or generation failed)");
+        }
+        Path file = new File(path).toPath();
+        if (!Files.isRegularFile(file)) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND,
+                    "Thumbnail for clip " + clipId + " is unavailable (file missing on disk)");
         }
         return VideoStreamSupport.stream(file, headers);
     }

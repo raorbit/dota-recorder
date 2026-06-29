@@ -108,6 +108,9 @@ final class VideoStreamSupport {
         if (name.endsWith(".mov")) {
             return MediaType.valueOf("video/quicktime");
         }
+        if (name.endsWith(".jpg") || name.endsWith(".jpeg")) {
+            return MediaType.IMAGE_JPEG;
+        }
         return MediaType.APPLICATION_OCTET_STREAM;
     }
 }

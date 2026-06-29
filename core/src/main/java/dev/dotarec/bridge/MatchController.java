@@ -1,5 +1,8 @@
 package dev.dotarec.bridge;
 
+import dev.dotarec.data.Bucket;
+import dev.dotarec.data.ClipRepository;
+import dev.dotarec.data.ClipRow;
 import dev.dotarec.data.MarkerRepository;
 import dev.dotarec.data.MarkerRow;
 import dev.dotarec.data.MatchRepository;
@@ -28,6 +31,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Matches endpoints consumed by the Electron browse/player UI over the loopback bridge.
@@ -61,11 +65,14 @@ public class MatchController {
     private final MatchRepository matches;
     private final MarkerRepository markers;
     private final PauseRepository pauses;
+    private final ClipRepository clips;
 
-    public MatchController(MatchRepository matches, MarkerRepository markers, PauseRepository pauses) {
+    public MatchController(MatchRepository matches, MarkerRepository markers, PauseRepository pauses,
+                           ClipRepository clips) {
         this.matches = matches;
         this.markers = markers;
         this.pauses = pauses;
+        this.clips = clips;
     }
 
     @GetMapping("/matches")
@@ -140,10 +147,10 @@ public class MatchController {
     }
 
     /**
-     * Permanently deletes a match: the {@code .mp4} + thumbnail on disk, then the row (its markers +
-     * pauses cascade via the FK). 404 when the id is unknown. File unlinks are best-effort — a missing
-     * or locked file is logged and never blocks the row delete (so a half-pruned recording can still
-     * be removed). No undo.
+     * Permanently deletes a match: the {@code .mp4} + thumbnail on disk, every child clip's
+     * {@code .mp4}/thumbnail on disk, then the row (its markers, pauses, and clip rows cascade via the
+     * FK). 404 when the id is unknown. File unlinks are best-effort — a missing or locked file is logged
+     * and never blocks the row delete (so a half-pruned recording can still be removed). No undo.
      */
     @DeleteMapping("/matches/{id}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
@@ -152,6 +159,12 @@ public class MatchController {
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "No match " + id));
         deleteFileQuietly(m.videoPath());
         deleteFileQuietly(m.thumbPath());
+        // Clip rows cascade-delete with the match (FK ON DELETE CASCADE); their on-disk files do not,
+        // so unlink them here to avoid orphaning .mp4/thumb bytes the cascade leaves behind.
+        for (ClipRow clip : clips.findByParentMatchId(id)) {
+            deleteFileQuietly(clip.videoPath());
+            deleteFileQuietly(clip.thumbPath());
+        }
         matches.delete(id);
     }
 
@@ -169,7 +182,12 @@ public class MatchController {
 
     @GetMapping("/buckets/counts")
     public BucketCounts bucketCounts() {
-        return BucketCounts.of(matches.bucketCounts());
+        // Clips live in their own table (not as matches rows), so the matches-derived counts always
+        // report 0 for the Clips bucket. Override that key with the real clip count so the sidebar
+        // Clips pill reflects the clips library.
+        Map<String, Integer> counts = matches.bucketCounts();
+        counts.put(Bucket.CLIPS.key(), (int) clips.count());
+        return BucketCounts.of(counts);
     }
 
     private void requireMatch(long id) {

@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.dotarec.data.ClipRepository;
 import dev.dotarec.data.MarkerRepository;
 import dev.dotarec.data.MatchRepository;
 import dev.dotarec.data.MatchRepository.NewMatch;
@@ -59,7 +60,8 @@ class MatchControllerContractTest {
     void setUp(@TempDir Path dir) throws Exception {
         DataSource ds = TestDb.migrated(dir);
         repo = new MatchRepository(ds);
-        controller = new MatchController(repo, new MarkerRepository(ds), new PauseRepository(ds));
+        controller = new MatchController(repo, new MarkerRepository(ds), new PauseRepository(ds),
+                new ClipRepository(ds));
     }
 
     @Test

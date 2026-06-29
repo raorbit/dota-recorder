@@ -3,6 +3,7 @@ package dev.dotarec.bridge;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import dev.dotarec.data.ClipRepository;
 import dev.dotarec.data.MarkerRepository;
 import dev.dotarec.data.MatchRepository;
 import dev.dotarec.data.MatchRepository.NewMatch;
@@ -41,7 +42,8 @@ class MatchControllerStreamTest {
     void setUp() throws Exception {
         DataSource ds = TestDb.migrated(dir);
         repo = new MatchRepository(ds);
-        controller = new MatchController(repo, new MarkerRepository(ds), new PauseRepository(ds));
+        controller = new MatchController(repo, new MarkerRepository(ds), new PauseRepository(ds),
+                new ClipRepository(ds));
     }
 
     @Test
