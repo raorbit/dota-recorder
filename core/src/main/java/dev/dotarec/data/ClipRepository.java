@@ -181,7 +181,8 @@ public class ClipRepository {
 
     /** Total bytes of all clips with a known file size — feeds retention disk accounting. */
     public long sumFileSizeBytes() {
-        String sql = "SELECT COALESCE(SUM(file_size_bytes), 0) FROM clips WHERE file_size_bytes IS NOT NULL";
+        String sql = "SELECT COALESCE(SUM(file_size_bytes), 0) FROM clips "
+                + "WHERE file_size_bytes IS NOT NULL AND video_path IS NOT NULL";
         try (Connection conn = dataSource.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql);
              ResultSet rs = ps.executeQuery()) {
