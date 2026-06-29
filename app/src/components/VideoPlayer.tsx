@@ -150,6 +150,12 @@ export function VideoPlayer({
   // selection — not again after the user clicks "Full VOD" (token unchanged → no re-snap on the next
   // clips refresh). A fresh selectClip (even of the same clip id) bumps the token and re-arms it.
   const lastPlayedTokenRef = useRef<number | null>(null);
+  // Monotonic sequence token for clip-list fetches, mirroring store/library.ts's loadToken. A local
+  // mutation that changes the clip strip (onDeleteClip / onToggleClipStar / onConfirmClip) bumps it;
+  // each async clip fetch captures it at the start and drops its setClips() if it's since changed, so
+  // an in-flight fetch (e.g. a clip.* WS refresh issued before a delete) can't resolve afterward and
+  // resurrect the just-mutated state. The matchId `cancelled` guard still handles selection changes.
+  const clipFetchTokenRef = useRef(0);
 
   const deleteMatch = useLibraryStore((s) => s.deleteMatch);
   // Refresh the library list/counts after a clip delete so the "Clips" bucket + badge stay in sync
@@ -187,6 +193,9 @@ export function VideoPlayer({
 
     let cancelled = false;
     const id = matchId;
+    // Capture the clip-fetch token so a local mutation that bumps it mid-flight drops this
+    // fetch's setClips() (but not the markers/detail/pauses, which mutations don't touch).
+    const clipToken = clipFetchTokenRef.current;
 
     void Promise.allSettled([
       fetchMarkers(id),
@@ -206,8 +215,10 @@ export function VideoPlayer({
       }
       // A failed /pauses (none, or seeded) just leaves the span list empty.
       if (pausesRes.status === 'fulfilled') setPauses(pausesRes.value);
-      // A failed /clips (none, or seeded) just leaves the clips strip empty.
-      if (clipsRes.status === 'fulfilled') setClips(clipsRes.value);
+      // A failed /clips (none, or seeded) just leaves the clips strip empty. Skip if a
+      // local mutation bumped the token after this fetch began (stale pre-mutation data).
+      if (clipsRes.status === 'fulfilled' && clipToken === clipFetchTokenRef.current)
+        setClips(clipsRes.value);
     });
 
     return () => {
@@ -246,9 +257,12 @@ export function VideoPlayer({
     const socket = new StatusSocket();
 
     const refreshClips = (): void => {
+      // Capture the clip-fetch token so a local mutation (delete/star/clip) that bumps it while
+      // this WS-triggered fetch is in flight drops the stale pre-mutation rows in .then.
+      const clipToken = clipFetchTokenRef.current;
       void fetchClips(id)
         .then((rows) => {
-          if (!cancelled) setClips(rows);
+          if (!cancelled && clipToken === clipFetchTokenRef.current) setClips(rows);
         })
         .catch(() => {
           /* transient: the next clip.* frame (or a re-select) reconciles */
@@ -407,6 +421,8 @@ export function VideoPlayer({
     setCreatingClip(true);
     try {
       const created = await createClip(matchId, { startOffsetS, endOffsetS });
+      // Bump so an in-flight clip fetch can't resolve afterward and drop the just-created row.
+      clipFetchTokenRef.current++;
       setClips((prev) => [...prev, created]);
       setClipRange(null);
     } catch {
@@ -469,6 +485,9 @@ export function VideoPlayer({
     try {
       await deleteClip(clip.id);
       if (activeClipId === clip.id) setActiveClipId(null);
+      // Bump so an in-flight clip fetch (e.g. a clip.* refresh issued before this delete) can't
+      // resolve afterward and resurrect the just-deleted clip with pre-delete data.
+      clipFetchTokenRef.current++;
       setClips((prev) => prev.filter((c) => c.id !== clip.id));
       // The strip above is player-local; refresh the store so the library "Clips" bucket list and the
       // sidebar badge drop the deleted clip too (no clip.* socket event fires on delete).
@@ -482,6 +501,8 @@ export function VideoPlayer({
   // on failure; refresh the library so the Clips bucket reflects the new star state.
   async function onToggleClipStar(clip: Clip): Promise<void> {
     const next = !clip.starred;
+    // Bump so an in-flight clip fetch can't resolve afterward and revert the optimistic flip.
+    clipFetchTokenRef.current++;
     setClips((prev) => prev.map((c) => (c.id === clip.id ? { ...c, starred: next } : c)));
     try {
       await setClipStarred(clip.id, next);
