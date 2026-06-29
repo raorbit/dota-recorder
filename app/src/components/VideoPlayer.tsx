@@ -8,6 +8,7 @@ import {
   createClip,
   deleteClip,
   clipStreamUrl,
+  clipThumbUrl,
   videoStreamUrl,
   StatusSocket,
 } from '../api/client';
@@ -21,6 +22,14 @@ interface VideoPlayerProps {
   // per-selection and rendered over the stage; real playback degrades gracefully
   // when no .mp4 exists yet (seeded data / pruned retention).
   readonly match: MatchSummary | null;
+  // When a clip is selected from the library "Clips" bucket, its id. The selection
+  // already pointed `match` at the clip's parent (so the parent VOD + clip strip
+  // load); this flags which clip to auto-play once that strip arrives. Null for a
+  // plain match selection (play the full VOD).
+  readonly initialClipId?: number | null;
+  // Bumped by the store on every clip selection (even the same clip id again), so re-selecting a clip
+  // after switching to the full VOD replays it. The auto-play effect keys on this, not initialClipId.
+  readonly clipPlayToken?: number;
 }
 
 // Core marker `type` values are kill/death/assist/roshan, but the scrubber CSS
@@ -92,7 +101,11 @@ function clipDuration(clip: Clip): string {
 // score / clock / scrubber chrome. Markers are data-driven from GET
 // /matches/{id}/markers, positioned by video_offset_s / duration, and click-to-seek
 // sets video.currentTime via a ref.
-export function VideoPlayer({ match }: VideoPlayerProps): React.JSX.Element {
+export function VideoPlayer({
+  match,
+  initialClipId = null,
+  clipPlayToken = 0,
+}: VideoPlayerProps): React.JSX.Element {
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
   // Marker / duration / video state is LOCAL to the player — the zustand library
@@ -132,6 +145,10 @@ export function VideoPlayer({ match }: VideoPlayerProps): React.JSX.Element {
   const [creatingClip, setCreatingClip] = useState(false);
   // Which handle is being dragged (pointer-move updates the range until release).
   const dragHandleRef = useRef<'in' | 'out' | null>(null);
+  // Tracks the clipPlayToken we've already auto-played, so auto-play fires once per library clip
+  // selection — not again after the user clicks "Full VOD" (token unchanged → no re-snap on the next
+  // clips refresh). A fresh selectClip (even of the same clip id) bumps the token and re-arms it.
+  const lastPlayedTokenRef = useRef<number | null>(null);
 
   const deleteMatch = useLibraryStore((s) => s.deleteMatch);
 
@@ -193,6 +210,24 @@ export function VideoPlayer({ match }: VideoPlayerProps): React.JSX.Element {
       cancelled = true;
     };
   }, [matchId]);
+
+  // Auto-play the library-selected clip. When the user clicks a clip in the "Clips" bucket, the store
+  // opens its parent match here and bumps clipPlayToken; once that match's clip strip has loaded (and
+  // the clip is ready), point the <video> at it. Keyed on clipPlayToken (not initialClipId) so it
+  // fires once per selection AND re-fires when the user re-selects the same clip after "Full VOD";
+  // clicking "Full VOD" leaves the token unchanged, so a strip refetch won't re-snap to the clip.
+  useEffect(() => {
+    if (initialClipId === null) {
+      lastPlayedTokenRef.current = null;
+      return;
+    }
+    if (lastPlayedTokenRef.current === clipPlayToken) return;
+    const target = clips.find((c) => c.id === initialClipId);
+    if (target && target.status === 'ready') {
+      lastPlayedTokenRef.current = clipPlayToken;
+      setActiveClipId(initialClipId);
+    }
+  }, [initialClipId, clipPlayToken, clips]);
 
   // Live clip lifecycle for the open match: a dedicated StatusSocket (the shared one
   // lives privately inside startLibrary) scoped to this matchId via onClipEvent.
@@ -722,6 +757,21 @@ export function VideoPlayer({ match }: VideoPlayerProps): React.JSX.Element {
                 data-status={clip.status}
                 data-active={activeClipId === clip.id}
               >
+                {/* Clip thumbnail (GET /clips/{id}/thumb), only for a ready clip with a
+                    rendered thumb. The endpoint 404s on not-ready/missing files, so an
+                    onError handler hides the broken <img> and the label/icon below stand
+                    in. Non-ready clips skip the <img> entirely (no flash of a 404). */}
+                {clip.status === 'ready' && clip.thumbPath != null && (
+                  <img
+                    className="vp-clip-thumb"
+                    src={clipThumbUrl(clip.id)}
+                    alt=""
+                    aria-hidden="true"
+                    onError={(e) => {
+                      e.currentTarget.style.display = 'none';
+                    }}
+                  />
+                )}
                 <span
                   className="vp-clip-play"
                   role="button"

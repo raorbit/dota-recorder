@@ -23,6 +23,8 @@ export function App(): React.JSX.Element {
 
   const matches = useLibraryStore((s) => s.matches);
   const selectedMatchId = useLibraryStore((s) => s.selectedMatchId);
+  const selectedClipId = useLibraryStore((s) => s.selectedClipId);
+  const clipPlayToken = useLibraryStore((s) => s.clipPlayToken);
   const status = useLibraryStore((s) => s.status);
 
   // Boot the store: initial REST load + StatusSocket subscription. Teardown on
@@ -52,7 +54,11 @@ export function App(): React.JSX.Element {
         <main className="app-main">
           {view === 'library' ? (
             <>
-              <VideoPlayer match={selectedMatch} />
+              <VideoPlayer
+                match={selectedMatch}
+                initialClipId={selectedClipId}
+                clipPlayToken={clipPlayToken}
+              />
               <FilterRow />
               <MatchTable />
             </>

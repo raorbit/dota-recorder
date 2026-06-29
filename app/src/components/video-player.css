@@ -300,6 +300,17 @@
 .vp-clip-item[data-active='true'] {
   border-color: var(--gold);
 }
+/* Clip thumbnail at the head of the row: a small fixed tile, cover-cropped and rounded
+   to match the design tokens. Hidden via inline display:none (onError) when the thumb
+   404s, so the label/icon fall back cleanly. */
+.vp-clip-thumb {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 26px;
+  object-fit: cover;
+  border-radius: var(--radius-panel);
+  background: var(--border-row);
+}
 .vp-clip-play {
   color: var(--accent);
   cursor: pointer;

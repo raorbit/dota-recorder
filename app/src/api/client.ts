@@ -48,6 +48,17 @@ export function clipStreamUrl(clipId: number): string {
   return token ? `${base}?token=${encodeURIComponent(token)}` : base;
 }
 
+// Thumbnail image URL for a clip (GET /clips/{id}/thumb). Mirrors clipStreamUrl():
+// an <img src> can't carry the X-Dotarec-Token header, so the token rides the
+// ?token= query param (BridgeAuthFilter accepts it on any gated path). The endpoint
+// 404s when the thumbnail isn't rendered yet / the file is gone, so callers should
+// render it through an <img onError> fallback. Absent token outside Electron.
+export function clipThumbUrl(clipId: number): string {
+  const base = `${bridgeBase()}/clips/${clipId}/thumb`;
+  const token = window.dotarec?.bridgeToken;
+  return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+}
+
 export interface Health {
   readonly status: 'ok' | string;
   readonly version: string;
@@ -541,6 +552,12 @@ export function fetchBucketCounts(): Promise<BucketCounts> {
 // Clips cut from a match's VOD, ordered by start offset (GET /matches/{id}/clips).
 export function fetchClips(matchId: number): Promise<Clip[]> {
   return getJson<Clip[]>(`/matches/${matchId}/clips`);
+}
+
+// Every clip across all matches, newest first (GET /clips). Backs the library
+// "Clips" bucket flat list (clips live in their own table, not the matches list).
+export function fetchAllClips(): Promise<Clip[]> {
+  return getJson<Clip[]>('/clips');
 }
 
 // Requests a new manual clip (POST /matches/{id}/clips). The core accepts the cut and
