@@ -34,15 +34,11 @@ public class WebSocketConfig implements WebSocketConfigurer {
 
     @Override
     public void registerWebSocketHandlers(WebSocketHandlerRegistry registry) {
-        // Scope the handshake to the renderer's origins, mirroring CorsConfig. Patterns (not
-        // setAllowedOrigins) are required because the packaged file:// page sends a file://-style or
-        // literal "null" Origin, which an exact-origin allowlist won't match.
-        registry.addHandler(statusWebSocket, "/ws")
-                .setAllowedOriginPatterns(
-                        "http://localhost:5173",
-                        "http://127.0.0.1:5173",
-                        "file://*",
-                        "null");
+        // Scope the handshake to the renderer's origins (shared with CorsConfig via BridgeOrigins).
+        // Patterns (not setAllowedOrigins) are required because the packaged file:// page sends a
+        // bare "file://" Origin on the WS handshake (and "null" on fetch), which an exact-origin
+        // allowlist won't match. See BridgeOrigins for why the bare file:// literal is needed.
+        registry.addHandler(statusWebSocket, "/ws").setAllowedOriginPatterns(BridgeOrigins.patterns());
     }
 
     /**

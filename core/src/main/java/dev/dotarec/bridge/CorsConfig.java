@@ -26,12 +26,9 @@ public class CorsConfig implements WebMvcConfigurer {
 
     @Override
     public void addCorsMappings(CorsRegistry registry) {
+        // Renderer origins shared with WebSocketConfig via BridgeOrigins (one list, no drift).
         registry.addMapping("/**")
-                .allowedOriginPatterns(
-                        "http://localhost:5173",
-                        "http://127.0.0.1:5173",
-                        "file://*",
-                        "null")
+                .allowedOriginPatterns(BridgeOrigins.patterns())
                 .allowedMethods("GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS")
                 .allowedHeaders("*");
     }
