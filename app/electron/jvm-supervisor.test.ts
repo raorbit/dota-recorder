@@ -2,7 +2,11 @@ import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Hoisted so the (hoisted) vi.mock factory below can reference it.
-const { spawnMock } = vi.hoisted(() => ({ spawnMock: vi.fn() }));
+const { spawnMock, ffmpegPathMock } = vi.hoisted(() => ({
+  spawnMock: vi.fn(),
+  // Controllable per-test: default "no bundled ffmpeg" (dev), override to a path to assert wiring.
+  ffmpegPathMock: vi.fn(() => null as string | null),
+}));
 
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
@@ -12,8 +16,10 @@ vi.mock('./job-object', () => ({ assign: vi.fn() }));
 vi.mock('./paths', () => ({
   BRIDGE_TOKEN_ENV: 'DOTAREC_BRIDGE_TOKEN',
   BRIDGE_TOKEN_HEADER: 'X-Dotarec-Token',
+  FFMPEG_PATH_ENV: 'DOTAREC_FFMPEG_PATH',
   HEALTH_URL: 'http://127.0.0.1:3224/health',
   bundledJavawPath: () => null,
+  ffmpegPath: ffmpegPathMock,
   obsDir: () => 'C:/obs',
   obsSourceDir: () => undefined,
   obsVersion: () => '1',
@@ -36,6 +42,8 @@ let healthOk: boolean;
 beforeEach(() => {
   children = [];
   healthOk = true;
+  ffmpegPathMock.mockReset();
+  ffmpegPathMock.mockReturnValue(null);
   spawnMock.mockReset();
   spawnMock.mockImplementation(() => {
     const child = new FakeChild();
@@ -69,6 +77,26 @@ describe('JvmSupervisor', () => {
     await sup.start();
     const args = spawnMock.mock.calls[0][1] as string[];
     expect(args).toContain(`-Dapp.parent-pid=${process.pid}`);
+  });
+
+  it('threads the bundled ffmpeg path into the core (system property + env) when present', async () => {
+    ffmpegPathMock.mockReturnValue('C:/ffmpeg/ffmpeg.exe');
+    const sup = new JvmSupervisor({ onLog: () => {} });
+    await sup.start();
+    const args = spawnMock.mock.calls[0][1] as string[];
+    expect(args).toContain('-Dapp.ffmpeg.path=C:/ffmpeg/ffmpeg.exe');
+    const opts = spawnMock.mock.calls[0][2] as { env: NodeJS.ProcessEnv };
+    expect(opts.env.DOTAREC_FFMPEG_PATH).toBe('C:/ffmpeg/ffmpeg.exe');
+  });
+
+  it('omits the ffmpeg property and env when no bundled ffmpeg is present', async () => {
+    // default ffmpegPathMock -> null (dev with ffmpeg only on PATH)
+    const sup = new JvmSupervisor({ onLog: () => {} });
+    await sup.start();
+    const args = spawnMock.mock.calls[0][1] as string[];
+    expect(args.some((a) => a.startsWith('-Dapp.ffmpeg.path='))).toBe(false);
+    const opts = spawnMock.mock.calls[0][2] as { env: NodeJS.ProcessEnv };
+    expect(opts.env.DOTAREC_FFMPEG_PATH).toBeUndefined();
   });
 
   it('fires onUnexpectedExit when the core exits without a stop()', async () => {
