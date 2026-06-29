@@ -3,6 +3,8 @@ package dev.dotarec.fsm;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.dotarec.config.SettingsStore;
+import dev.dotarec.data.ClipRepository;
+import dev.dotarec.data.ClipRow;
 import dev.dotarec.data.MarkerRepository;
 import dev.dotarec.data.MatchRepository;
 import dev.dotarec.data.MatchRepository.NewMatch;
@@ -49,6 +51,7 @@ public class CrashRecoveryRunner implements ApplicationRunner {
 
     private final RecordingSessionRepository journal;
     private final MatchRepository matches;
+    private final ClipRepository clips;
     private final MarkerRepository markers;
     private final PauseRepository pauses;
     private final DataSource dataSource;
@@ -58,6 +61,7 @@ public class CrashRecoveryRunner implements ApplicationRunner {
     public CrashRecoveryRunner(
             RecordingSessionRepository journal,
             MatchRepository matches,
+            ClipRepository clips,
             MarkerRepository markers,
             PauseRepository pauses,
             DataSource dataSource,
@@ -65,6 +69,7 @@ public class CrashRecoveryRunner implements ApplicationRunner {
             SettingsStore settings) {
         this.journal = journal;
         this.matches = matches;
+        this.clips = clips;
         this.markers = markers;
         this.pauses = pauses;
         this.dataSource = dataSource;
@@ -307,13 +312,21 @@ public class CrashRecoveryRunner implements ApplicationRunner {
      */
     private void recoverArchiveLeftover(Path file) {
         try {
-            Long matchId = leadingMatchId(file.getFileName().toString());
+            String fileName = file.getFileName().toString();
+            // Clip leftovers carry a "clip-<clipId>-" prefix (a separate id space from match files); route
+            // them to clip recovery so a stranded clip copy is re-linked/dropped, never adopted as a bogus
+            // match. A false return (no such clip row) falls through to a plain orphan import below.
+            Long clipId = leadingClipId(fileName);
+            if (clipId != null && recoverArchivedClipLeftover(file, clipId)) {
+                return;
+            }
+            Long matchId = leadingMatchId(fileName);
             if (matchId != null) {
                 Optional<MatchSummary> row = matches.findById(matchId);
                 if (row.isPresent()) {
-                    if (videoFileMissing(row.get())) {
+                    if (videoFileMissing(row.get().videoPath())) {
                         String thumb =
-                                recoverArchivedThumb(file.getParent(), matchId, row.get().thumbPath());
+                                recoverArchivedThumb(file.getParent(), matchId + "-", row.get().thumbPath());
                         matches.updateVideoPath(matchId, file.toString(), thumb);
                         log.warn("Re-linked stranded archive recording {} to match {} (interrupted move)",
                                 file, matchId);
@@ -329,6 +342,63 @@ public class CrashRecoveryRunner implements ApplicationRunner {
         } catch (Exception e) {
             // One bad leftover must not abort the rest of the scan.
             log.warn("Could not recover archive leftover {}: {}", file, e.toString());
+        }
+    }
+
+    /**
+     * Recovers an unreferenced {@code clip-<clipId>-...} file found on an archive drive — the residue of
+     * an interrupted clip relocation. Mirrors {@link #recoverArchiveLeftover}'s match handling:
+     *
+     * <ul>
+     *   <li>if the clip row lost its file (a same-filesystem rename consumed the source before the
+     *       repoint committed), RE-LINK the row to this recovered copy;</li>
+     *   <li>if the clip is already intact, this is a redundant copy from the interrupted move — DELETE it
+     *       to reclaim the space.</li>
+     * </ul>
+     *
+     * <p>Returns {@code false} when no such clip row exists (e.g. the clip was deleted), so the caller
+     * adopts the loose file as a standalone gsi_only row rather than deleting a file it can't attribute.
+     */
+    private boolean recoverArchivedClipLeftover(Path file, long clipId) {
+        Optional<ClipRow> row = clips.findById(clipId);
+        if (row.isEmpty()) {
+            return false;
+        }
+        if (videoFileMissing(row.get().videoPath())) {
+            String thumb =
+                    recoverArchivedThumb(file.getParent(), "clip-" + clipId + "-", row.get().thumbPath());
+            clips.updateVideoPath(clipId, file.toString(), thumb);
+            log.warn("Re-linked stranded archive clip {} to clip row {} (interrupted move)", file, clipId);
+        } else {
+            deleteQuietly(file);
+            log.warn("Removed redundant archive clip move-leftover {} (clip {} already intact)", file, clipId);
+        }
+        return true;
+    }
+
+    /**
+     * Parses the clip id from the archiver's {@code clip-<clipId>-...} destination name, or null when the
+     * name isn't a clip-prefixed archive file. Only called for files under archive dirs, where the
+     * archiver always stamps this exact prefix on relocated clips.
+     */
+    private static Long leadingClipId(String fileName) {
+        String prefix = "clip-";
+        if (!fileName.startsWith(prefix)) {
+            return null;
+        }
+        int dash = fileName.indexOf('-', prefix.length());
+        if (dash <= prefix.length() || dash == fileName.length() - 1) {
+            return null;
+        }
+        for (int i = prefix.length(); i < dash; i++) {
+            if (!Character.isDigit(fileName.charAt(i))) {
+                return null;
+            }
+        }
+        try {
+            return Long.parseLong(fileName.substring(prefix.length(), dash));
+        } catch (NumberFormatException e) {
+            return null;
         }
     }
 
@@ -355,18 +425,19 @@ public class CrashRecoveryRunner implements ApplicationRunner {
         }
     }
 
-    /** True when a row's current video file is absent (null/blank path, or the file no longer exists). */
-    private boolean videoFileMissing(MatchSummary row) {
-        Path p = safePath(row.videoPath());
+    /** True when a stored video file is absent (null/blank path, or the file no longer exists on disk). */
+    private boolean videoFileMissing(String videoPath) {
+        Path p = safePath(videoPath);
         return p == null || !Files.exists(p);
     }
 
     /**
      * Finds the archived thumbnail paired with a recovered video — the archiver writes it to
-     * {@code <dir>/thumbs/<matchId>-<original>}. Returns {@code fallback} (the row's existing thumb) when
-     * none is found, so a re-link never blanks a thumbnail it couldn't improve on.
+     * {@code <dir>/thumbs/<prefix><original>} ({@code <matchId>-} for VODs, {@code clip-<clipId>-} for
+     * clips). Returns {@code fallback} (the row's existing thumb) when none is found, so a re-link never
+     * blanks a thumbnail it couldn't improve on.
      */
-    private String recoverArchivedThumb(Path archiveDir, long matchId, String fallback) {
+    private String recoverArchivedThumb(Path archiveDir, String prefix, String fallback) {
         if (archiveDir == null) {
             return fallback;
         }
@@ -374,7 +445,6 @@ public class CrashRecoveryRunner implements ApplicationRunner {
         if (!Files.isDirectory(thumbDir)) {
             return fallback;
         }
-        String prefix = matchId + "-";
         try (Stream<Path> stream = Files.list(thumbDir)) {
             return stream.filter(Files::isRegularFile)
                     .filter(p -> p.getFileName().toString().startsWith(prefix))
@@ -405,6 +475,17 @@ public class CrashRecoveryRunner implements ApplicationRunner {
         }
         for (var session : journal.findUnfinished()) {
             Path p = safePath(session.videoPath());
+            if (p != null) {
+                out.add(normalize(p));
+            }
+        }
+        // Clips are stored .mp4s too. Active-drive originals live under videoDir/clips/ (a subdir the
+        // non-recursive scan never descends into), but ARCHIVED clips sit in the archive-drive root
+        // alongside match VODs. Without marking them referenced, an archived clip looks like an orphan
+        // and gets adopted as a bogus gsi_only match — then becomes deletable by the age-based retention
+        // sweep out from under its (possibly starred) clip row. Mark every clip's current file referenced.
+        for (var clip : clips.findAll()) {
+            Path p = safePath(clip.videoPath());
             if (p != null) {
                 out.add(normalize(p));
             }
