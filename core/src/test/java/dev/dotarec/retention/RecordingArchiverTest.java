@@ -66,7 +66,7 @@ class RecordingArchiverTest {
         // Deterministic free-space probe: each dir reports HUGE_FREE unless the test overrides it.
         RecordingArchiver.FreeSpaceProbe probe =
                 d -> freeByDir.getOrDefault(d.toAbsolutePath().normalize().toString(), HUGE_FREE);
-        archiver = new RecordingArchiver(matches, settings, sweeper, probe);
+        archiver = new RecordingArchiver(matches, clips, settings, sweeper, probe);
     }
 
     @Test
@@ -213,7 +213,7 @@ class RecordingArchiverTest {
         RetentionSweeper spySweeper =
                 new RetentionSweeper(spyRepo, clips, settings, mock(EventPublisher.class));
         RecordingArchiver spyArchiver =
-                new RecordingArchiver(spyRepo, settings, spySweeper, hugeFreeProbe());
+                new RecordingArchiver(spyRepo, clips, settings, spySweeper, hugeFreeProbe());
 
         // The OLDEST (move candidate) is deliberately TINY so the forced real byte-copy below is cheap;
         // a large SPARSE newer VOD pushes the active drive over its 1 GiB cap to trigger the move
