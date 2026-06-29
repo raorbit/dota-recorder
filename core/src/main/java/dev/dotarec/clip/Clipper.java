@@ -50,10 +50,11 @@ public class Clipper {
      * @throws IllegalStateException if ffmpeg is unavailable or both the copy and re-encode attempts fail
      */
     public Result clip(Path source, double startSeconds, double durationSeconds, Path output) {
-        if (!ffmpeg.isAvailable()) {
-            throw new IllegalStateException(
-                    "Cannot generate clip: no ffmpeg executable available (FfmpegLocator)");
-        }
+        // Use the resolved bundled/configured ffmpeg, else the bare "ffmpeg" on PATH (command()'s
+        // fallback). We deliberately do NOT gate on isAvailable() — that returns false whenever nothing
+        // is bundled/configured, which would defeat the PATH fallback for dev/standalone runs that have
+        // ffmpeg on PATH. A genuinely missing binary surfaces as a failed run() (IOException) and the
+        // normal "ffmpeg failed" error below.
         String ffmpegCmd = ffmpeg.command();
         String start = formatSeconds(Math.max(0.0, startSeconds));
         String duration = formatSeconds(Math.max(0.0, durationSeconds));
@@ -90,10 +91,7 @@ public class Clipper {
      * @throws IllegalStateException if ffmpeg is unavailable or fails to produce a non-empty frame
      */
     public Path thumbnail(Path source, double atSeconds, Path output) {
-        if (!ffmpeg.isAvailable()) {
-            throw new IllegalStateException(
-                    "Cannot generate thumbnail: no ffmpeg executable available (FfmpegLocator)");
-        }
+        // See clip(): use command() (bundled/configured, else bare "ffmpeg" on PATH), not isAvailable().
         String at = formatSeconds(Math.max(0.0, atSeconds));
         Attempt grab = run(buildThumbnailCommand(ffmpeg.command(), source, at, output), output);
         if (grab.succeeded()) {
@@ -168,31 +166,54 @@ public class Clipper {
         log.debug("Running ffmpeg: {}", String.join(" ", command));
         ProcessBuilder pb = new ProcessBuilder(command);
         pb.redirectErrorStream(true);
-        StringBuilder out = new StringBuilder();
+        Process proc;
         try {
-            Process proc = pb.start();
+            proc = pb.start();
+        } catch (IOException e) {
+            log.warn("Failed to run ffmpeg for {}: {}", output, e.getMessage());
+            return new Attempt(-1, 0L, e.getMessage() == null ? "" : e.getMessage());
+        }
+        // Drain the merged stdout/stderr on a SEPARATE thread. Reading it inline before waitFor() would
+        // block forever on a hung ffmpeg that stops emitting output but never exits (its pipe never
+        // closes), so the timeout below could never fire — pinning this pool thread while it holds the
+        // StorageMaintenanceLock. The drain reader unblocks when the stream closes (process exit or the
+        // destroyForcibly() on timeout).
+        StringBuilder out = new StringBuilder();
+        Thread drainer = new Thread(() -> {
             try (BufferedReader reader = new BufferedReader(
                     new InputStreamReader(proc.getInputStream(), StandardCharsets.UTF_8))) {
                 String line;
                 while ((line = reader.readLine()) != null) {
-                    out.append(line).append('\n');
+                    synchronized (out) {
+                        out.append(line).append('\n');
+                    }
                 }
+            } catch (IOException ignored) {
+                // Stream closed by process death / forcible destroy — nothing more to capture.
             }
+        }, "clip-ffmpeg-drain");
+        drainer.setDaemon(true);
+        drainer.start();
+        try {
             boolean finished = proc.waitFor(PROCESS_TIMEOUT_MINUTES, TimeUnit.MINUTES);
             if (!finished) {
                 proc.destroyForcibly();
+                drainer.join(TimeUnit.SECONDS.toMillis(5));
                 log.warn("ffmpeg timed out after {} min, killed: {}",
                         PROCESS_TIMEOUT_MINUTES, output);
-                return new Attempt(-1, 0L, out.toString());
+                synchronized (out) {
+                    return new Attempt(-1, 0L, out.toString());
+                }
             }
+            drainer.join(TimeUnit.SECONDS.toMillis(5));
             int exit = proc.exitValue();
             long size = outputSize(output);
             boolean ok = exit == 0 && size > 0L;
-            return new Attempt(ok ? 0 : (exit == 0 ? -1 : exit), size, out.toString());
-        } catch (IOException e) {
-            log.warn("Failed to run ffmpeg for {}: {}", output, e.getMessage());
-            return new Attempt(-1, 0L, e.getMessage() == null ? "" : e.getMessage());
+            synchronized (out) {
+                return new Attempt(ok ? 0 : (exit == 0 ? -1 : exit), size, out.toString());
+            }
         } catch (InterruptedException e) {
+            proc.destroyForcibly();
             Thread.currentThread().interrupt();
             log.warn("Interrupted while running ffmpeg for {}", output);
             return new Attempt(-1, 0L, "interrupted");
