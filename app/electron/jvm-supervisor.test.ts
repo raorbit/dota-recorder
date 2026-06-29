@@ -154,7 +154,7 @@ describe('JvmSupervisor', () => {
     await expect(sup.start()).rejects.toThrow(/did not become healthy/i);
   });
 
-  it('resolves once dbReady flips true after migrations finish', async () => {
+  it('keeps polling while dbReady is false, then resolves once it flips true', async () => {
     let ready = false;
     vi.stubGlobal(
       'fetch',
@@ -163,9 +163,14 @@ describe('JvmSupervisor', () => {
     const sup = new JvmSupervisor({ onLog: () => {}, healthTimeoutMs: 5_000 });
 
     const starting = sup.start();
-    await flush(50);
-    ready = true; // migrations complete -> the next poll should resolve
+    let resolved = false;
+    void starting.then(() => {
+      resolved = true;
+    });
+    await flush(250); // well past the first poll — the OLD status-only gate would have resolved by now
+    expect(resolved).toBe(false); // the dbReady gate kept polling while migrations ran
 
+    ready = true; // migrations complete -> the next poll resolves
     await expect(starting).resolves.toBeUndefined();
   });
 
