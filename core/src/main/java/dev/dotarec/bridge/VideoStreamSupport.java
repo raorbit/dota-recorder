@@ -91,7 +91,15 @@ final class VideoStreamSupport {
         // it streams in chunks (no whole-file buffering) and is written by a dedicated return-value
         // handler, so it sidesteps the converter-generics trap that erases ResourceRegion under a
         // ResponseEntity<?> return type. <video> always sends a Range, so the 206 path is the hot one.
-        List<HttpRange> ranges = headers.getRange();
+        // A malformed Range header (e.g. "bytes=abc") makes getRange() throw IllegalArgumentException;
+        // with no @ControllerAdvice that would surface as a 500. Lenient clients ignore a bad Range, so
+        // treat it as absent and serve the full 200 body rather than failing the request.
+        List<HttpRange> ranges;
+        try {
+            ranges = headers.getRange();
+        } catch (IllegalArgumentException e) {
+            ranges = List.of();
+        }
         if (ranges.isEmpty()) {
             // No Range header -> full body, 200. Advertise Accept-Ranges so Chromium knows it can seek.
             return ResponseEntity.ok()

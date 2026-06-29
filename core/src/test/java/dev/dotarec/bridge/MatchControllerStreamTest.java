@@ -111,6 +111,23 @@ class MatchControllerStreamTest {
     }
 
     @Test
+    void malformedRange_isIgnored_andServesFullBodyWith200() throws Exception {
+        byte[] data = bytes(1000);
+        long id = insertWithVideo(writeVod("e.mp4", data));
+
+        // A bad Range header makes HttpHeaders.getRange() throw; the stream must ignore it and serve
+        // the full 200 body (lenient-client behavior) rather than surfacing a 500.
+        HttpHeaders h = new HttpHeaders();
+        h.set(HttpHeaders.RANGE, "bytes=abc");
+        ResponseEntity<StreamingResponseBody> resp = controller.videoStream(id, h);
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(resp.getHeaders().getFirst(HttpHeaders.ACCEPT_RANGES)).isEqualTo("bytes");
+        assertThat(resp.getHeaders().getContentLength()).isEqualTo(1000);
+        assertThat(readBody(resp)).isEqualTo(data);
+    }
+
+    @Test
     void notFound_forUnknownId_nullPath_orMissingFile() throws Exception {
         assertThatThrownBy(() -> controller.videoStream(999_999L, new HttpHeaders()))
                 .isInstanceOf(ResponseStatusException.class);
