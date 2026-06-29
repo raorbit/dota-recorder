@@ -130,18 +130,31 @@ export class JvmSupervisor {
 
     // A failed spawn (missing/unlaunchable javaw, ENOENT/EACCES) emits 'error' and never 'exit'. With
     // no listener Node re-emits it as an uncaughtException that takes down the Electron main process,
-    // bypassing the supervisor's controlled failure path entirely. Race it against the health wait so
-    // start() rejects with the real error instead — the caller then runs notifyDown / bounded restart.
+    // bypassing the supervisor's controlled failure path. Keep a PERSISTENT listener so an 'error' is
+    // never unhandled: during startup it rejects start() (the caller then runs notifyDown / bounded
+    // restart); after startup (rare) it is only logged — the handle is left intact so a later stop()
+    // still reaps the process, and we don't spuriously restart since 'error' doesn't imply it exited.
+    let launchSettled = false;
+    let rejectLaunch: ((err: Error) => void) | undefined;
     const launchFailed = new Promise<never>((_, reject) => {
-      child.once('error', (err) => {
-        if (this.child === child) this.child = null;
-        const e = err instanceof Error ? err : new Error(String(err));
-        this.onLog(`core failed to launch: ${e.message}`);
-        reject(e);
-      });
+      rejectLaunch = reject;
+    });
+    child.on('error', (err) => {
+      const e = err instanceof Error ? err : new Error(String(err));
+      if (launchSettled) {
+        this.onLog(`core errored after startup: ${e.message}`);
+        return;
+      }
+      if (this.child === child) this.child = null;
+      this.onLog(`core failed to launch: ${e.message}`);
+      rejectLaunch?.(e);
     });
 
-    await Promise.race([this.waitForHealth(child), launchFailed]);
+    try {
+      await Promise.race([this.waitForHealth(child), launchFailed]);
+    } finally {
+      launchSettled = true; // past this point an 'error' is post-startup, not a launch failure
+    }
   }
 
   /** Graceful-then-forceful shutdown of the JVM tree. */
