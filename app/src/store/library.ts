@@ -16,6 +16,7 @@ import {
   fetchAllClips,
   fetchStatus,
   setStarred,
+  setClipStarred,
   deleteMatch as apiDeleteMatch,
   StatusSocket,
   type MatchSummary,
@@ -77,6 +78,8 @@ export interface LibraryState {
   readonly selectClip: (clip: Clip) => void;
   readonly setStatus: (status: Status | null) => void;
   readonly toggleStar: (id: number, starred: boolean) => Promise<void>;
+  // Star/unstar a clip (exempts it from the retention sweep), mirroring toggleStar for matches.
+  readonly toggleClipStar: (id: number, starred: boolean) => Promise<void>;
   readonly deleteMatch: (id: number) => Promise<void>;
   readonly load: () => Promise<void>;
 }
@@ -148,6 +151,18 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
       invalidatePendingLoad();
     } catch {
       set((s) => ({ matches: s.matches.map((m) => (m.id === id ? { ...m, starred: !starred } : m)) }));
+    }
+  },
+  // Optimistic clip star toggle, mirroring toggleStar: flip locally for instant feedback, persist via
+  // PATCH /clips/{id}, revert on failure. invalidatePendingLoad keeps an in-flight load() from
+  // clobbering the flip with pre-toggle data.
+  toggleClipStar: async (id, starred) => {
+    set((s) => ({ clips: s.clips.map((c) => (c.id === id ? { ...c, starred } : c)) }));
+    try {
+      await setClipStarred(id, starred);
+      invalidatePendingLoad();
+    } catch {
+      set((s) => ({ clips: s.clips.map((c) => (c.id === id ? { ...c, starred: !starred } : c)) }));
     }
   },
 

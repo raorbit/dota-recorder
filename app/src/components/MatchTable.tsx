@@ -171,9 +171,10 @@ interface ClipRowProps {
   readonly clip: Clip;
   readonly selected: boolean;
   readonly onSelect: (clip: Clip) => void;
+  readonly onToggleStar: (id: number, starred: boolean) => void;
 }
 
-function ClipRow({ clip, selected, onSelect }: ClipRowProps): React.JSX.Element {
+function ClipRow({ clip, selected, onSelect, onToggleStar }: ClipRowProps): React.JSX.Element {
   return (
     <div
       className="mt-row mt-clip-row"
@@ -182,6 +183,8 @@ function ClipRow({ clip, selected, onSelect }: ClipRowProps): React.JSX.Element 
       tabIndex={0}
       onClick={() => onSelect(clip)}
       onKeyDown={(e) => {
+        // Only the row's OWN Enter/Space selects — not a bubble from the nested star button.
+        if (e.target !== e.currentTarget) return;
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
           onSelect(clip);
@@ -189,6 +192,20 @@ function ClipRow({ clip, selected, onSelect }: ClipRowProps): React.JSX.Element 
       }}
     >
       <div className="mt-cell mt-hero">
+        <button
+          type="button"
+          className="mt-star"
+          data-on={clip.starred ? 'true' : 'false'}
+          aria-pressed={clip.starred}
+          aria-label={clip.starred ? 'Unstar clip' : 'Star clip to keep it'}
+          title={clip.starred ? 'Starred — kept from auto-delete' : 'Star to keep from auto-delete'}
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleStar(clip.id, !clip.starred);
+          }}
+        >
+          {clip.starred ? '★' : '☆'}
+        </button>
         <ClipThumb clip={clip} />
         <span className="mt-hero-name">{clipLabel(clip)}</span>
       </div>
@@ -210,6 +227,7 @@ function ClipTable(): React.JSX.Element {
   const loadState = useLibraryStore((s) => s.loadState);
   const selectedClipId = useLibraryStore((s) => s.selectedClipId);
   const selectClip = useLibraryStore((s) => s.selectClip);
+  const toggleClipStar = useLibraryStore((s) => s.toggleClipStar);
 
   const visible = useMemo(
     () => clips.filter((c) => clipMatchesSearch(c, search)),
@@ -252,6 +270,7 @@ function ClipTable(): React.JSX.Element {
               clip={c}
               selected={c.id === selectedClipId}
               onSelect={selectClip}
+              onToggleStar={(id, starred) => void toggleClipStar(id, starred)}
             />
           ))}
       </div>
