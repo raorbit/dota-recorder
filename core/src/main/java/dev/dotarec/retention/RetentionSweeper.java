@@ -333,6 +333,16 @@ public class RetentionSweeper {
     }
 
     /**
+     * Bytes of all rendered clips. Every clip is written under the ACTIVE recording drive
+     * ({@code <videoDir>/clips}) and is never relocated, so this is exactly the clip footprint on the
+     * active drive — {@link RecordingArchiver} adds it to that drive's usage so its per-drive cap
+     * accounts for clips, not just movable match VODs.
+     */
+    public long totalClipBytes() {
+        return clips.sumFileSizeBytes();
+    }
+
+    /**
      * Whether the drive holding {@code filePath} is currently reachable — i.e. the file's parent
      * directory exists. This separates a genuinely-deleted/missing file on a PRESENT drive (parent
      * exists; safe to prune the row) from a file on an UNPLUGGED drive (parent gone; the row must be

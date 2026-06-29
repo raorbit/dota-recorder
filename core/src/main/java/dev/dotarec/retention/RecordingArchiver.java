@@ -163,6 +163,10 @@ public class RecordingArchiver {
                     activeMovable.add(m);
                 }
             }
+            // Clips live on the active drive (<videoDir>/clips) and are never relocated, so count their
+            // bytes toward the active drive's usage — otherwise the per-drive cap check below ignores
+            // them and clips could fill the active drive past its cap even when archives have headroom.
+            used.merge(active, sweeper.totalClipBytes(), Long::sum);
             // Move order: starred keepers FIRST (so they reach the safe archive drive soonest), then
             // oldest-first within each group. Eviction (deletion) is still age-only and skips starred —
             // this only changes which files get RELOCATED first when the active drive is over its cap.
