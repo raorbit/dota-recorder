@@ -20,6 +20,8 @@ package dev.dotarec.data;
  * @param status         {@code pending}, {@code generating}, {@code ready}, or {@code failed}
  * @param error          failure detail when {@code status == failed}, else null
  * @param createdAt      epoch millis the clip row was created
+ * @param starred        when true, the clip is exempt from the retention sweep (kept until manually
+ *                       deleted), independently of its parent match's star state
  */
 public record ClipRow(
         long id,
@@ -34,6 +36,7 @@ public record ClipRow(
         Long fileSizeBytes,
         String status,
         String error,
-        long createdAt
+        long createdAt,
+        boolean starred
 ) {
 }

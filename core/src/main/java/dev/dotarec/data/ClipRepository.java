@@ -83,7 +83,7 @@ public class ClipRepository {
     public List<ClipRow> findByParentMatchId(long parentMatchId) {
         String sql = """
                 SELECT id, parent_match_id, kind, trigger_reason, start_offset_s, end_offset_s,
-                       label, video_path, thumb_path, file_size_bytes, status, error, created_at
+                       label, video_path, thumb_path, file_size_bytes, status, error, created_at, starred
                 FROM clips
                 WHERE parent_match_id = ?
                 ORDER BY start_offset_s ASC, id ASC
@@ -107,7 +107,7 @@ public class ClipRepository {
     public Optional<ClipRow> findById(long id) {
         String sql = """
                 SELECT id, parent_match_id, kind, trigger_reason, start_offset_s, end_offset_s,
-                       label, video_path, thumb_path, file_size_bytes, status, error, created_at
+                       label, video_path, thumb_path, file_size_bytes, status, error, created_at, starred
                 FROM clips
                 WHERE id = ?
                 """;
@@ -126,7 +126,7 @@ public class ClipRepository {
     public List<ClipRow> findByStatus(String status) {
         String sql = """
                 SELECT id, parent_match_id, kind, trigger_reason, start_offset_s, end_offset_s,
-                       label, video_path, thumb_path, file_size_bytes, status, error, created_at
+                       label, video_path, thumb_path, file_size_bytes, status, error, created_at, starred
                 FROM clips
                 WHERE status = ?
                 ORDER BY created_at ASC, id ASC
@@ -150,7 +150,7 @@ public class ClipRepository {
     public List<ClipRow> findAll() {
         String sql = """
                 SELECT id, parent_match_id, kind, trigger_reason, start_offset_s, end_offset_s,
-                       label, video_path, thumb_path, file_size_bytes, status, error, created_at
+                       label, video_path, thumb_path, file_size_bytes, status, error, created_at, starred
                 FROM clips
                 ORDER BY created_at DESC, id DESC
                 """;
@@ -252,6 +252,65 @@ public class ClipRepository {
         }
     }
 
+    /**
+     * Sets the starred flag on a clip. A starred clip is exempt from the retention sweep — kept until
+     * manually deleted, independently of its parent match's star. Mirrors
+     * {@link MatchRepository#setStarred}.
+     *
+     * @return rows updated (0 if no such clip)
+     */
+    public int setStarred(long id, boolean starred) {
+        String sql = "UPDATE clips SET starred = ? WHERE id = ?";
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setInt(1, starred ? 1 : 0);
+            ps.setLong(2, id);
+            return ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to set starred on clip " + id, e);
+        }
+    }
+
+    /** Repoints a clip's file paths after an archive move (mirrors {@link MatchRepository#updateVideoPath}). */
+    public void updateVideoPath(long id, String videoPath, String thumbPath) {
+        String sql = "UPDATE clips SET video_path = ?, thumb_path = ? WHERE id = ?";
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, videoPath);
+            ps.setString(2, thumbPath);
+            ps.setLong(3, id);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to repoint clip " + id, e);
+        }
+    }
+
+    /**
+     * Clips eligible for retention eviction, oldest first: those with a video on disk that are NOT
+     * starred. Drives the "clips last" eviction phase — the sweeper deletes these only after exhausting
+     * non-starred match VODs. Starred clips are protected (never auto-deleted), mirroring starred matches.
+     */
+    public List<ClipRow> findSweepCandidates() {
+        String sql = """
+                SELECT id, parent_match_id, kind, trigger_reason, start_offset_s, end_offset_s,
+                       label, video_path, thumb_path, file_size_bytes, status, error, created_at, starred
+                FROM clips
+                WHERE starred = 0 AND video_path IS NOT NULL
+                ORDER BY created_at ASC, id ASC
+                """;
+        List<ClipRow> out = new ArrayList<>();
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                out.add(map(rs));
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to query clip sweep candidates", e);
+        }
+        return out;
+    }
+
     private ClipRow map(ResultSet rs) throws SQLException {
         return new ClipRow(
                 rs.getLong("id"),
@@ -266,7 +325,8 @@ public class ClipRepository {
                 getNullableLong(rs, "file_size_bytes"),
                 rs.getString("status"),
                 rs.getString("error"),
-                rs.getLong("created_at")
+                rs.getLong("created_at"),
+                rs.getInt("starred") != 0
         );
     }
 

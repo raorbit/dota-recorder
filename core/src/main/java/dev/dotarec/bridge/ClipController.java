@@ -11,6 +11,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -94,6 +95,24 @@ public class ClipController {
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "No clip " + clipId));
         return ResponseEntity.status(HttpStatus.ACCEPTED).body(row);
     }
+
+    /**
+     * Stars/unstars a clip. A starred clip is exempt from the retention sweep — kept until manually
+     * deleted, independent of its parent match's star. Mirrors {@code PATCH /matches/{id}}.
+     */
+    @PatchMapping("/clips/{clipId}")
+    public ClipRow patch(@PathVariable long clipId, @RequestBody ClipPatch patch) {
+        clips.findById(clipId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "No clip " + clipId));
+        if (patch != null && patch.starred() != null) {
+            clips.setStarred(clipId, patch.starred());
+        }
+        return clips.findById(clipId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "No clip " + clipId));
+    }
+
+    /** Partial-update body for {@code PATCH /clips/{clipId}}; a null field is left unchanged. */
+    public record ClipPatch(Boolean starred) {}
 
     /**
      * Permanently deletes a clip: the rendered {@code .mp4} + thumbnail on disk, then the row. 404 when
