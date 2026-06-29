@@ -12,15 +12,22 @@ point it at your Dota install once and it records in the background.
 
 ## Status
 
-Pre-release (v0.1.0). The full feature surface is built and the core
-**detect → record → tag → store → seek** loop has been validated end-to-end against a
-real Dota match. Remaining before a tagged release: a packaged-installer run-through and
-a few robustness spot-checks.
+v0.1.1 — first tagged release. The full feature surface is built, the core
+**detect → record → tag → store → seek** loop is validated end-to-end against a real Dota
+match, and the packaged Windows installer is confirmed installing and running.
 
 - [x] Application framework chosen / scaffolded
 - [x] Core implemented (recording brain, GSI, OBS control, storage, browse UI)
 - [x] Live record → tag → seek proven end-to-end
-- [ ] Packaged installer end-to-end + v0.1.0 release
+- [x] Packaged installer end-to-end + tagged release
+- [ ] Real-Dota *bot-match* capture validated at the keyboard (only a demo match proven so far)
+
+## Install
+
+Grab the latest `Dota 2 Recorder-Setup-*.exe` from the
+[Releases](https://github.com/raorbit/dota-recorder/releases) page and run it. The installer
+bundles everything it needs — OBS and a trimmed JRE — so there's no separate setup; just point
+it at your Dota install on first run.
 
 ## How it works
 
