@@ -49,6 +49,8 @@ class ClipControllerTest {
     private MatchRepository matches;
     private ClipService clipService;
     private ClipController controller;
+    private SettingsStore settings;
+    private Path archiveDir;
     private long matchId;
 
     @BeforeEach
@@ -59,9 +61,14 @@ class ClipControllerTest {
         clipService = mock(ClipService.class);
         // The served clip files are written directly under the TempDir, so point the storage root
         // there: the controller's containment guard requires a streamed file to live under a root.
-        SettingsStore settings = new SettingsStore(
+        settings = new SettingsStore(
                 new AppPaths(dir.resolve("data").toString(), dir.resolve("obs").toString()));
         settings.get().videoDir = dir.toString();
+        // A configured ARCHIVE drive: a clip relocated here must also pass containment (the guard
+        // allows videoDir AND every storageLocations[] root, so archived clips stay playable).
+        archiveDir = Files.createDirectories(dir.resolve("archive"));
+        settings.get().storageLocations = java.util.List.of(
+                new SettingsStore.StorageLocation("archive", archiveDir.toString(), 100));
         controller = new ClipController(clips, clipService, matches, settings);
 
         matchId = matches.insert(
@@ -179,6 +186,20 @@ class ClipControllerTest {
                 controller.videoStream(clipId, new HttpHeaders());
 
         // A file under videoDir passes the guard and streams (200 with no Range).
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+    }
+
+    @Test
+    void videoStream_underArchiveRoot_doesNotRejectForContainment() throws Exception {
+        // A clip relocated to a configured archive drive (storageLocations[]) must also pass the
+        // containment guard — otherwise the hardening would make archived clips unplayable.
+        Path file = archiveDir.resolve("archived.mp4");
+        Files.write(file, new byte[] {1, 2, 3});
+        long clipId = insertClip("ready", file.toString(), null);
+
+        ResponseEntity<StreamingResponseBody> resp =
+                controller.videoStream(clipId, new HttpHeaders());
+
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
     }
 
