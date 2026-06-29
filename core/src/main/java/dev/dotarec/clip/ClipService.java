@@ -42,6 +42,11 @@ public class ClipService {
 
     private static final Logger log = LoggerFactory.getLogger(ClipService.class);
 
+    /** Hard ceiling on a clip's length; bounds the case where the parent match has a null duration. */
+    private static final double MAX_CLIP_SECONDS = 4 * 60 * 60;
+    /** Hard ceiling on a clip label's length. */
+    private static final int MAX_LABEL_CHARS = 200;
+
     private final ClipRepository clips;
     private final MatchRepository matches;
     private final Clipper clipper;
@@ -97,6 +102,18 @@ public class ClipService {
             throw new IllegalArgumentException(
                     "Cannot create clip: match " + parentMatchId + " has no recorded video");
         }
+        // Reject non-finite offsets before the clamping math: the empty-range check below fails for NaN
+        // (NaN <= NaN is false), so a NaN would otherwise slip through to ffmpeg as "NaN".
+        if (!Double.isFinite(startS) || !Double.isFinite(endS)) {
+            throw new IllegalArgumentException(
+                    "Cannot create clip: non-finite range [" + startS + ", " + endS + "] for match "
+                            + parentMatchId);
+        }
+        if (label != null && label.length() > MAX_LABEL_CHARS) {
+            throw new IllegalArgumentException(
+                    "Cannot create clip: label exceeds " + MAX_LABEL_CHARS + " chars (" + label.length()
+                            + ") for match " + parentMatchId);
+        }
 
         // Clamp to the recorded range. A null/absent duration just leaves the upper bound open.
         double lower = Math.max(0.0, Math.min(startS, endS));
@@ -110,6 +127,12 @@ public class ClipService {
             throw new IllegalArgumentException(
                     "Cannot create clip: empty range [" + startS + ", " + endS + "] for match "
                             + parentMatchId);
+        }
+        // Bound the length — chiefly for a parent with a null durationS (no upper clamp above).
+        if (upper - lower > MAX_CLIP_SECONDS) {
+            throw new IllegalArgumentException(
+                    "Cannot create clip: range " + (upper - lower) + "s exceeds max " + MAX_CLIP_SECONDS
+                            + "s for match " + parentMatchId);
         }
 
         long clipId = clips.insert(parentMatchId, kind, triggerReason, lower, upper, label,
@@ -155,8 +178,18 @@ public class ClipService {
         // delete the source mid-cut. The thumbnail + finalize below read the GENERATED clip (our own
         // output), not the parent VOD, so they run OUTSIDE the lock to avoid needlessly blocking
         // retention during a second ffmpeg process.
+        // Guard a corrupt row that bypassed create()'s range validation: a degenerate/inverted range
+        // would otherwise be handed to ffmpeg as a zero/negative duration. Fail it rather than cut.
+        if (clip.endOffsetS() <= clip.startOffsetS()) {
+            failClip(clipId, parentMatchId, "degenerate clip range ["
+                    + clip.startOffsetS() + ", " + clip.endOffsetS() + "]");
+            return;
+        }
+
         Clipper.Result result;
         double duration;
+        // Hoisted so the catch block can clean up a partial ffmpeg output if the cut throws mid-write.
+        Path out = null;
         maintenanceLock.lock();
         try {
             // Re-read the parent's current path under the lock: the sweeper/archiver may have moved or
@@ -176,13 +209,15 @@ public class ClipService {
 
             Path outDir = videoDir().resolve("clips");
             Files.createDirectories(outDir);
-            Path out = outDir.resolve(parentMatchId + "-clip-" + clipId + ".mp4");
+            out = outDir.resolve(parentMatchId + "-clip-" + clipId + ".mp4");
 
             duration = clip.endOffsetS() - clip.startOffsetS();
             result = clipper.clip(source, clip.startOffsetS(), duration, out);
         } catch (Exception e) {
             log.warn("Failed to generate clip {} for match {}: {}",
                     clipId, parentMatchId, e.getMessage(), e);
+            // The cut may have left a partial .mp4 behind; failClip only nulls video_path, so unlink it.
+            deleteQuietly(out);
             failClip(clipId, parentMatchId, e.getMessage());
             return;
         } finally {
