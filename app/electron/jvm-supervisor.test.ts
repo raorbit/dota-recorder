@@ -140,6 +140,20 @@ describe('JvmSupervisor', () => {
     await expect(sup.start()).rejects.toThrow(/did not become healthy/i);
   });
 
+  it('rejects start() with the real error (not crash) when the child fails to launch', async () => {
+    // A missing/unlaunchable javaw emits 'error' and never 'exit'. With no error listener Node re-emits
+    // it as an uncaughtException that kills the Electron main process; instead start() must reject with
+    // the real ENOENT so the supervisor's controlled notifyDown / restart path runs.
+    healthOk = false; // keep waitForHealth polling so the launch error wins the race
+    const sup = new JvmSupervisor({ onLog: () => {}, healthTimeoutMs: 5_000 });
+
+    const starting = sup.start();
+    await flush(10);
+    children[0].emit('error', Object.assign(new Error('spawn javaw ENOENT'), { code: 'ENOENT' }));
+
+    await expect(starting).rejects.toThrow(/ENOENT/);
+  });
+
   it('scrubs the bridge token from emitted log lines', async () => {
     const lines: string[] = [];
     const sup = new JvmSupervisor({ bridgeToken: 'secrettoken', onLog: (line) => lines.push(line) });

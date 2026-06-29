@@ -138,7 +138,20 @@ export class ObsSupervisor {
       }
     });
 
-    await this.waitForObs(child);
+    // A failed spawn emits 'error' and never 'exit'; with no listener Node re-emits it as an
+    // uncaughtException that kills the Electron main process. The existsSync precheck above catches a
+    // missing obs64.exe, but EACCES / a corrupt binary / a TOCTOU delete still reach spawn — race the
+    // error against the readiness wait so start() rejects with the real cause instead of crashing.
+    const launchFailed = new Promise<never>((_, reject) => {
+      child.once('error', (err) => {
+        if (this.child === child) this.child = null;
+        const e = err instanceof Error ? err : new Error(String(err));
+        this.onLog(`OBS failed to launch: ${e.message}`);
+        reject(e);
+      });
+    });
+
+    await Promise.race([this.waitForObs(child), launchFailed]);
   }
 
   /** Graceful-then-forceful shutdown of the OBS tree. */

@@ -151,6 +151,20 @@ describe('ObsSupervisor', () => {
     expect(execFileMock).not.toHaveBeenCalled();
   });
 
+  // Case 1b: obs64.exe present (existsSync passes) but the spawn itself fails (EACCES / corrupt binary
+  // / TOCTOU delete). The 'error' event must reject start() rather than become an uncaughtException
+  // that kills the Electron main process.
+  it('rejects start() with the real error (not crash) when obs64.exe fails to launch', async () => {
+    obsConnected = false; // keep the readiness poll going so the launch error wins the race
+    const sup = new ObsSupervisor({ ...baseOpts, onLog: () => {}, healthTimeoutMs: 5_000 });
+
+    const starting = sup.start();
+    await flush(10);
+    children[0].emit('error', Object.assign(new Error('spawn obs64.exe EACCES'), { code: 'EACCES' }));
+
+    await expect(starting).rejects.toThrow(/EACCES/);
+  });
+
   // Case 2: firewall scoping success branch.
   it('logs the loopback-scoped success message and runs netsh delete-then-add', async () => {
     setPlatform('win32');

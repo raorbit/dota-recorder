@@ -128,7 +128,20 @@ export class JvmSupervisor {
       }
     });
 
-    await this.waitForHealth(child);
+    // A failed spawn (missing/unlaunchable javaw, ENOENT/EACCES) emits 'error' and never 'exit'. With
+    // no listener Node re-emits it as an uncaughtException that takes down the Electron main process,
+    // bypassing the supervisor's controlled failure path entirely. Race it against the health wait so
+    // start() rejects with the real error instead — the caller then runs notifyDown / bounded restart.
+    const launchFailed = new Promise<never>((_, reject) => {
+      child.once('error', (err) => {
+        if (this.child === child) this.child = null;
+        const e = err instanceof Error ? err : new Error(String(err));
+        this.onLog(`core failed to launch: ${e.message}`);
+        reject(e);
+      });
+    });
+
+    await Promise.race([this.waitForHealth(child), launchFailed]);
   }
 
   /** Graceful-then-forceful shutdown of the JVM tree. */
