@@ -84,6 +84,18 @@ public class SettingsController {
                     HttpStatus.BAD_REQUEST,
                     "invalid format: " + patch.format() + " (allowed: " + ALLOWED_FORMAT + ")");
         }
+        // accountId is the 32-bit Dota account id (the low half of a SteamID), valid range 1..2^32-1.
+        // The renderer sends it via Number(), which silently corrupts a pasted 64-bit SteamID to an
+        // imprecise float; reject an out-of-range value server-side too so a non-UI caller (or a UI bug)
+        // cannot persist a wrong id the tagger then keys the player's own kills/deaths off of. Only an
+        // actual incoming value is checked (null = leave unchanged, and clearAccountId wins).
+        if (!Boolean.TRUE.equals(patch.clearAccountId())
+                && patch.accountId() != null
+                && (patch.accountId() <= 0 || patch.accountId() > 0xFFFFFFFFL)) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "invalid account id: " + patch.accountId() + " (expected a 32-bit Dota account id)");
+        }
         if (patch.audioSources() != null) {
             for (SettingsStore.AudioSource s : patch.audioSources()) {
                 if (s == null || !ALLOWED_AUDIO_KIND.contains(s.kind())) {
