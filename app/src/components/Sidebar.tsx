@@ -31,15 +31,17 @@ const PRIMARY_BUCKETS: readonly BucketDef[] = [
 const SECONDARY_BUCKETS: readonly BucketDef[] = [
   { key: 'turbo', label: 'Turbo', badge: 'plain' },
   { key: 'abilityDraft', label: 'Ability Draft', badge: 'plain' },
+  // Clips is a permanent tab: always shown (even at 0 clips) so saved clips always have a
+  // visible home. Populated from the clips table (count = ClipRepository total); opening it
+  // lists every saved clip (see MatchTable's ClipTable). Gold badge, like the mockup.
+  { key: 'clips', label: 'Clips', badge: 'gold' },
 ];
 
 // Optional buckets shown only once the backend reports a non-zero count (so an empty
 // library doesn't advertise empty sections, mirroring the Unsorted bucket). Manual has
-// no creation UI yet; Clips is populated from the clips table (count = ClipRepository
-// total) and lists every saved clip when opened.
+// no creation UI yet, so it stays gated until a manual recording exists.
 const OPTIONAL_BUCKETS: readonly BucketDef[] = [
   { key: 'manual', label: 'Manual', badge: 'plain' },
-  { key: 'clips', label: 'Clips', badge: 'gold' },
 ];
 
 function countFor(counts: BucketCounts, key: Bucket): number {
