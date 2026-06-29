@@ -22,7 +22,11 @@ import { execFileSync } from 'node:child_process';
 import * as path from 'node:path';
 
 const FFMPEG_VERSION = process.env.FFMPEG_VERSION ?? 'release-essentials';
-const FFMPEG_SHA256 = process.env.FFMPEG_SHA256 ?? ''; // not yet pinned — see Pinning note above
+// gyan.dev release-essentials (ffmpeg 8.1.2, fetched 2026-06-28). This URL is a ROLLING build, so
+// when upstream rebuilds the zip the hash will change and the fetch aborts — re-run, then repaste the
+// printed sha here (or override via the FFMPEG_SHA256 env at build time).
+const FFMPEG_SHA256 =
+  process.env.FFMPEG_SHA256 ?? 'db580001caa24ac104c8cb856cd113a87b0a443f7bdf47d8c12b1d740584a2ec';
 const FFMPEG_URL = process.env.FFMPEG_URL ?? 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip';
 
 const repoRoot = path.resolve(import.meta.dirname, '..');
