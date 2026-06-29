@@ -1,12 +1,14 @@
 package dev.dotarec.setup;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
+import java.time.Duration;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -95,6 +97,18 @@ class SteamPathDiscoveryTest {
         assertThat(paths)
                 .containsExactly(
                         Path.of("C:\\Program Files (x86)\\Steam"), Path.of("D:\\SteamLibrary"));
+    }
+
+    @Test
+    void findDotaInstallDir_completesPromptlyAndNeverThrows() {
+        // The registry shell-out is gated on Windows and bounded by a 5s per-query timeout, so the
+        // public entry point must return (degrading to empty if Steam isn't present) well within a
+        // generous bound rather than hanging on a stuck reg.exe -- and must never throw.
+        assertThatCode(
+                        () ->
+                                org.junit.jupiter.api.Assertions.assertTimeoutPreemptively(
+                                        Duration.ofSeconds(30), discovery::findDotaInstallDir))
+                .doesNotThrowAnyException();
     }
 
     @Test

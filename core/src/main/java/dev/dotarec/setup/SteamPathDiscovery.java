@@ -11,6 +11,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.slf4j.Logger;
@@ -39,6 +40,9 @@ public class SteamPathDiscovery {
 
     /** Dota 2 Steam app id. */
     static final String DOTA_APP_ID = "570";
+
+    /** Upper bound on a single {@code reg query} so a hung reg.exe can't block the setup thread. */
+    private static final long REGISTRY_QUERY_TIMEOUT_SECONDS = 5;
 
     private static final Pattern VDF_PATH = Pattern.compile("\"path\"\\s+\"([^\"]+)\"");
     private static final Pattern ACF_INSTALLDIR = Pattern.compile("\"installdir\"\\s+\"([^\"]+)\"");
@@ -162,26 +166,46 @@ public class SteamPathDiscovery {
      * throwing on the GSI-setup request thread.
      */
     private Optional<Path> readRegistryValue(String key, String valueName) {
+        if (!System.getProperty("os.name", "").toLowerCase().contains("win")) {
+            // reg.exe only exists on Windows; on any other host degrade to empty without spawning.
+            return Optional.empty();
+        }
         try {
             Process proc =
                     new ProcessBuilder("reg", "query", key, "/v", valueName)
                             .redirectErrorStream(true)
                             .start();
-            String value = null;
-            try (BufferedReader r =
-                    new BufferedReader(
-                            new InputStreamReader(proc.getInputStream(), StandardCharsets.UTF_8))) {
-                String line;
-                while ((line = r.readLine()) != null) {
-                    if (line.contains(valueName) && line.contains("REG_SZ")) {
-                        Matcher m = REG_SZ_VALUE.matcher(line);
-                        if (m.find()) {
-                            value = m.group(1).trim();
-                        }
-                    }
-                }
+            // Drain stdout on a daemon thread so the waitFor timeout is authoritative even if a hung
+            // reg.exe never closes its pipe -- a blocking read here would otherwise defeat the bound.
+            StringBuilder out = new StringBuilder();
+            Thread drain =
+                    new Thread(
+                            () -> {
+                                try (BufferedReader r =
+                                        new BufferedReader(
+                                                new InputStreamReader(
+                                                        proc.getInputStream(),
+                                                        StandardCharsets.UTF_8))) {
+                                    String line;
+                                    while ((line = r.readLine()) != null) {
+                                        out.append(line).append('\n');
+                                    }
+                                } catch (IOException ignored) {
+                                    // pipe closed on destroyForcibly / process exit; nothing to do
+                                }
+                            },
+                            "reg-query-drain");
+            drain.setDaemon(true);
+            drain.start();
+            if (!proc.waitFor(REGISTRY_QUERY_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                // A hung reg.exe (EDR hook, stuck registry handle) must not block the setup request
+                // thread forever or leak the child; kill it and degrade to empty.
+                proc.destroyForcibly();
+                log.debug("Registry read {} {} timed out", key, valueName);
+                return Optional.empty();
             }
-            proc.waitFor();
+            drain.join(REGISTRY_QUERY_TIMEOUT_SECONDS * 1000);
+            String value = parseRegSzValue(out.toString(), valueName);
             if (value != null && !value.isBlank()) {
                 return Optional.of(Path.of(value));
             }
@@ -192,5 +216,18 @@ public class SteamPathDiscovery {
             log.debug("Registry read {} {} interrupted", key, valueName);
         }
         return Optional.empty();
+    }
+
+    /** Pulls the {@code REG_SZ} payload for {@code valueName} out of captured {@code reg query} output. */
+    private static String parseRegSzValue(String output, String valueName) {
+        for (String line : output.split("\n")) {
+            if (line.contains(valueName) && line.contains("REG_SZ")) {
+                Matcher m = REG_SZ_VALUE.matcher(line);
+                if (m.find()) {
+                    return m.group(1).trim();
+                }
+            }
+        }
+        return null;
     }
 }
