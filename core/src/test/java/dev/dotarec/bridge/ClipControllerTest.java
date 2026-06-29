@@ -239,6 +239,41 @@ class ClipControllerTest {
         }
     }
 
+    // ── delete containment ──────────────────────────────────────────────────
+
+    @Test
+    void delete_unlinksFilesUnderStorageRoot_andRemovesRow() throws Exception {
+        Path vod = dir.resolve("del.mp4");
+        Path thumb = dir.resolve("del.jpg");
+        Files.write(vod, new byte[] {1, 2, 3});
+        Files.write(thumb, new byte[] {4, 5});
+        long clipId = insertClip("ready", vod.toString(), thumb.toString());
+
+        controller.delete(clipId);
+
+        assertThat(clips.findById(clipId)).isEmpty();
+        assertThat(Files.exists(vod)).isFalse();
+        assertThat(Files.exists(thumb)).isFalse();
+    }
+
+    @Test
+    void delete_skipsFilesOutsideStorageRoots_butStillRemovesRow() throws Exception {
+        // A real, readable file OUTSIDE videoDir/storageLocations (a tampered DB row / .. escape): the
+        // delete must NOT unlink it — the containment guard skips it — yet the row is still removed.
+        Path outside = Files.createTempFile("clip-del-outside-", ".mp4");
+        Files.write(outside, new byte[] {1, 2, 3});
+        try {
+            long clipId = insertClip("ready", outside.toString(), null);
+
+            controller.delete(clipId);
+
+            assertThat(clips.findById(clipId)).isEmpty();
+            assertThat(Files.exists(outside)).isTrue();
+        } finally {
+            Files.deleteIfExists(outside);
+        }
+    }
+
     @Test
     void videoStream_unknownClip_is404() {
         assertThatThrownBy(() -> controller.videoStream(999_999L, new HttpHeaders()))
