@@ -275,6 +275,78 @@ class ObsControllerTest {
     }
 
     @Test
+    void startRecording_holdsTheLockSoAReconnectCannotTearDownTheControllerMidSequence()
+            throws Exception {
+        // The concurrency fix: startRecording() is synchronized on the same monitor as connect(), so a
+        // scheduler reconnect tick cannot run disconnectQuietly() (which nulls/replaces the controller)
+        // while a start sequence is blocked in awaitRecordConfirmed. We prove mutual exclusion by
+        // parking startRecording mid-flight (inside the mocked startRecord, before OUTPUT_STARTED) and
+        // showing a concurrent connect() cannot enter until the start completes.
+        ObsHealth health = new ObsHealth();
+        ObsEvents events = new ObsEvents(health);
+
+        CountDownLatch startInFlight = new CountDownLatch(1); // start has entered startRecord
+        CountDownLatch releaseStart = new CountDownLatch(1); // let start confirm + return
+
+        SettingsStore settings = mock(SettingsStore.class);
+        when(settings.get()).thenReturn(new SettingsStore.Settings());
+
+        // connect() rebuilds via buildController; capture whether it ran (it must NOT until start ends).
+        java.util.concurrent.atomic.AtomicBoolean connectRebuilt =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
+        ObsController controller =
+                new ObsController(settings, health, events, sceneConfigurer()) {
+                    @Override
+                    OBSRemoteController buildController(SettingsStore.Settings s, CountDownLatch latch) {
+                        connectRebuilt.set(true);
+                        latch.countDown();
+                        return mock(OBSRemoteController.class);
+                    }
+                };
+
+        OBSRemoteController obs = mock(OBSRemoteController.class);
+        StartRecordResponse startOk = mock(StartRecordResponse.class);
+        when(startOk.isSuccessful()).thenReturn(true);
+        when(obs.startRecord(anyLong()))
+                .thenAnswer(
+                        inv -> {
+                            startInFlight.countDown();
+                            // Block here as if waiting on a slow OBS; we hold the controller's lock.
+                            releaseStart.await();
+                            // Now confirm OUTPUT_STARTED so awaitRecordConfirmed returns.
+                            events.onRecordStateChanged("OBS_WEBSOCKET_OUTPUT_STARTED", null);
+                            return startOk;
+                        });
+        ReflectionTestUtils.setField(controller, "controller", obs);
+        health.setConnected(true);
+
+        Thread starter = new Thread(controller::startRecording, "starter");
+        starter.start();
+        assertThat(startInFlight.await(2, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+
+        // A reconnect tick fires WHILE the start is parked. Because connect() needs the same monitor
+        // startRecording holds, this call must block; the rebuild must not happen yet.
+        Thread reconnector = new Thread(controller::connect, "reconnector");
+        reconnector.start();
+        // Give the reconnect thread a moment to (try to) acquire the lock.
+        Thread.sleep(100);
+        assertThat(connectRebuilt.get())
+                .as("connect() must not tear down/rebuild the controller while a start holds the lock")
+                .isFalse();
+
+        // Let the start finish; only now may the reconnect proceed.
+        releaseStart.countDown();
+        starter.join(2_000);
+        reconnector.join(2_000);
+
+        assertThat(starter.isAlive()).isFalse();
+        assertThat(reconnector.isAlive()).isFalse();
+        assertThat(connectRebuilt.get())
+                .as("connect() runs once the start releases the lock")
+                .isTrue();
+    }
+
+    @Test
     void ensureConnected_whenConnectFailsWithoutReadyEvent_failsFastAndSkipsProtocolCheck() {
         ObsHealth health = new ObsHealth();
         SettingsStore settings = mock(SettingsStore.class);

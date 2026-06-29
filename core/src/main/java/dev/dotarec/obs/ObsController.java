@@ -41,6 +41,18 @@ import org.springframework.stereotype.Service;
  * arm time, schedule), and connection failures degrade to {@code connected=false} plus a typed
  * {@link ObsException}. Event callbacks run on the library socket thread and only flip the
  * {@code volatile} {@link ObsHealth} flags via {@link ObsEvents}; they never block.
+ *
+ * <p>Concurrency: {@link #connect()}/{@link #ensureConnected()}/{@link #disconnectQuietly()} and
+ * {@link #startRecording()}/{@link #stopRecording()} all hold the intrinsic lock on {@code this}, so a
+ * reconnect tick (the {@code ObsConnectionScheduler} calls {@code ensureConnected()} every 5s) cannot
+ * run {@code disconnectQuietly()} -- which nulls/replaces {@link #controller} -- in the middle of an
+ * in-flight start/stop sequence. The start sequence can block ~15s in {@code awaitRecordConfirmed},
+ * but holding {@code this} across it is safe and cannot deadlock: the websocket lifecycle callbacks
+ * (onReady/onDisconnect/onClose/error) and the record-state callback do NOT acquire {@code this} --
+ * they only flip the {@code volatile} health flags and count down a latch -- so the socket thread can
+ * still deliver OUTPUT_STARTED (releasing the awaiting FSM thread) and signal a drop while a start is
+ * in flight. The worst case is a reconnect tick waiting on the lock until the start/stop returns, not
+ * a stall of OBS's own callbacks.
  */
 @Service
 public class ObsController implements ObsRecorder {
@@ -320,7 +332,7 @@ public class ObsController implements ObsRecorder {
     }
 
     @Override
-    public String startRecording() {
+    public synchronized String startRecording() {
         // Clear the previous recording's confirmed-start anchor BEFORE issuing StartRecord. The FSM
         // reads recordConfirmedAt() the instant this returns, but THIS match's OUTPUT_STARTED lands
         // asynchronously a moment later -- and events.reset() otherwise only runs on (re)connect, not
@@ -395,6 +407,9 @@ public class ObsController implements ObsRecorder {
      * Best-effort StopRecord that swallows any failure. Used to clean up after OBS accepted a
      * StartRecord but never confirmed OUTPUT_STARTED, so we don't leave it recording a phantom file
      * once we've given up waiting on it.
+     *
+     * <p>Always called from within an already-{@code synchronized} method ({@link #startRecording()}),
+     * so it does not re-take the lock; the intrinsic lock is reentrant regardless.
      */
     private void stopQuietly() {
         OBSRemoteController c = this.controller;
@@ -418,7 +433,7 @@ public class ObsController implements ObsRecorder {
     }
 
     @Override
-    public String stopRecording() {
+    public synchronized String stopRecording() {
         OBSRemoteController c = requireController();
         StopRecordResponse resp = c.stopRecord(REQUEST_TIMEOUT_MS);
         if (resp == null || !resp.isSuccessful()) {
