@@ -520,6 +520,9 @@ export interface Clip {
   readonly status: 'pending' | 'generating' | 'ready' | 'failed';
   readonly error: string | null;
   readonly createdAt: number;
+  // When true, the clip is exempt from the retention sweep (kept until manually deleted),
+  // independently of its parent match's star.
+  readonly starred: boolean;
 }
 
 // GET /buckets/counts — one count per library bucket. Always all seven keys.
@@ -578,6 +581,12 @@ export function deleteClip(clipId: number): Promise<void> {
 // Toggles the star on a match (PATCH /matches/{id}) and returns the updated row.
 export function setStarred(id: number, starred: boolean): Promise<MatchDetail> {
   return patchJson<{ starred: boolean }, MatchDetail>(`/matches/${id}`, { starred });
+}
+
+// Toggles the star on a clip (PATCH /clips/{id}) and returns the updated clip. A starred clip is
+// exempt from the retention sweep, independent of its parent match.
+export function setClipStarred(clipId: number, starred: boolean): Promise<Clip> {
+  return patchJson<{ starred: boolean }, Clip>(`/clips/${clipId}`, { starred });
 }
 
 // Permanently deletes a match (DELETE /matches/{id}): the row + its markers/pauses

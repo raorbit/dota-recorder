@@ -7,6 +7,7 @@ import {
   fetchClips,
   createClip,
   deleteClip,
+  setClipStarred,
   clipStreamUrl,
   clipThumbUrl,
   videoStreamUrl,
@@ -477,6 +478,19 @@ export function VideoPlayer({
     }
   }
 
+  // Star/unstar a clip: a starred clip is exempt from the retention sweep. Optimistic flip with revert
+  // on failure; refresh the library so the Clips bucket reflects the new star state.
+  async function onToggleClipStar(clip: Clip): Promise<void> {
+    const next = !clip.starred;
+    setClips((prev) => prev.map((c) => (c.id === clip.id ? { ...c, starred: next } : c)));
+    try {
+      await setClipStarred(clip.id, next);
+      void reloadLibrary();
+    } catch {
+      setClips((prev) => prev.map((c) => (c.id === clip.id ? { ...c, starred: clip.starred } : c)));
+    }
+  }
+
   const dur = durationS ?? 0;
   // The time readout prefers the actual loaded media duration (the DB value is a recorded estimate
   // that can disagree); falls back to the DB duration before metadata loads / on a no-file row.
@@ -810,6 +824,19 @@ export function VideoPlayer({
                   {clip.status === 'failed' && '⚠'}
                   {(clip.status === 'pending' || clip.status === 'generating') &&
                     (pct != null ? `${Math.round(pct)}%` : '⟳')}
+                </span>
+                <span
+                  className="vp-icon vp-clip-star"
+                  role="button"
+                  tabIndex={0}
+                  aria-label={clip.starred ? `Unstar clip ${clipLabel(clip)}` : `Star clip ${clipLabel(clip)}`}
+                  aria-pressed={clip.starred}
+                  title={clip.starred ? 'Starred — kept from auto-delete' : 'Star to keep from auto-delete'}
+                  data-on={clip.starred ? 'true' : 'false'}
+                  onClick={() => void onToggleClipStar(clip)}
+                  onKeyDown={keyActivate(() => void onToggleClipStar(clip))}
+                >
+                  {clip.starred ? '★' : '☆'}
                 </span>
                 <span
                   className="vp-icon vp-clip-del"

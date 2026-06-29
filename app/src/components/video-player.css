@@ -347,6 +347,21 @@
 .vp-clip-del:hover {
   color: var(--loss);
 }
+/* Per-clip star: a starred clip is kept from the retention sweep. Gold when on, dim when off. */
+.vp-clip-star {
+  font-size: 12px;
+  cursor: pointer;
+}
+.vp-clip-star[data-on='true'] {
+  color: var(--gold);
+}
+.vp-clip-star[data-on='false'] {
+  opacity: 0.5;
+}
+.vp-clip-star:hover {
+  color: var(--gold);
+  opacity: 1;
+}
 
 /* Delete control + its two-step confirm overlay. The trash glyph turns red on hover; the
    confirm dims the stage so a permanent delete reads as deliberate, not a stray tap. */
