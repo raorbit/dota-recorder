@@ -146,6 +146,51 @@ public class ClipRepository {
         return out;
     }
 
+    /** Every clip, newest first — backs the library "Clips" bucket's flat list. */
+    public List<ClipRow> findAll() {
+        String sql = """
+                SELECT id, parent_match_id, kind, trigger_reason, start_offset_s, end_offset_s,
+                       label, video_path, thumb_path, file_size_bytes, status, error, created_at
+                FROM clips
+                ORDER BY created_at DESC, id DESC
+                """;
+        List<ClipRow> out = new ArrayList<>();
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                out.add(map(rs));
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to query all clips", e);
+        }
+        return out;
+    }
+
+    /** Total clip count across all matches — feeds the library bucket counts. */
+    public long count() {
+        String sql = "SELECT COUNT(*) FROM clips";
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            return rs.next() ? rs.getLong(1) : 0L;
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to count clips", e);
+        }
+    }
+
+    /** Total bytes of all clips with a known file size — feeds retention disk accounting. */
+    public long sumFileSizeBytes() {
+        String sql = "SELECT COALESCE(SUM(file_size_bytes), 0) FROM clips WHERE file_size_bytes IS NOT NULL";
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            return rs.next() ? rs.getLong(1) : 0L;
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to sum clip file sizes", e);
+        }
+    }
+
     /**
      * Flips a clip's lifecycle status and (null-safely) the generator outputs. Used by the clip
      * generator to move a row through {@code generating} → {@code ready}/{@code failed}; pass null
