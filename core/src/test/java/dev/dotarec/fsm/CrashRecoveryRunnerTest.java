@@ -482,6 +482,45 @@ class CrashRecoveryRunnerTest {
         assertThat(matches.findAll()).hasSize(1);
     }
 
+    @Test
+    void relinkAlsoRecoversTheArchivedClipThumbnail() throws Exception {
+        Path archiveDir = configureArchive("hdd");
+        long parentId = insertMatch(videoDir.resolve("parent.mp4").toString(), null, 4_096L);
+        long clipId = insertClip(parentId, videoDir.resolve("clips").resolve("gone-clip.mp4").toString());
+        Path stranded = archiveDir.resolve("clip-" + clipId + "-1-clip-1.mp4");
+        Files.writeString(stranded, "the real clip bytes");
+        // The move also relocated the clip thumbnail under <archive>/thumbs/clip-<clipId>-...; recovery
+        // must find it via the clip prefix (exercises recoverArchivedThumb's clip-prefix branch).
+        Path strandedThumb =
+                Files.createDirectories(archiveDir.resolve("thumbs")).resolve("clip-" + clipId + "-gone.jpg");
+        Files.writeString(strandedThumb, "thumb");
+
+        runner.run(null);
+
+        ClipRow row = clips.findById(clipId).orElseThrow();
+        assertThat(row.videoPath()).isEqualTo(stranded.toString());
+        assertThat(row.thumbPath()).isEqualTo(strandedThumb.toString());
+    }
+
+    @Test
+    void importsClipPrefixedArchiveFileAsGsiOnlyWhenNoClipRowExists() throws Exception {
+        Path archiveDir = configureArchive("hdd");
+        // A "clip-<id>-" file on the archive drive whose clip row no longer exists (the clip was
+        // deleted). leadingClipId parses it, recoverArchivedClipLeftover finds no row and returns false,
+        // so it falls through to a standalone gsi_only import rather than being deleted.
+        Path orphan = archiveDir.resolve("clip-99-x.mp4");
+        Files.writeString(orphan, "loose clip residue");
+
+        runner.run(null);
+
+        assertThat(clips.findById(99L)).isEmpty();
+        assertThat(Files.exists(orphan)).isTrue(); // never deleted — we don't destroy unattributable files
+        assertThat(matches.findAll())
+                .filteredOn(row -> orphan.toString().equals(row.videoPath()))
+                .singleElement()
+                .satisfies(row -> assertThat(row.enrichmentState()).isEqualTo("gsi_only"));
+    }
+
     /** Adds an archive storage location at {@code <tmp>/<name>} and returns its directory. */
     private Path configureArchive(String name) throws Exception {
         Path archiveDir = Files.createDirectories(dir.resolve(name));
