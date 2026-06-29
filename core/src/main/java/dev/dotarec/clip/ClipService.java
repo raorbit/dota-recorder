@@ -8,6 +8,7 @@ import dev.dotarec.data.ClipRow;
 import dev.dotarec.data.MatchRepository;
 import dev.dotarec.data.MatchSummary;
 import dev.dotarec.retention.StorageMaintenanceLock;
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
@@ -141,7 +142,13 @@ public class ClipService {
         ClipRow clip = found.get();
         long parentMatchId = clip.parentMatchId();
 
-        clips.updateStatus(clipId, "generating", null, null, null, null);
+        // Atomically claim the row (pending -> generating). If we don't win, another dispatch already
+        // took it (the create dispatch racing the ClipQueue retry sweep) or it's already done/deleted —
+        // skip, so a completed clip is never re-cut and its output overwritten.
+        if (!clips.claimForGeneration(clipId)) {
+            log.debug("Clip {} not claimable (already generating/ready/failed or removed); skipping", clipId);
+            return;
+        }
         events.publish("clip.progress", progress(clipId, parentMatchId, 0));
 
         // The CUT reads the parent VOD, so it runs under the lock so the sweeper/archiver can't move or
@@ -198,8 +205,19 @@ public class ClipService {
         }
 
         try {
-            clips.updateStatus(clipId, "ready", result.output().toString(),
+            int updated = clips.updateStatus(clipId, "ready", result.output().toString(),
                     result.sizeBytes(), thumbPath, null);
+            if (updated == 0) {
+                // The row was deleted (user removed the clip) while we were generating. Don't leak the
+                // output we just wrote, and don't publish a ready event for a clip that no longer exists.
+                log.info("Clip {} (match {}) deleted during generation; discarding orphaned output {}",
+                        clipId, parentMatchId, result.output());
+                deleteQuietly(result.output());
+                if (thumbPath != null) {
+                    deleteQuietly(Path.of(thumbPath));
+                }
+                return;
+            }
             log.info("Generated clip {} for match {} -> {} ({} bytes)",
                     clipId, parentMatchId, result.output(), result.sizeBytes());
             events.publish("clip.ready",
@@ -214,6 +232,18 @@ public class ClipService {
     private void failClip(long clipId, long parentMatchId, String error) {
         clips.updateStatus(clipId, "failed", null, null, null, error);
         events.publish("clip.ready", ready(clipId, parentMatchId, "failed", null));
+    }
+
+    /** Best-effort unlink of an orphaned clip output; a missing/locked file is logged, never thrown. */
+    private static void deleteQuietly(Path p) {
+        if (p == null) {
+            return;
+        }
+        try {
+            Files.deleteIfExists(p);
+        } catch (IOException e) {
+            log.warn("Could not delete orphaned clip file {}: {}", p, e.getMessage());
+        }
     }
 
     /** Resolves the recording dir from settings, mirroring {@code ThumbnailService}'s blank fallback. */

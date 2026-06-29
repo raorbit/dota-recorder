@@ -195,9 +195,13 @@ public class ClipRepository {
      * Flips a clip's lifecycle status and (null-safely) the generator outputs. Used by the clip
      * generator to move a row through {@code generating} → {@code ready}/{@code failed}; pass null
      * for outputs that do not apply to the new status (e.g. {@code error} on success).
+     *
+     * @return the number of rows updated — 0 means the row was deleted (e.g. the user removed the clip
+     *     while it was still generating), which the caller uses to clean up the orphaned output it just
+     *     wrote rather than leaving it on disk.
      */
-    public void updateStatus(long id, String status, String videoPath, Long fileSizeBytes,
-                             String thumbPath, String error) {
+    public int updateStatus(long id, String status, String videoPath, Long fileSizeBytes,
+                            String thumbPath, String error) {
         String sql = """
                 UPDATE clips
                 SET status = ?, video_path = ?, file_size_bytes = ?, thumb_path = ?, error = ?
@@ -211,9 +215,28 @@ public class ClipRepository {
             ps.setString(4, thumbPath);
             ps.setString(5, error);
             ps.setLong(6, id);
-            ps.executeUpdate();
+            return ps.executeUpdate();
         } catch (SQLException e) {
             throw new IllegalStateException("Failed to update status for clip " + id, e);
+        }
+    }
+
+    /**
+     * Atomically claims a {@code pending} clip for generation by flipping it to {@code generating},
+     * returning true only if THIS call won the transition (one row matched {@code status='pending'}).
+     * A compare-and-set so a clip dispatched twice — the immediate create dispatch racing the
+     * {@link #findByStatus}-driven retry sweep — is rendered exactly once: the loser sees the row
+     * already {@code generating}/{@code ready}/{@code failed} (or deleted) and skips, so a completed
+     * clip is never re-cut and its output never overwritten.
+     */
+    public boolean claimForGeneration(long id) {
+        String sql = "UPDATE clips SET status = 'generating' WHERE id = ? AND status = 'pending'";
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, id);
+            return ps.executeUpdate() == 1;
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to claim clip " + id + " for generation", e);
         }
     }
 
