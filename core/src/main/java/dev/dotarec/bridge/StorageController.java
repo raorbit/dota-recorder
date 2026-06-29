@@ -3,6 +3,8 @@ package dev.dotarec.bridge;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import dev.dotarec.config.SettingsStore;
 import dev.dotarec.config.SettingsStore.StorageLocation;
+import dev.dotarec.data.ClipRepository;
+import dev.dotarec.data.ClipRow;
 import dev.dotarec.data.MatchRepository;
 import dev.dotarec.data.MatchSummary;
 import java.io.File;
@@ -20,9 +22,10 @@ import org.springframework.web.bind.annotation.RestController;
  *
  * <p>{@code GET /storage/usage} → an ordered list: the active recording drive first (role
  * {@code active}, cap = {@code retentionCapGb}), then each archive drive (role {@code archive}).
- * {@code usedBytes} is the stored VOD bytes under that path (from the DB); {@code freeBytes}/
- * {@code totalBytes} come from the filesystem and are null when the drive can't be stat'd (e.g. a
- * configured path that doesn't exist yet).
+ * {@code usedBytes} is the stored VOD + clip bytes under that path (from the DB), matching what the
+ * retention sweeper and archiver count against the caps; {@code freeBytes}/{@code totalBytes} come
+ * from the filesystem and are null when the drive can't be stat'd (e.g. a configured path that
+ * doesn't exist yet).
  */
 @RestController
 public class StorageController {
@@ -31,10 +34,12 @@ public class StorageController {
 
     private final SettingsStore settings;
     private final MatchRepository matches;
+    private final ClipRepository clips;
 
-    public StorageController(SettingsStore settings, MatchRepository matches) {
+    public StorageController(SettingsStore settings, MatchRepository matches, ClipRepository clips) {
         this.settings = settings;
         this.matches = matches;
+        this.clips = clips;
     }
 
     @GetMapping("/storage/usage")
@@ -52,8 +57,11 @@ public class StorageController {
             }
         }
 
-        // One pass over stored VODs, attributing each file's bytes to the drive it lives under.
+        // One pass over stored VODs AND clips, attributing each file's bytes to the drive it lives
+        // under. Clips are first-class stored files the sweeper/archiver also count, so omitting them
+        // here understates real usage (and the starred total below).
         List<MatchSummary> all = matches.findAll();
+        List<ClipRow> allClips = clips.findAll();
         List<DriveUsage> out = new ArrayList<>(drives.size());
         for (Drive d : drives) {
             long used = 0L;
@@ -64,6 +72,14 @@ public class StorageController {
                 }
                 if (normalize(m.videoPath()).startsWith(dirPrefix)) {
                     used += m.fileSizeBytes();
+                }
+            }
+            for (ClipRow c : allClips) {
+                if (c.videoPath() == null || c.videoPath().isBlank() || c.fileSizeBytes() == null) {
+                    continue;
+                }
+                if (normalize(c.videoPath()).startsWith(dirPrefix)) {
+                    used += c.fileSizeBytes();
                 }
             }
             Long free = null;
@@ -78,8 +94,9 @@ public class StorageController {
             out.add(new DriveUsage(d.role(), d.path(), d.capBytes(), used, free, total));
         }
 
-        // Totals across all stored VODs (regardless of which drive): everything, and the starred
-        // subset that the retention sweeper never auto-deletes.
+        // Totals across all stored VODs and clips (regardless of which drive): everything, and the
+        // starred subset that the retention sweeper never auto-deletes. A clip carries its own star,
+        // independent of its parent match, so a starred clip's bytes are permanent and count here too.
         long totalBytes = 0L;
         long starredBytes = 0L;
         for (MatchSummary m : all) {
@@ -89,6 +106,15 @@ public class StorageController {
             totalBytes += m.fileSizeBytes();
             if (m.starred()) {
                 starredBytes += m.fileSizeBytes();
+            }
+        }
+        for (ClipRow c : allClips) {
+            if (c.videoPath() == null || c.videoPath().isBlank() || c.fileSizeBytes() == null) {
+                continue;
+            }
+            totalBytes += c.fileSizeBytes();
+            if (c.starred()) {
+                starredBytes += c.fileSizeBytes();
             }
         }
         return new StorageUsage(out, totalBytes, starredBytes);
@@ -111,7 +137,7 @@ public class StorageController {
 
     /**
      * Storage usage: the per-drive rows plus library-wide totals. {@code totalBytes} is every stored
-     * VOD; {@code starredBytes} is the starred subset (never auto-deleted by retention).
+     * VOD and clip; {@code starredBytes} is the starred subset (never auto-deleted by retention).
      */
     @JsonInclude(JsonInclude.Include.ALWAYS)
     public record StorageUsage(List<DriveUsage> drives, long totalBytes, long starredBytes) {}
