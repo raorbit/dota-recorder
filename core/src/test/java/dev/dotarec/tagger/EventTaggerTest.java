@@ -11,15 +11,20 @@ import org.junit.jupiter.api.Test;
  * Verifies the tagger's diff rules on synthetic frame pairs derived from the real GSI shape:
  * per-counter deltas are independent (a tick can be kill + assist + death at once), a falling-edge
  * death is gated on hero presence on BOTH frames (an absent hero never manufactures a phantom
- * death), and each marker's video_offset_s is the wall-clock delta from the record-confirmed anchor.
+ * death), and each marker's video_offset_s is the MONOTONIC delta from the record-confirmed anchor.
  */
 class EventTaggerTest {
 
     private final EventTagger tagger = new EventTagger();
 
-    /** Anchor = OBS confirmed start; offsets are measured from here. */
-    private static final long ANCHOR = 1_000_000L;
+    /** Anchor = OBS confirmed start (a System.nanoTime() stamp); offsets are measured from here. */
+    private static final long ANCHOR = 1_000_000_000_000L;
     private static final double DURATION = 600.0;
+
+    /** Milliseconds expressed as nanos, since offsets are a monotonic-nanos delta. */
+    private static long nanos(long millis) {
+        return millis * 1_000_000L;
+    }
 
     @Test
     void firstFrameOfRecording_noPrev_emitsNothing() {
@@ -107,11 +112,11 @@ class EventTaggerTest {
     }
 
     @Test
-    void videoOffsetIsWallDeltaFromAnchor_notGameClock() {
-        // Event lands 42.5s of wall time after the confirmed start. game_clock is deliberately a
-        // wildly different value to prove it is NOT the offset source.
-        GsiFrame prev = frame().wall(ANCHOR).kills(0).clock(0).build();
-        GsiFrame curr = frame().wall(ANCHOR + 42_500L).kills(1).clock(999).build();
+    void videoOffsetIsMonotonicDeltaFromAnchor_notGameClock() {
+        // Event lands 42.5s of elapsed (monotonic) time after the confirmed start. game_clock is
+        // deliberately a wildly different value to prove it is NOT the offset source.
+        GsiFrame prev = frame().mono(ANCHOR).kills(0).clock(0).build();
+        GsiFrame curr = frame().mono(ANCHOR + nanos(42_500L)).kills(1).clock(999).build();
 
         List<PendingMarker> markers = tagger.diff(prev, curr, ANCHOR, DURATION);
         assertThat(markers).hasSize(1);
@@ -123,15 +128,28 @@ class EventTaggerTest {
     }
 
     @Test
+    void offsetIgnoresWallClock_soABackwardClockStepDoesNotShiftTheMarker() {
+        // The frame's WALL stamp jumped backwards far before the anchor (an NTP step), but its
+        // MONOTONIC stamp is a clean 12s after the anchor. The offset must follow the monotonic
+        // delta (12s), proving it no longer reads wall-clock (Finding #4).
+        GsiFrame prev = frame().wall(ANCHOR).mono(ANCHOR).kills(0).build();
+        GsiFrame curr =
+                frame().wall(ANCHOR - 9_000_000L).mono(ANCHOR + nanos(12_000L)).kills(1).build();
+
+        assertThat(tagger.diff(prev, curr, ANCHOR, DURATION).get(0).videoOffsetS())
+                .isEqualTo(12.0);
+    }
+
+    @Test
     void offsetClampsToDuration_andFloorsAtZero() {
-        // An event whose wall delta exceeds the (now-known) duration clamps to duration.
-        GsiFrame prev = frame().wall(ANCHOR).kills(0).build();
-        GsiFrame over = frame().wall(ANCHOR + 10_000_000L).kills(1).build();
+        // An event whose elapsed delta exceeds the (now-known) duration clamps to duration.
+        GsiFrame prev = frame().mono(ANCHOR).kills(0).build();
+        GsiFrame over = frame().mono(ANCHOR + nanos(10_000_000L)).kills(1).build();
         assertThat(tagger.diff(prev, over, ANCHOR, DURATION).get(0).videoOffsetS())
                 .isEqualTo(DURATION);
 
-        // A frame stamped before the anchor (clock skew) floors at 0 rather than going negative.
-        GsiFrame before = frame().wall(ANCHOR - 5_000L).kills(1).build();
+        // A frame stamped before the anchor floors at 0 rather than going negative.
+        GsiFrame before = frame().mono(ANCHOR - nanos(5_000L)).kills(1).build();
         assertThat(tagger.diff(prev, before, ANCHOR, DURATION).get(0).videoOffsetS())
                 .isZero();
     }

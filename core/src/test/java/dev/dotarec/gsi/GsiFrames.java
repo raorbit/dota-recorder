@@ -8,6 +8,7 @@ package dev.dotarec.gsi;
 public final class GsiFrames {
 
     private long wallClockMillis = 0L;
+    private long monotonicNanos = 0L;
     private String gameState = "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS";
     private int gameClock = 0;
     private boolean paused = false;
@@ -29,6 +30,10 @@ public final class GsiFrames {
     }
 
     public GsiFrames wall(long v) { this.wallClockMillis = v; return this; }
+
+    /** The monotonic ({@code System.nanoTime()}) arrival stamp the video-offset delta uses. */
+    public GsiFrames mono(long v) { this.monotonicNanos = v; return this; }
+
     public GsiFrames state(String v) { this.gameState = v; return this; }
     public GsiFrames clock(int v) { this.gameClock = v; return this; }
     public GsiFrames paused(boolean v) { this.paused = v; return this; }
@@ -65,7 +70,8 @@ public final class GsiFrames {
 
     public GsiFrame build() {
         return new GsiFrame(
-                wallClockMillis, gameState, gameClock, paused, heroPresent, alive, playerPresent,
-                matchId, hero, heroId, activity, kills, deaths, assists, radiantScore, direScore);
+                wallClockMillis, monotonicNanos, gameState, gameClock, paused, heroPresent, alive,
+                playerPresent, matchId, hero, heroId, activity, kills, deaths, assists, radiantScore,
+                direScore);
     }
 }

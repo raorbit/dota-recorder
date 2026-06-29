@@ -14,7 +14,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
  *   <li>{@code map.matchid} is a STRING (e.g. {@code "0"} in Hero Demo), parsed to a long here.</li>
  *   <li>{@code map.clock_time} is an int that can be negative pre-horn; carried through verbatim.</li>
  *   <li>The {@code player} and {@code hero} blocks are ABSENT on HERO_SELECTION and on heartbeat
- *       pings, so every access below null-guards. {@link #toFrame(long)} treats a missing
+ *       pings, so every access below null-guards. {@link #toFrame(long, long)} treats a missing
  *       {@code game_state} as {@code "UNKNOWN"} so the FSM no-ops rather than NPEs, and records
  *       {@code playerPresent}/{@code heroPresent} from the block presence so the tagger can suppress
  *       phantom counter deltas across a dropped-then-returned player block.</li>
@@ -51,10 +51,12 @@ public class GsiPayload {
     /**
      * Flattens this wire payload into the normalized {@link GsiFrame} the FSM/tagger consume.
      *
-     * @param wallClockMillis local arrival time stamped by the controller at request entry; the
-     *                        anchor for video offsets (NEVER {@code game_clock})
+     * @param wallClockMillis local arrival time stamped by the controller at request entry; kept for
+     *                        storage/display (NEVER {@code game_clock})
+     * @param monotonicNanos  {@code System.nanoTime()} arrival stamp; the source the video-offset
+     *                        delta is computed from (clock-step-proof, unlike {@code wallClockMillis})
      */
-    public GsiFrame toFrame(long wallClockMillis) {
+    public GsiFrame toFrame(long wallClockMillis, long monotonicNanos) {
         String gameState = (map != null && map.gameState != null) ? map.gameState : "UNKNOWN";
         int gameClock = map != null ? map.clockTime : 0;
         boolean paused = map != null && map.paused;
@@ -75,6 +77,7 @@ public class GsiPayload {
 
         return new GsiFrame(
                 wallClockMillis,
+                monotonicNanos,
                 gameState,
                 gameClock,
                 paused,

@@ -18,7 +18,12 @@ public class GsiHeartbeat {
     private static final long ALIVE_WINDOW_MILLIS = 5_000L;
 
     private volatile long lastFrameEpochMillis = 0L;
-    private volatile long lastAuthorizedFrameEpochMillis = 0L;
+    // The authorized-frame liveness instant the watchdog reads is a MONOTONIC (System.nanoTime)
+    // stamp, not wall-clock: a forward OS/NTP clock step must never make a healthy in-progress
+    // recording look silent for >=30s and trip force-finalization. 0 means "no authorized frame yet"
+    // (nanoTime can legitimately be 0/negative, so a separate flag tracks the unset state).
+    private volatile boolean authorizedFrameSeen = false;
+    private volatile long lastAuthorizedFrameNanos = 0L;
 
     /**
      * Marks raw connectivity: ANY POST to the GSI endpoint, including an empty keep-alive ping or a
@@ -36,7 +41,8 @@ public class GsiHeartbeat {
      * -- can never keep a runaway recording alive past a genuine GSI silence.
      */
     public void markAuthorized() {
-        lastAuthorizedFrameEpochMillis = System.currentTimeMillis();
+        lastAuthorizedFrameNanos = System.nanoTime();
+        authorizedFrameSeen = true;
     }
 
     /**
@@ -48,9 +54,14 @@ public class GsiHeartbeat {
         lastFrameEpochMillis = epochMillis;
     }
 
-    /** Test/internal hook: stamps the authorized-frame instant; see {@link #markAt(long)}. */
-    public void markAuthorizedAt(long epochMillis) {
-        lastAuthorizedFrameEpochMillis = epochMillis;
+    /**
+     * Test/internal hook: stamps the authorized-frame instant at an arbitrary {@code System.nanoTime()}
+     * value so a test can simulate a stale feed (e.g. {@code nanoTime() - 31s}) without sleeping.
+     * Production code only ever calls {@link #markAuthorized()}.
+     */
+    public void markAuthorizedAtNanos(long nanos) {
+        lastAuthorizedFrameNanos = nanos;
+        authorizedFrameSeen = true;
     }
 
     public long lastFrameAgoMillis() {
@@ -58,10 +69,16 @@ public class GsiHeartbeat {
         return last == 0L ? Long.MAX_VALUE : System.currentTimeMillis() - last;
     }
 
-    /** Millis since the last AUTHORIZED frame (Long.MAX_VALUE if none yet). The watchdog reads this. */
+    /**
+     * Millis since the last AUTHORIZED frame (Long.MAX_VALUE if none yet), derived from a MONOTONIC
+     * {@code System.nanoTime()} delta so a wall-clock step can't fabricate a silence. The watchdog
+     * reads this.
+     */
     public long lastAuthorizedFrameAgoMillis() {
-        long last = lastAuthorizedFrameEpochMillis;
-        return last == 0L ? Long.MAX_VALUE : System.currentTimeMillis() - last;
+        if (!authorizedFrameSeen) {
+            return Long.MAX_VALUE;
+        }
+        return (System.nanoTime() - lastAuthorizedFrameNanos) / 1_000_000L;
     }
 
     public boolean isAlive() {
