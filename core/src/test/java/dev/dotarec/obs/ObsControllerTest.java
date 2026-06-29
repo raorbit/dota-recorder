@@ -14,6 +14,7 @@ import dev.dotarec.config.SettingsStore;
 import dev.dotarec.config.SettingsStore.AudioSource;
 import io.obswebsocket.community.client.OBSRemoteController;
 import io.obswebsocket.community.client.message.response.inputs.GetInputListResponse;
+import io.obswebsocket.community.client.message.response.record.GetRecordStatusResponse;
 import io.obswebsocket.community.client.message.response.record.StartRecordResponse;
 import io.obswebsocket.community.client.message.response.record.StopRecordResponse;
 import io.obswebsocket.community.client.message.response.scenes.GetCurrentProgramSceneResponse;
@@ -372,5 +373,50 @@ class ObsControllerTest {
         // Asserting getVersion is never called is the real fail-fast guard (a wall-clock timing bound
         // would only measure the mock, and flakes on a loaded CI box).
         verify(obs, never()).getVersion(anyLong());
+    }
+
+    @Test
+    void refreshRecordingActive_resyncsHealthFromLiveObsRecordState() {
+        // A websocket blip fired onConnectionLost(), optimistically clearing health.recording -- but OBS
+        // kept recording across the drop. On reconnect, refreshRecordingActive must re-sync the flag from
+        // OBS's live GetRecordStatus so the next match's corrective StopRecord fires instead of OBS
+        // rejecting StartRecord ("output already active").
+        ObsHealth health = new ObsHealth();
+        ObsController controller =
+                new ObsController(null, health, new ObsEvents(health), sceneConfigurer());
+        OBSRemoteController obs = mock(OBSRemoteController.class);
+        GetRecordStatusResponse status = mock(GetRecordStatusResponse.class);
+        when(status.isSuccessful()).thenReturn(true);
+        when(status.getOutputActive()).thenReturn(true);
+        when(obs.getRecordStatus(anyLong())).thenReturn(status);
+        ReflectionTestUtils.setField(controller, "controller", obs);
+
+        health.setRecording(false); // the optimistic clear from the disconnect
+
+        ReflectionTestUtils.invokeMethod(controller, "refreshRecordingActive");
+
+        assertThat(health.isRecording())
+                .as("a reconnect must re-sync recording=true from live OBS so the next corrective stop fires")
+                .isTrue();
+    }
+
+    @Test
+    void refreshRecordingActive_isBestEffort_leavesFlagUnchangedOnFailedStatus() {
+        // Best-effort: a null/failed GetRecordStatus (a wedged OBS at the connect's status probe) must
+        // not clobber the flag -- the corrective StopRecord guard remains the backstop.
+        ObsHealth health = new ObsHealth();
+        ObsController controller =
+                new ObsController(null, health, new ObsEvents(health), sceneConfigurer());
+        OBSRemoteController obs = mock(OBSRemoteController.class);
+        when(obs.getRecordStatus(anyLong())).thenReturn(null);
+        ReflectionTestUtils.setField(controller, "controller", obs);
+
+        health.setRecording(true);
+
+        ReflectionTestUtils.invokeMethod(controller, "refreshRecordingActive");
+
+        assertThat(health.isRecording())
+                .as("a failed status answer must leave health.recording as-is")
+                .isTrue();
     }
 }

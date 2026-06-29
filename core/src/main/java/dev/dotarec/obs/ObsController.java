@@ -7,6 +7,7 @@ import io.obswebsocket.community.client.message.event.outputs.RecordStateChanged
 import io.obswebsocket.community.client.message.response.general.GetVersionResponse;
 import io.obswebsocket.community.client.message.response.inputs.GetInputListResponse;
 import io.obswebsocket.community.client.message.response.inputs.GetInputMuteResponse;
+import io.obswebsocket.community.client.message.response.record.GetRecordStatusResponse;
 import io.obswebsocket.community.client.message.response.record.StopRecordResponse;
 import io.obswebsocket.community.client.message.response.scenes.GetCurrentProgramSceneResponse;
 import io.obswebsocket.community.client.model.Input;
@@ -224,6 +225,7 @@ public class ObsController implements ObsRecorder {
             verifyProtocol();
             health.setConnected(true);
             refreshSceneActive();
+            refreshRecordingActive();
             log.info("OBS connected at {}:{}", settings.get().obsHost, settings.get().obsPort);
             return true;
         } catch (ObsException e) {
@@ -479,6 +481,30 @@ public class ObsController implements ObsRecorder {
         } catch (Exception e) {
             health.setSceneActive(false);
             return false;
+        }
+    }
+
+    /**
+     * Re-syncs {@link ObsHealth#setRecording} from OBS's live record state on a (re)connect. A
+     * websocket drop fires {@code onConnectionLost()}, which optimistically clears
+     * {@code health.recording} -- but OBS itself keeps recording across a transient socket blip. Without
+     * this re-sync, the next match would see {@code recording=false}, skip its corrective StopRecord,
+     * and OBS would reject the StartRecord ("output already active"), silently breaking recording until
+     * restart. Best-effort: a failed/absent status answer leaves the flag as-is, since the corrective
+     * StopRecord guard in {@link #startRecording()} is the backstop for the "already active" case.
+     */
+    private void refreshRecordingActive() {
+        OBSRemoteController c = this.controller;
+        if (c == null) {
+            return;
+        }
+        try {
+            GetRecordStatusResponse status = c.getRecordStatus(REQUEST_TIMEOUT_MS);
+            if (status != null && status.isSuccessful() && status.getOutputActive() != null) {
+                health.setRecording(status.getOutputActive());
+            }
+        } catch (Exception e) {
+            log.debug("OBS record-status refresh failed: {}", e.toString());
         }
     }
 
