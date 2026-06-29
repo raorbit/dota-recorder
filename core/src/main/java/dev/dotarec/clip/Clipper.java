@@ -78,6 +78,49 @@ public class Clipper {
                         + reencode.tail());
     }
 
+    /**
+     * Grabs a single JPEG frame from {@code source} at {@code atSeconds} into {@code output} via
+     * ffmpeg ({@code -ss <at>} before {@code -i}, then {@code -frames:v 1}). Used to render a clip's
+     * thumbnail. {@code output}'s parent directory must already exist.
+     *
+     * @param source    the video to grab a frame from
+     * @param atSeconds seek point, in seconds from the start of the source
+     * @param output    destination .jpg
+     * @return the {@code output} path
+     * @throws IllegalStateException if ffmpeg is unavailable or fails to produce a non-empty frame
+     */
+    public Path thumbnail(Path source, double atSeconds, Path output) {
+        if (!ffmpeg.isAvailable()) {
+            throw new IllegalStateException(
+                    "Cannot generate thumbnail: no ffmpeg executable available (FfmpegLocator)");
+        }
+        String at = formatSeconds(Math.max(0.0, atSeconds));
+        Attempt grab = run(buildThumbnailCommand(ffmpeg.command(), source, at, output), output);
+        if (grab.succeeded()) {
+            return output;
+        }
+        throw new IllegalStateException(
+                "ffmpeg failed to generate thumbnail " + output + " (exit=" + grab.exitCode()
+                        + "). Last output:\n" + grab.tail());
+    }
+
+    private List<String> buildThumbnailCommand(String ffmpegCmd, Path source, String at,
+                                               Path output) {
+        List<String> cmd = new ArrayList<>();
+        cmd.add(ffmpegCmd);
+        cmd.add("-y");
+        cmd.add("-ss");
+        cmd.add(at);
+        cmd.add("-i");
+        cmd.add(source.toString());
+        cmd.add("-frames:v");
+        cmd.add("1");
+        cmd.add("-q:v");
+        cmd.add("3");
+        cmd.add(output.toString());
+        return cmd;
+    }
+
     private List<String> buildCopyCommand(String ffmpegCmd, Path source, String start,
                                           String duration, Path output) {
         List<String> cmd = new ArrayList<>();

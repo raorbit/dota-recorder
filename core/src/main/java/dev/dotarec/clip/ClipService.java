@@ -144,6 +144,12 @@ public class ClipService {
         clips.updateStatus(clipId, "generating", null, null, null, null);
         events.publish("clip.progress", progress(clipId, parentMatchId, 0));
 
+        // The CUT reads the parent VOD, so it runs under the lock so the sweeper/archiver can't move or
+        // delete the source mid-cut. The thumbnail + finalize below read the GENERATED clip (our own
+        // output), not the parent VOD, so they run OUTSIDE the lock to avoid needlessly blocking
+        // retention during a second ffmpeg process.
+        Clipper.Result result;
+        double duration;
         maintenanceLock.lock();
         try {
             // Re-read the parent's current path under the lock: the sweeper/archiver may have moved or
@@ -165,21 +171,43 @@ public class ClipService {
             Files.createDirectories(outDir);
             Path out = outDir.resolve(parentMatchId + "-clip-" + clipId + ".mp4");
 
-            double duration = clip.endOffsetS() - clip.startOffsetS();
-            Clipper.Result result = clipper.clip(source, clip.startOffsetS(), duration, out);
+            duration = clip.endOffsetS() - clip.startOffsetS();
+            result = clipper.clip(source, clip.startOffsetS(), duration, out);
+        } catch (Exception e) {
+            log.warn("Failed to generate clip {} for match {}: {}",
+                    clipId, parentMatchId, e.getMessage(), e);
+            failClip(clipId, parentMatchId, e.getMessage());
+            return;
+        } finally {
+            maintenanceLock.unlock();
+        }
 
+        // Grab a thumbnail at the clip's midpoint, reading from the generated clip file (so the seek
+        // offset is relative to the clip, not the parent VOD). A thumbnail failure must never fail the
+        // clip — log it and leave thumb_path null.
+        String thumbPath = null;
+        try {
+            Path thumbDir = videoDir().resolve("clips").resolve("thumbs");
+            Files.createDirectories(thumbDir);
+            Path thumbOut = thumbDir.resolve(parentMatchId + "-clip-" + clipId + ".jpg");
+            Path thumb = clipper.thumbnail(result.output(), duration / 2.0, thumbOut);
+            thumbPath = thumb.toString();
+        } catch (Exception e) {
+            log.warn("Failed to generate thumbnail for clip {} (match {}): {}",
+                    clipId, parentMatchId, e.getMessage());
+        }
+
+        try {
             clips.updateStatus(clipId, "ready", result.output().toString(),
-                    result.sizeBytes(), null, null);
+                    result.sizeBytes(), thumbPath, null);
             log.info("Generated clip {} for match {} -> {} ({} bytes)",
                     clipId, parentMatchId, result.output(), result.sizeBytes());
             events.publish("clip.ready",
                     ready(clipId, parentMatchId, "ready", result.output().toString()));
         } catch (Exception e) {
-            log.warn("Failed to generate clip {} for match {}: {}",
+            log.warn("Failed to finalize clip {} for match {}: {}",
                     clipId, parentMatchId, e.getMessage(), e);
             failClip(clipId, parentMatchId, e.getMessage());
-        } finally {
-            maintenanceLock.unlock();
         }
     }
 
