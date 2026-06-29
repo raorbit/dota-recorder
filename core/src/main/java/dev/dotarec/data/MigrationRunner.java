@@ -43,13 +43,14 @@ public class MigrationRunner implements ApplicationRunner {
 
     private static final Logger log = LoggerFactory.getLogger(MigrationRunner.class);
 
-    public static final int LATEST_VERSION = 5;
+    public static final int LATEST_VERSION = 6;
     private static final String[] SCRIPTS = {
         "db/migration/V1__init.sql",
         "db/migration/V2__enrich_retry.sql",
         "db/migration/V3__recording_journal.sql",
         "db/migration/V4__clips.sql",
         "db/migration/V5__clip_starred.sql",
+        "db/migration/V6__clip_generation_started.sql",
     };
 
     private final DataSource dataSource;

@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -323,6 +324,29 @@ class ClipServiceTest {
     }
 
     @Test
+    void sweep_recentlyClaimedRowWithOldCreatedAt_isNotRepended() throws Exception {
+        // The backlog double-cut guard: a clip can sit 'pending' in a saturated queue past the stale
+        // cutoff, then be legitimately claimed and rendered. Staleness is anchored on when generation
+        // STARTED (claimForGeneration's stamp), not on created_at, so this live render must NOT be
+        // re-pended — doing so would let a second worker cut the same output path concurrently.
+        long parent = seedMatchWithVideo(1800);
+
+        long staleCreatedAt = System.currentTimeMillis() - (60L * 60_000L); // sat pending for an hour
+        long clipId = clips.insert(parent, "manual", null, 30.0, 45.0, null,
+                null, null, null, "pending", null, staleCreatedAt);
+        // A worker claims it NOW: generating with a fresh generation_started_at, despite the old created_at.
+        assertThat(clips.claimForGeneration(clipId, System.currentTimeMillis())).isTrue();
+
+        ClipQueue queue = new ClipQueue(clips, service);
+        queue.sweep();
+
+        // Not re-pended: still generating, and no second cut was dispatched. (On the old created_at-keyed
+        // cutoff this row would have been re-pended and re-cut.)
+        assertThat(clips.findById(clipId).orElseThrow().status()).isEqualTo("generating");
+        verify(clipper, never()).clip(any(), anyDouble(), anyDouble(), any());
+    }
+
+    @Test
     void failClip_statusWriteFailure_doesNotEscapeGenerateAsync() throws Exception {
         // A failClip whose updateStatus throws (double DB failure at finalize) must not let the
         // exception escape the @Async method — otherwise the row stays wedged in 'generating'. Here the
@@ -333,7 +357,7 @@ class ClipServiceTest {
                 null, null, null, "pending", null, System.currentTimeMillis());
         ClipRow row = clips.findById(clipId).orElseThrow();
         when(throwingClips.findById(clipId)).thenReturn(Optional.of(row));
-        when(throwingClips.claimForGeneration(clipId)).thenReturn(true);
+        when(throwingClips.claimForGeneration(eq(clipId), anyLong())).thenReturn(true);
         when(throwingClips.updateStatus(eq(clipId), eq("failed"), any(), any(), any(), any()))
                 .thenThrow(new IllegalStateException("SQLITE_BUSY"));
         when(clipper.clip(any(), anyDouble(), anyDouble(), any()))

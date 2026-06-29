@@ -30,11 +30,13 @@ public class ClipQueue {
     private static final Logger log = LoggerFactory.getLogger(ClipQueue.class);
 
     /**
-     * A {@code generating} row older than this (since {@code created_at}) is assumed wedged — its
+     * A {@code generating} row whose generation started longer ago than this is assumed wedged — its
      * worker died after the cut but before the status write (e.g. a back-to-back SQLITE_BUSY at
      * finalize), so the {@code @Async} method's exception escaped and the row never reached a terminal
      * state. Comfortably past the cut + thumbnail process ceilings ({@code Clipper}'s 10-min timeout,
-     * twice) plus margin, so a genuinely in-flight render is never re-pended (and double-cut).
+     * twice) plus margin. The cutoff is measured from {@code generation_started_at} (set when the row
+     * was claimed), NOT {@code created_at}, so a clip that sat {@code pending} in a saturated queue for
+     * longer than this before being claimed is never re-pended mid-render (and double-cut).
      */
     private static final long STALE_GENERATING_MS = 30L * 60_000L;
 
