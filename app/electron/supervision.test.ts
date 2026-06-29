@@ -114,6 +114,36 @@ describe('SupervisionController — core crash', () => {
     expect(deps.startObs).toHaveBeenCalledTimes(1); // OBS relaunched after the successful restart
   });
 
+  it('retries when a restarted core dies during its health wait (startCore resolves, re-crash queued)', async () => {
+    // The narrow window F2's first cut missed: startCore() RESOLVES (the core bound and answered one
+    // health probe) but a re-crash was queued mid-wait because the core then died. Trusting the resolve
+    // would relaunch OBS onto a dead core and drop the death; the success path must reap and re-loop.
+    const calls: Array<Deferred<void>> = [];
+    const deps = makeDeps({
+      startCore: vi.fn(() => {
+        const d = deferred<void>();
+        calls.push(d);
+        return d.promise;
+      }),
+    });
+    const controller = new SupervisionController(deps, 2);
+
+    const crash = controller.handleCoreCrash(exit); // attempt 1: suspends on startCore #1
+    await flush();
+    await controller.handleCoreCrash(exit); // re-crash queued while #1's health wait is in flight
+
+    calls[0].resolve(); // #1 resolves anyway (answered a probe, then died) — must NOT be trusted
+    await flush();
+    expect(deps.startCore).toHaveBeenCalledTimes(2); // reaped and re-looped to attempt 2
+    expect(deps.startObs).not.toHaveBeenCalled(); // did NOT relaunch OBS onto the dead core
+
+    calls[1].resolve(); // attempt 2 truly recovers (no queued re-crash)
+    await crash;
+    await flush();
+    expect(deps.startObs).toHaveBeenCalledTimes(1);
+    expect(deps.notifyDown).not.toHaveBeenCalled();
+  });
+
   it('still gives up and notifies once a mid-restart re-crash exhausts the budget', async () => {
     const calls: Array<Deferred<void>> = [];
     const deps = makeDeps({

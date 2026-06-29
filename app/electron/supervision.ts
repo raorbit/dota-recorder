@@ -120,6 +120,15 @@ export class SupervisionController {
         this.deps.log(`[core] restarting (attempt ${this.coreRestartAttempts}/${this.maxRestarts})`);
         try {
           await this.deps.startCore();
+          if (this.corePendingRecrash) {
+            // A crash landed while this restart's health wait was in flight, yet startCore() still
+            // resolved — the just-restarted core answered a health probe and then died in the same
+            // window. Don't trust the resolve: relaunching OBS onto a dead core (and resetting the
+            // budget) would silently drop that death. Reap and re-loop to spend another attempt.
+            this.deps.log('[core] restarted core died during its health wait; retrying');
+            await this.deps.stopCore().catch(() => {});
+            continue;
+          }
           this.deps.log('[core] restarted; relaunching OBS');
           this.coreRestartAttempts = 0; // a recovered core gets its restart budget back (over a long tray session)
           this.obsRestartAttempts = 0; // a fresh core epoch gets a fresh OBS restart budget
@@ -137,6 +146,7 @@ export class SupervisionController {
       this.deps.notifyDown('The recorder core stopped. Restart the app to resume recording.');
     } finally {
       this.coreRestarting = false;
+      this.corePendingRecrash = false; // bound the flag's lifetime to this one crash episode
     }
   }
 }
