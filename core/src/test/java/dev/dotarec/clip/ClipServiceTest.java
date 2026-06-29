@@ -233,6 +233,37 @@ class ClipServiceTest {
     }
 
     @Test
+    void generateAsync_thumbnailThrows_keepsClipReadyAndDeletesPartialThumb() throws Exception {
+        long parent = seedMatchWithVideo(1800);
+        // The cut succeeds, but the thumbnail writes a partial .jpg then throws. A thumbnail failure
+        // must NOT fail the clip (it stays ready with a null thumb_path) — but the partial file must be
+        // cleaned up, not leaked on disk.
+        when(clipper.clip(any(), anyDouble(), anyDouble(), any())).thenAnswer(inv -> {
+            Path out = inv.getArgument(3);
+            Files.createDirectories(out.getParent());
+            Files.write(out, new byte[64]);
+            return new Clipper.Result(out, 64L);
+        });
+        Path[] partialThumb = new Path[1];
+        when(clipper.thumbnail(any(), anyDouble(), any())).thenAnswer(inv -> {
+            Path tOut = inv.getArgument(2);
+            Files.createDirectories(tOut.getParent());
+            Files.write(tOut, new byte[8]);
+            partialThumb[0] = tOut;
+            throw new IllegalStateException("thumbnail blew up");
+        });
+
+        long clipId = service.createManual(parent, 30.0, 45.0, null);
+
+        ClipRow row = clips.findById(clipId).orElseThrow();
+        assertThat(row.status()).isEqualTo("ready");
+        assertThat(row.thumbPath()).isNull();
+        assertThat(row.videoPath()).isNotNull();
+        assertThat(partialThumb[0]).isNotNull();
+        assertThat(partialThumb[0]).doesNotExist();
+    }
+
+    @Test
     void generateAsync_parentVodGone_marksFailedWithoutCutting() throws Exception {
         // Parent has a video_path that points nowhere on disk, so the under-lock re-read fails.
         long parent = matches.insert(new NewMatch(

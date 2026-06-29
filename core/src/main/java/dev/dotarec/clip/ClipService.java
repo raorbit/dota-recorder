@@ -228,15 +228,18 @@ public class ClipService {
         // offset is relative to the clip, not the parent VOD). A thumbnail failure must never fail the
         // clip — log it and leave thumb_path null.
         String thumbPath = null;
+        Path thumbOut = null;
         try {
             Path thumbDir = videoDir().resolve("clips").resolve("thumbs");
             Files.createDirectories(thumbDir);
-            Path thumbOut = thumbDir.resolve(parentMatchId + "-clip-" + clipId + ".jpg");
+            thumbOut = thumbDir.resolve(parentMatchId + "-clip-" + clipId + ".jpg");
             Path thumb = clipper.thumbnail(result.output(), duration / 2.0, thumbOut);
             thumbPath = thumb.toString();
         } catch (Exception e) {
+            // A failed thumbnail must not fail the clip, but don't leave a partial/zero-byte .jpg behind.
             log.warn("Failed to generate thumbnail for clip {} (match {}): {}",
                     clipId, parentMatchId, e.getMessage());
+            deleteQuietly(thumbOut);
         }
 
         try {
@@ -260,6 +263,12 @@ public class ClipService {
         } catch (Exception e) {
             log.warn("Failed to finalize clip {} for match {}: {}",
                     clipId, parentMatchId, e.getMessage(), e);
+            // The status update failed, so the row won't reference these files — unlink the orphaned
+            // output (and thumbnail) rather than leaking them on disk.
+            deleteQuietly(result.output());
+            if (thumbPath != null) {
+                deleteQuietly(Path.of(thumbPath));
+            }
             failClip(clipId, parentMatchId, e.getMessage());
         }
     }
