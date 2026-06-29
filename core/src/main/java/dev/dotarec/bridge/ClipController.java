@@ -1,6 +1,8 @@
 package dev.dotarec.bridge;
 
 import dev.dotarec.clip.ClipService;
+import dev.dotarec.config.SettingsStore;
+import dev.dotarec.config.SettingsStore.StorageLocation;
 import dev.dotarec.data.ClipRepository;
 import dev.dotarec.data.ClipRow;
 import dev.dotarec.data.MatchRepository;
@@ -25,6 +27,7 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -63,11 +66,14 @@ public class ClipController {
     private final ClipRepository clips;
     private final ClipService clipService;
     private final MatchRepository matches;
+    private final SettingsStore settings;
 
-    public ClipController(ClipRepository clips, ClipService clipService, MatchRepository matches) {
+    public ClipController(ClipRepository clips, ClipService clipService, MatchRepository matches,
+                          SettingsStore settings) {
         this.clips = clips;
         this.clipService = clipService;
         this.matches = matches;
+        this.settings = settings;
     }
 
     /** Every clip across all matches, newest first — backs the library "Clips" bucket's flat list. */
@@ -90,7 +96,14 @@ public class ClipController {
     @PostMapping("/matches/{id}/clips")
     public ResponseEntity<ClipRow> create(@PathVariable long id, @RequestBody NewClipRequest req) {
         requireMatch(id);
-        long clipId = clipService.createManual(id, req.startOffsetS(), req.endOffsetS(), req.label());
+        long clipId;
+        try {
+            clipId = clipService.createManual(id, req.startOffsetS(), req.endOffsetS(), req.label());
+        } catch (IllegalArgumentException e) {
+            // ClipService rejects any invalid input (degenerate range, non-finite offset, over-long
+            // duration/label, no recorded video) with IllegalArgumentException -> 400 Bad Request.
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, e.getMessage());
+        }
         ClipRow row = clips.findById(clipId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "No clip " + clipId));
         return ResponseEntity.status(HttpStatus.ACCEPTED).body(row);
@@ -102,10 +115,12 @@ public class ClipController {
      */
     @PatchMapping("/clips/{clipId}")
     public ClipRow patch(@PathVariable long clipId, @RequestBody ClipPatch patch) {
-        clips.findById(clipId)
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "No clip " + clipId));
         if (patch != null && patch.starred() != null) {
-            clips.setStarred(clipId, patch.starred());
+            // setStarred returns rows updated; 0 means no such clip -> 404 without a second existence
+            // query. (A null/empty patch falls through to a plain re-read, still 404 on an unknown id.)
+            if (clips.setStarred(clipId, patch.starred()) == 0) {
+                throw new ResponseStatusException(HttpStatus.NOT_FOUND, "No clip " + clipId);
+            }
         }
         return clips.findById(clipId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "No clip " + clipId));
@@ -150,6 +165,7 @@ public class ClipController {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND,
                     "Video for clip " + clipId + " is unavailable (file missing on disk)");
         }
+        requireUnderStorageRoot(file, "Video for clip " + clipId);
         return VideoStreamSupport.stream(file, headers);
     }
 
@@ -176,6 +192,7 @@ public class ClipController {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND,
                     "Thumbnail for clip " + clipId + " is unavailable (file missing on disk)");
         }
+        requireUnderStorageRoot(file, "Thumbnail for clip " + clipId);
         return VideoStreamSupport.stream(file, headers);
     }
 
@@ -189,6 +206,34 @@ public class ClipController {
         } catch (IOException e) {
             log.warn("Could not delete file {} while deleting a clip: {}", path, e.toString());
         }
+    }
+
+    /**
+     * Path-traversal guard for the file-serving endpoints: a stored path must resolve under one of the
+     * configured storage roots ({@code videoDir} + every archive {@code storageLocations[].path}), else
+     * 404. Archived clips live under an archive root, so all roots are allowed. {@code what} names the
+     * resource for the 404 message (e.g. {@code "Video for clip 7"}).
+     */
+    private void requireUnderStorageRoot(Path file, String what) {
+        if (!VideoStreamSupport.isUnderAnyRoot(file, storageRoots())) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND,
+                    what + " is unavailable (outside the configured storage roots)");
+        }
+    }
+
+    /** The configured storage roots: the active {@code videoDir} plus every archive drive's path. */
+    private List<String> storageRoots() {
+        SettingsStore.Settings s = settings.get();
+        List<String> roots = new ArrayList<>();
+        roots.add(s.videoDir);
+        if (s.storageLocations != null) {
+            for (StorageLocation loc : s.storageLocations) {
+                if (loc != null) {
+                    roots.add(loc.path());
+                }
+            }
+        }
+        return roots;
     }
 
     private void requireMatch(long id) {

@@ -3,6 +3,8 @@ package dev.dotarec.bridge;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import dev.dotarec.config.AppPaths;
+import dev.dotarec.config.SettingsStore;
 import dev.dotarec.data.ClipRepository;
 import dev.dotarec.data.MarkerRepository;
 import dev.dotarec.data.MatchRepository;
@@ -42,8 +44,13 @@ class MatchControllerStreamTest {
     void setUp() throws Exception {
         DataSource ds = TestDb.migrated(dir);
         repo = new MatchRepository(ds);
+        // The served VODs are written directly under the TempDir, so point the storage root there:
+        // the controller's containment guard requires a streamed file to live under a configured root.
+        SettingsStore settings = new SettingsStore(
+                new AppPaths(dir.resolve("data").toString(), dir.resolve("obs").toString()));
+        settings.get().videoDir = dir.toString();
         controller = new MatchController(repo, new MarkerRepository(ds), new PauseRepository(ds),
-                new ClipRepository(ds));
+                new ClipRepository(ds), settings);
     }
 
     @Test

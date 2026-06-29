@@ -1,5 +1,7 @@
 package dev.dotarec.bridge;
 
+import dev.dotarec.config.SettingsStore;
+import dev.dotarec.config.SettingsStore.StorageLocation;
 import dev.dotarec.data.Bucket;
 import dev.dotarec.data.ClipRepository;
 import dev.dotarec.data.ClipRow;
@@ -30,6 +32,7 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -66,13 +69,15 @@ public class MatchController {
     private final MarkerRepository markers;
     private final PauseRepository pauses;
     private final ClipRepository clips;
+    private final SettingsStore settings;
 
     public MatchController(MatchRepository matches, MarkerRepository markers, PauseRepository pauses,
-                           ClipRepository clips) {
+                           ClipRepository clips, SettingsStore settings) {
         this.matches = matches;
         this.markers = markers;
         this.pauses = pauses;
         this.clips = clips;
+        this.settings = settings;
     }
 
     @GetMapping("/matches")
@@ -132,6 +137,7 @@ public class MatchController {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND,
                     "Video for match " + id + " is unavailable (file missing on disk)");
         }
+        requireUnderStorageRoot(file, "Video for match " + id);
         return VideoStreamSupport.stream(file, headers);
     }
 
@@ -188,6 +194,34 @@ public class MatchController {
         Map<String, Integer> counts = matches.bucketCounts();
         counts.put(Bucket.CLIPS.key(), (int) clips.count());
         return BucketCounts.of(counts);
+    }
+
+    /**
+     * Path-traversal guard for {@code GET /matches/{id}/video/stream}: a stored {@code video_path}
+     * must resolve under one of the configured storage roots ({@code videoDir} + every archive
+     * {@code storageLocations[].path}), else 404. Archived VODs live under an archive root, so all
+     * roots are allowed. {@code what} names the resource for the 404 message.
+     */
+    private void requireUnderStorageRoot(Path file, String what) {
+        if (!VideoStreamSupport.isUnderAnyRoot(file, storageRoots())) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND,
+                    what + " is unavailable (outside the configured storage roots)");
+        }
+    }
+
+    /** The configured storage roots: the active {@code videoDir} plus every archive drive's path. */
+    private List<String> storageRoots() {
+        SettingsStore.Settings s = settings.get();
+        List<String> roots = new ArrayList<>();
+        roots.add(s.videoDir);
+        if (s.storageLocations != null) {
+            for (StorageLocation loc : s.storageLocations) {
+                if (loc != null) {
+                    roots.add(loc.path());
+                }
+            }
+        }
+        return roots;
     }
 
     private void requireMatch(long id) {

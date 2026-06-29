@@ -3,6 +3,8 @@ package dev.dotarec.bridge;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import dev.dotarec.config.AppPaths;
+import dev.dotarec.config.SettingsStore;
 import dev.dotarec.data.ClipRepository;
 import dev.dotarec.data.MarkerRepository;
 import dev.dotarec.data.MatchRepository;
@@ -37,7 +39,10 @@ class MatchControllerDeleteTest {
         repo = new MatchRepository(ds);
         markers = new MarkerRepository(ds);
         clips = new ClipRepository(ds);
-        controller = new MatchController(repo, markers, new PauseRepository(ds), clips);
+        SettingsStore settings = new SettingsStore(
+                new AppPaths(dir.resolve("data").toString(), dir.resolve("obs").toString()));
+        settings.get().videoDir = dir.toString();
+        controller = new MatchController(repo, markers, new PauseRepository(ds), clips, settings);
     }
 
     @Test
