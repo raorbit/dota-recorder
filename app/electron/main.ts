@@ -138,7 +138,9 @@ function registerPrefsIpc(): void {
   ipcMain.removeHandler('shell:revealPath');
   ipcMain.handle('shell:revealPath', (_event, p: unknown) => {
     const target = revealablePath(p);
-    if (target !== null) shell.showItemInFolder(target);
+    // Also require the file to still exist: a retention-swept row can keep its path in the UI until
+    // the next reload, and revealing a missing file just opens an empty folder — so no-op instead.
+    if (target !== null && fs.existsSync(target)) shell.showItemInFolder(target);
   });
 }
 
