@@ -2,6 +2,8 @@ package dev.dotarec.retention;
 
 import dev.dotarec.bridge.EventPublisher;
 import dev.dotarec.config.SettingsStore;
+import dev.dotarec.data.ClipRepository;
+import dev.dotarec.data.ClipRow;
 import dev.dotarec.data.MatchRepository;
 import dev.dotarec.data.MatchSummary;
 import org.slf4j.Logger;
@@ -56,6 +58,7 @@ public class RetentionSweeper {
     }
 
     private final MatchRepository matches;
+    private final ClipRepository clips;
     private final SettingsStore settings;
     private final EventPublisher events;
     private final StorageMaintenanceLock maintenanceLock;
@@ -64,10 +67,11 @@ public class RetentionSweeper {
     @org.springframework.beans.factory.annotation.Autowired
     public RetentionSweeper(
             MatchRepository matches,
+            ClipRepository clips,
             SettingsStore settings,
             EventPublisher events,
             StorageMaintenanceLock maintenanceLock) {
-        this(matches, settings, events, maintenanceLock,
+        this(matches, clips, settings, events, maintenanceLock,
                 dir -> Files.getFileStore(dir).getTotalSpace());
     }
 
@@ -76,19 +80,22 @@ public class RetentionSweeper {
      * StorageMaintenanceLock} (the sweeper is the sole lock holder in those tests, so a private
      * instance is fine) and a real total-space probe.
      */
-    public RetentionSweeper(MatchRepository matches, SettingsStore settings, EventPublisher events) {
-        this(matches, settings, events, new StorageMaintenanceLock(),
+    public RetentionSweeper(MatchRepository matches, ClipRepository clips, SettingsStore settings,
+                            EventPublisher events) {
+        this(matches, clips, settings, events, new StorageMaintenanceLock(),
                 dir -> Files.getFileStore(dir).getTotalSpace());
     }
 
     /** Test seam: inject a deterministic total-space probe (and the shared lock). */
     RetentionSweeper(
             MatchRepository matches,
+            ClipRepository clips,
             SettingsStore settings,
             EventPublisher events,
             StorageMaintenanceLock maintenanceLock,
             TotalSpaceProbe totalSpace) {
         this.matches = matches;
+        this.clips = clips;
         this.settings = settings;
         this.events = events;
         this.maintenanceLock = maintenanceLock;
@@ -157,8 +164,16 @@ public class RetentionSweeper {
                             m.id());
                 }
                 matches.nullVideoPath(m.id());
+                // The match's VOD is gone, so its clips (sub-ranges of that VOD) are orphaned. Unlike a
+                // match row — which is KEPT (markers/stats survive) with only its path columns nulled —
+                // clips have no standalone value once the source VOD is pruned, so delete the clip files
+                // AND their rows now. Their bytes were counted into `total` (via clips.sumFileSizeBytes),
+                // so decrement `total` by what we reclaim here — otherwise this same pass overstates disk
+                // usage and over-evicts additional, otherwise-safe matches before it sees itself under cap.
+                long clipBytes = deleteClipsForMatch(m.id());
+                total -= clipBytes;
                 deletedIds.add(m.id());
-                freed += size;
+                freed += size + clipBytes;
             }
 
             if (!deletedIds.isEmpty()) {
@@ -304,6 +319,10 @@ public class RetentionSweeper {
             }
             total += videoSizeBytes(m);
         }
+        // Clips are first-class stored bytes too: their rendered .mp4s count against the same cap as
+        // VODs. Use the DB-recorded sizes (cheap, no per-file stat) — a clip on an unplugged drive is a
+        // rare edge whose recorded bytes still over-count toward eviction, which is the safe direction.
+        total += clips.sumFileSizeBytes();
         return total;
     }
 
@@ -338,6 +357,27 @@ public class RetentionSweeper {
             log.warn("Could not stat {} during retention sweep: {}", path, e.toString());
             return m.fileSizeBytes() != null ? m.fileSizeBytes() : 0L;
         }
+    }
+
+    /**
+     * Deletes every clip belonging to a swept match: the clip's .mp4 + thumbnail on disk and then its
+     * row. Best-effort and non-blocking, matching {@link #deleteFileQuietly}: a clip whose file unlink
+     * fails still has its row removed (the source VOD is gone, so the clip is unplayable regardless).
+     *
+     * @return the bytes reclaimed from clip files that were successfully deleted
+     */
+    private long deleteClipsForMatch(long matchId) {
+        long reclaimed = 0L;
+        for (ClipRow clip : clips.findByParentMatchId(matchId)) {
+            long size = clip.fileSizeBytes() != null ? clip.fileSizeBytes() : 0L;
+            boolean videoGone = deleteFileQuietly(clip.videoPath());
+            deleteFileQuietly(clip.thumbPath());
+            if (videoGone) {
+                reclaimed += size;
+            }
+            clips.delete(clip.id());
+        }
+        return reclaimed;
     }
 
     private boolean deleteFileQuietly(String path) {

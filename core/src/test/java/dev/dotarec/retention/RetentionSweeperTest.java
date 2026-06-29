@@ -3,6 +3,7 @@ package dev.dotarec.retention;
 import dev.dotarec.bridge.EventPublisher;
 import dev.dotarec.config.AppPaths;
 import dev.dotarec.config.SettingsStore;
+import dev.dotarec.data.ClipRepository;
 import dev.dotarec.data.MarkerRepository;
 import dev.dotarec.data.MatchRepository;
 import dev.dotarec.data.MatchRepository.NewMatch;
@@ -39,6 +40,7 @@ class RetentionSweeperTest {
 
     private MatchRepository matches;
     private MarkerRepository markers;
+    private ClipRepository clips;
     private SettingsStore settings;
     private EventPublisher events;
     private RetentionSweeper sweeper;
@@ -49,6 +51,7 @@ class RetentionSweeperTest {
         DataSource ds = TestDb.migrated(dir);
         matches = new MatchRepository(ds);
         markers = new MarkerRepository(ds);
+        clips = new ClipRepository(ds);
 
         videoDir = Files.createDirectories(dir.resolve("video"));
         // Real SettingsStore over a temp data dir; default cap is 50GB, we shrink it per-test.
@@ -57,7 +60,7 @@ class RetentionSweeperTest {
         settings.get().videoDir = videoDir.toString();
 
         events = mock(EventPublisher.class);
-        sweeper = new RetentionSweeper(matches, settings, events);
+        sweeper = new RetentionSweeper(matches, clips, settings, events);
     }
 
     @Test
@@ -232,7 +235,7 @@ class RetentionSweeperTest {
                     return t;
                 };
         RetentionSweeper clamped =
-                new RetentionSweeper(matches, settings, events, new StorageMaintenanceLock(), probe);
+                new RetentionSweeper(matches, clips, settings, events, new StorageMaintenanceLock(), probe);
 
         // 2 GiB stored on the 1-GiB-physical drive: 1.5 GiB old + 0.5 GiB new. Clamped budget = 1 GiB,
         // so the oldest is evicted and 0.5 GiB remains (under budget).
@@ -275,7 +278,7 @@ class RetentionSweeperTest {
                     return t;
                 };
         RetentionSweeper sweeper =
-                new RetentionSweeper(matches, settings, events, new StorageMaintenanceLock(), probe);
+                new RetentionSweeper(matches, clips, settings, events, new StorageMaintenanceLock(), probe);
 
         long oldest = seedWithFiles("old.mp4", "old.jpg", 3 * gib / 2, 1_000L, false);
         long newer = seedWithFiles("new.mp4", "new.jpg", gib / 2, 2_000L, false);

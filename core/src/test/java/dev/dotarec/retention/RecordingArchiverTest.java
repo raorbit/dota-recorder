@@ -14,6 +14,7 @@ import dev.dotarec.bridge.EventPublisher;
 import dev.dotarec.config.AppPaths;
 import dev.dotarec.config.SettingsStore;
 import dev.dotarec.config.SettingsStore.StorageLocation;
+import dev.dotarec.data.ClipRepository;
 import dev.dotarec.data.MatchRepository;
 import dev.dotarec.data.MatchRepository.NewMatch;
 import dev.dotarec.data.TestDb;
@@ -45,6 +46,7 @@ class RecordingArchiverTest {
     private static final long HUGE_FREE = 1_000L * GIB;
 
     private MatchRepository matches;
+    private ClipRepository clips;
     private SettingsStore settings;
     private RetentionSweeper sweeper;
     private RecordingArchiver archiver;
@@ -55,11 +57,12 @@ class RecordingArchiverTest {
     void setUp(@TempDir Path dir) throws Exception {
         DataSource ds = TestDb.migrated(dir);
         matches = new MatchRepository(ds);
+        clips = new ClipRepository(ds);
         videoDir = Files.createDirectories(dir.resolve("ssd"));
         settings = new SettingsStore(
                 new AppPaths(dir.resolve("data").toString(), dir.resolve("obs").toString()));
         settings.get().videoDir = videoDir.toString();
-        sweeper = new RetentionSweeper(matches, settings, mock(EventPublisher.class));
+        sweeper = new RetentionSweeper(matches, clips, settings, mock(EventPublisher.class));
         // Deterministic free-space probe: each dir reports HUGE_FREE unless the test overrides it.
         RecordingArchiver.FreeSpaceProbe probe =
                 d -> freeByDir.getOrDefault(d.toAbsolutePath().normalize().toString(), HUGE_FREE);
@@ -208,7 +211,7 @@ class RecordingArchiverTest {
         doThrow(new IllegalStateException("simulated repoint failure"))
                 .when(spyRepo).updateVideoPath(anyLong(), anyString(), any());
         RetentionSweeper spySweeper =
-                new RetentionSweeper(spyRepo, settings, mock(EventPublisher.class));
+                new RetentionSweeper(spyRepo, clips, settings, mock(EventPublisher.class));
         RecordingArchiver spyArchiver =
                 new RecordingArchiver(spyRepo, settings, spySweeper, hugeFreeProbe());
 
