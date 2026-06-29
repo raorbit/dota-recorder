@@ -169,26 +169,45 @@ public class RetentionSweeper {
                             "Retention sweep could not delete thumbnail for match {}; pruning video row anyway",
                             m.id());
                 }
+                // Prune the VOD row only (markers/stats survive with nulled paths). Its clips are NOT
+                // cascade-deleted: clips are standalone files, kept and evicted LAST — after every
+                // non-starred VOD — in the clip phase below.
                 matches.nullVideoPath(m.id());
-                // The match's VOD is gone, so its clips (sub-ranges of that VOD) are orphaned. Unlike a
-                // match row — which is KEPT (markers/stats survive) with only its path columns nulled —
-                // clips have no standalone value once the source VOD is pruned, so delete the clip files
-                // AND their rows now. Their bytes were counted into `total` (via clips.sumFileSizeBytes),
-                // so decrement `total` by what we reclaim here — otherwise this same pass overstates disk
-                // usage and over-evicts additional, otherwise-safe matches before it sees itself under cap.
-                long clipBytes = deleteClipsForMatch(m.id());
-                total -= clipBytes;
                 deletedIds.add(m.id());
-                freed += size + clipBytes;
+                freed += size;
             }
 
-            if (!deletedIds.isEmpty()) {
+            // Clips last: only after exhausting non-starred VODs, evict non-starred clips oldest-first
+            // until under budget. Starred clips (their own flag) are never auto-deleted. A clip has no
+            // row worth keeping once its file is gone (unlike a match), so delete its file AND row.
+            int clipsDeleted = 0;
+            for (ClipRow clip : clips.findSweepCandidates()) {
+                if (total <= capBytes) {
+                    break;
+                }
+                if (!driveReachable(clip.videoPath())) {
+                    continue; // file on an offline drive: can't delete, and excluded from the budget too
+                }
+                long clipSize = clipSizeBytes(clip);
+                boolean clipGone = deleteFileQuietly(clip.videoPath());
+                deleteFileQuietly(clip.thumbPath());
+                if (!clipGone) {
+                    log.warn("Retention sweep left clip {} intact because video deletion failed", clip.id());
+                    continue;
+                }
+                clips.delete(clip.id());
+                total -= clipSize;
+                freed += clipSize;
+                clipsDeleted++;
+            }
+
+            if (!deletedIds.isEmpty() || clipsDeleted > 0) {
                 Map<String, Object> payload = new LinkedHashMap<>();
                 payload.put("freedBytes", freed);
                 payload.put("deletedIds", deletedIds);
                 events.publish("retention.swept", payload);
-                log.info("Retention sweep freed {} bytes across {} recordings (cap {} bytes)",
-                        freed, deletedIds.size(), capBytes);
+                log.info("Retention sweep freed {} bytes across {} recording(s) and {} clip(s) (cap {} bytes)",
+                        freed, deletedIds.size(), clipsDeleted, capBytes);
             }
             return new SweepResult(freed, deletedIds, total, capBytes);
         } finally {
@@ -333,16 +352,6 @@ public class RetentionSweeper {
     }
 
     /**
-     * Bytes of all rendered clips. Every clip is written under the ACTIVE recording drive
-     * ({@code <videoDir>/clips}) and is never relocated, so this is exactly the clip footprint on the
-     * active drive — {@link RecordingArchiver} adds it to that drive's usage so its per-drive cap
-     * accounts for clips, not just movable match VODs.
-     */
-    public long totalClipBytes() {
-        return clips.sumFileSizeBytes();
-    }
-
-    /**
      * Whether the drive holding {@code filePath} is currently reachable — i.e. the file's parent
      * directory exists. This separates a genuinely-deleted/missing file on a PRESENT drive (parent
      * exists; safe to prune the row) from a file on an UNPLUGGED drive (parent gone; the row must be
@@ -375,25 +384,18 @@ public class RetentionSweeper {
         }
     }
 
-    /**
-     * Deletes every clip belonging to a swept match: the clip's .mp4 + thumbnail on disk and then its
-     * row. Best-effort and non-blocking, matching {@link #deleteFileQuietly}: a clip whose file unlink
-     * fails still has its row removed (the source VOD is gone, so the clip is unplayable regardless).
-     *
-     * @return the bytes reclaimed from clip files that were successfully deleted
-     */
-    private long deleteClipsForMatch(long matchId) {
-        long reclaimed = 0L;
-        for (ClipRow clip : clips.findByParentMatchId(matchId)) {
-            long size = clip.fileSizeBytes() != null ? clip.fileSizeBytes() : 0L;
-            boolean videoGone = deleteFileQuietly(clip.videoPath());
-            deleteFileQuietly(clip.thumbPath());
-            if (videoGone) {
-                reclaimed += size;
-            }
-            clips.delete(clip.id());
+    /** Real on-disk size of a clip's .mp4, falling back to the DB-recorded size on a stat failure. */
+    private long clipSizeBytes(ClipRow clip) {
+        String path = clip.videoPath();
+        if (path == null || path.isBlank()) {
+            return 0L;
         }
-        return reclaimed;
+        try {
+            return Files.size(Path.of(path));
+        } catch (IOException | RuntimeException e) {
+            log.warn("Could not stat clip {} during retention sweep: {}", path, e.toString());
+            return clip.fileSizeBytes() != null ? clip.fileSizeBytes() : 0L;
+        }
     }
 
     private boolean deleteFileQuietly(String path) {

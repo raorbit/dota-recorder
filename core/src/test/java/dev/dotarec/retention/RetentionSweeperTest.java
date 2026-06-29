@@ -95,6 +95,32 @@ class RetentionSweeperTest {
     }
 
     @Test
+    void clipsAreEvictedAfterVodsAndStarredClipsAreKept() throws Exception {
+        // Cap 1 GiB. Seed a non-starred match VOD plus two of its clips (one starred, one not), each
+        // 0.6 GiB -> 1.8 GiB total. The VOD is pruned first; still over cap, the NON-STARRED clip is
+        // evicted next ("clips last"); the STARRED clip is always kept.
+        settings.get().retentionCapGb = 1;
+        long gib = 1024L * 1024 * 1024;
+        long unit = 6 * gib / 10;
+
+        long match = seedWithFiles("m.mp4", "m.jpg", unit, 1_000L, false);
+        long starredClip = seedClip(match, "c-star.mp4", "c-star.jpg", unit, 200L, true);
+        long plainClip = seedClip(match, "c-plain.mp4", "c-plain.jpg", unit, 100L, false);
+
+        sweeper.sweep(null);
+
+        // The VOD is pruned first (row kept, paths nulled).
+        assertThat(matches.findById(match).orElseThrow().videoPath()).isNull();
+        assertThat(Files.exists(videoDir.resolve("m.mp4"))).isFalse();
+        // Then the non-starred clip is evicted: its file AND row are gone.
+        assertThat(Files.exists(videoDir.resolve("c-plain.mp4"))).isFalse();
+        assertThat(clips.findById(plainClip)).isEmpty();
+        // The starred clip survives even though it is older and the budget is still tight.
+        assertThat(Files.exists(videoDir.resolve("c-star.mp4"))).isTrue();
+        assertThat(clips.findById(starredClip)).isPresent();
+    }
+
+    @Test
     void sweepUsesFilesystemSizeWhenDatabaseSizeIsStale() throws Exception {
         settings.get().retentionCapGb = 1;
         long gib = 1024L * 1024 * 1024;
@@ -359,6 +385,21 @@ class RetentionSweeperTest {
                 "win", 7, 22, null, null, 1800,
                 playedAt, videoPath.toString(), thumbPath.toString(), dbSizeBytes, starred, playedAt,
                 null));
+    }
+
+    /** Seeds a ready clip of {@code parentMatchId} with on-disk video + thumb files; returns its id. */
+    private long seedClip(long parentMatchId, String video, String thumb, long sizeBytes, long createdAt,
+                          boolean starred) throws Exception {
+        Path videoPath = videoDir.resolve(video);
+        Path thumbPath = videoDir.resolve(thumb);
+        createSparseFile(videoPath, sizeBytes);
+        Files.createFile(thumbPath);
+        long id = clips.insert(parentMatchId, "manual", null, 0.0, 10.0, null,
+                videoPath.toString(), thumbPath.toString(), sizeBytes, "ready", null, createdAt);
+        if (starred) {
+            clips.setStarred(id, true);
+        }
+        return id;
     }
 
     private static void createSparseFile(Path path, long sizeBytes) throws Exception {
