@@ -4,13 +4,16 @@ import { SupervisionController, type ChildExit, type SupervisionDeps } from './s
 interface Deferred<T> {
   promise: Promise<T>;
   resolve: (value: T) => void;
+  reject: (reason?: unknown) => void;
 }
 function deferred<T>(): Deferred<T> {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((res) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
     resolve = res;
+    reject = rej;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 // Let any pending microtasks (awaited deps + the un-awaited `void this.launchObs()`) settle.
@@ -77,6 +80,62 @@ describe('SupervisionController — core crash', () => {
 
     pending.resolve();
     await first;
+  });
+
+  it('consumes a second restart attempt for a crash that lands mid-restart (budget honored)', async () => {
+    // The restart-then-immediately-die window: restart #1 is in flight when the just-restarted core
+    // crashes again. That re-crash must NOT be discarded — it should drive a second restart so the
+    // maxRestarts budget is actually used (the bug collapsed maxRestarts=2 to one effective attempt).
+    const calls: Array<Deferred<void>> = [];
+    const deps = makeDeps({
+      startCore: vi.fn(() => {
+        const d = deferred<void>();
+        calls.push(d);
+        return d.promise;
+      }),
+    });
+    const controller = new SupervisionController(deps, 2);
+
+    const crash = controller.handleCoreCrash(exit); // attempt 1: suspends on startCore #1
+    await flush();
+    expect(deps.startCore).toHaveBeenCalledTimes(1);
+
+    await controller.handleCoreCrash(exit); // re-crash queued while #1 is in flight
+    expect(deps.startCore).toHaveBeenCalledTimes(1); // still only one startCore in flight
+
+    calls[0].reject(new Error('superseded')); // #1 fails (the re-crash killed the restarting core)
+    await flush();
+    expect(deps.startCore).toHaveBeenCalledTimes(2); // the queued re-crash drove attempt 2
+
+    calls[1].resolve(); // attempt 2 recovers
+    await crash;
+    await flush();
+    expect(deps.notifyDown).not.toHaveBeenCalled();
+    expect(deps.startObs).toHaveBeenCalledTimes(1); // OBS relaunched after the successful restart
+  });
+
+  it('still gives up and notifies once a mid-restart re-crash exhausts the budget', async () => {
+    const calls: Array<Deferred<void>> = [];
+    const deps = makeDeps({
+      startCore: vi.fn(() => {
+        const d = deferred<void>();
+        calls.push(d);
+        return d.promise;
+      }),
+    });
+    const controller = new SupervisionController(deps, 2);
+
+    const crash = controller.handleCoreCrash(exit); // attempt 1
+    await flush();
+    await controller.handleCoreCrash(exit); // re-crash queued
+    calls[0].reject(new Error('superseded')); // #1 fails -> re-loop to attempt 2
+    await flush();
+    expect(deps.startCore).toHaveBeenCalledTimes(2);
+
+    calls[1].reject(new Error('superseded')); // attempt 2 also fails -> budget exhausted
+    await crash;
+    expect(deps.notifyDown).toHaveBeenCalledTimes(1);
+    expect(deps.startObs).not.toHaveBeenCalled();
   });
 
   it('reaps the half-started core and notifies when a restart fails', async () => {

@@ -40,6 +40,7 @@ export class SupervisionController {
   private coreRestartAttempts = 0;
   private obsRestartAttempts = 0;
   private coreRestarting = false;
+  private corePendingRecrash = false;
   private obsLaunching = false;
 
   constructor(
@@ -87,8 +88,13 @@ export class SupervisionController {
     if (this.deps.isShuttingDown()) return;
     if (this.coreRestarting) {
       // A crash landed while a restart is already in flight (e.g. the just-restarted core crashed again
-      // during its health wait). Don't run a second overlapping startCore() on the same core.
+      // during its health wait). Don't run a second overlapping startCore() on the same core — but don't
+      // silently drop it either: queue it so the in-flight restart, once it settles, consumes another
+      // attempt for it. Without this, a restart-then-immediately-die loop wastes the maxRestarts budget
+      // (the re-crash is dropped, and the failed restart leaves no live core to re-trigger this handler),
+      // collapsing maxRestarts=2 to one effective attempt.
       this.deps.log('[core] crash during an in-flight restart; a restart is already running');
+      this.corePendingRecrash = true;
       return;
     }
     this.coreRestarting = true;
@@ -99,27 +105,36 @@ export class SupervisionController {
       await this.deps.stopObs().catch((err) => {
         this.deps.log(`[obs] stop during core crash failed: ${err instanceof Error ? err.message : String(err)}`);
       });
-      if (this.coreRestartAttempts >= this.maxRestarts) {
-        this.deps.notifyDown(
-          'The recorder core stopped and could not be restarted. Restart the app to resume recording.',
-        );
-        return;
-      }
-      this.coreRestartAttempts += 1;
-      this.deps.log(`[core] restarting (attempt ${this.coreRestartAttempts}/${this.maxRestarts})`);
-      try {
-        await this.deps.startCore();
-        this.deps.log('[core] restarted; relaunching OBS');
-        this.coreRestartAttempts = 0; // a recovered core gets its restart budget back (over a long tray session)
-        this.obsRestartAttempts = 0; // a fresh core epoch gets a fresh OBS restart budget
-        void this.launchObs();
-      } catch (err) {
-        this.deps.log(`[core] restart failed: ${err instanceof Error ? err.message : String(err)}`);
-        // startCore() does NOT kill its child on a health-timeout, so a restarted-but-unhealthy JVM
-        // would linger holding the loopback ports. Reap it before giving up.
-        await this.deps.stopCore().catch(() => {});
-        this.deps.notifyDown('The recorder core stopped. Restart the app to resume recording.');
-      }
+      // Restart loop: a crash that arrives WHILE startCore() is in flight is captured in
+      // corePendingRecrash and re-loops here, so the remaining restart budget is actually consumed
+      // rather than wasted on a single discarded attempt.
+      do {
+        this.corePendingRecrash = false;
+        if (this.coreRestartAttempts >= this.maxRestarts) {
+          this.deps.notifyDown(
+            'The recorder core stopped and could not be restarted. Restart the app to resume recording.',
+          );
+          return;
+        }
+        this.coreRestartAttempts += 1;
+        this.deps.log(`[core] restarting (attempt ${this.coreRestartAttempts}/${this.maxRestarts})`);
+        try {
+          await this.deps.startCore();
+          this.deps.log('[core] restarted; relaunching OBS');
+          this.coreRestartAttempts = 0; // a recovered core gets its restart budget back (over a long tray session)
+          this.obsRestartAttempts = 0; // a fresh core epoch gets a fresh OBS restart budget
+          void this.launchObs();
+          return; // success: leave the loop and the handler
+        } catch (err) {
+          this.deps.log(`[core] restart failed: ${err instanceof Error ? err.message : String(err)}`);
+          // startCore() does NOT kill its child on a health-timeout, so a restarted-but-unhealthy JVM
+          // would linger holding the loopback ports. Reap it before retrying or giving up.
+          await this.deps.stopCore().catch(() => {});
+          // If a re-crash queued during this attempt AND budget remains, the while-condition re-loops to
+          // spend it; otherwise fall through to the user-facing notice below.
+        }
+      } while (this.corePendingRecrash);
+      this.deps.notifyDown('The recorder core stopped. Restart the app to resume recording.');
     } finally {
       this.coreRestarting = false;
     }
