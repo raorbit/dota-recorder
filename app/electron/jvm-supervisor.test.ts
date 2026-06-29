@@ -53,7 +53,9 @@ beforeEach(() => {
     'fetch',
     vi.fn(async () => ({
       ok: healthOk,
-      json: async () => ({ status: healthOk ? 'ok' : 'starting' }),
+      // Readiness requires BOTH status=ok and dbReady=true (migrations finished). A healthy core
+      // reports both; the unhealthy stub reports neither.
+      json: async () => ({ status: healthOk ? 'ok' : 'starting', dbReady: healthOk }),
     })),
   );
 });
@@ -138,6 +140,33 @@ describe('JvmSupervisor', () => {
     const sup = new JvmSupervisor({ onLog: () => {}, healthTimeoutMs: 250 });
 
     await expect(sup.start()).rejects.toThrow(/did not become healthy/i);
+  });
+
+  it('keeps waiting while migrations run ({status:ok, dbReady:false}) and does not resolve', async () => {
+    // /health flips to ok the instant the web server binds, but the schema migration runs afterward.
+    // Resolving on status alone would mount the renderer into a half-migrated DB; dbReady gates it.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: true, json: async () => ({ status: 'ok', dbReady: false }) })),
+    );
+    const sup = new JvmSupervisor({ onLog: () => {}, healthTimeoutMs: 250 });
+
+    await expect(sup.start()).rejects.toThrow(/did not become healthy/i);
+  });
+
+  it('resolves once dbReady flips true after migrations finish', async () => {
+    let ready = false;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: true, json: async () => ({ status: 'ok', dbReady: ready }) })),
+    );
+    const sup = new JvmSupervisor({ onLog: () => {}, healthTimeoutMs: 5_000 });
+
+    const starting = sup.start();
+    await flush(50);
+    ready = true; // migrations complete -> the next poll should resolve
+
+    await expect(starting).resolves.toBeUndefined();
   });
 
   it('rejects start() with the real error (not crash) when the child fails to launch', async () => {

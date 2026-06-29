@@ -222,8 +222,14 @@ export class JvmSupervisor {
           ...(this.bridgeToken ? { headers: { [BRIDGE_TOKEN_HEADER]: this.bridgeToken } } : {}),
         });
         if (res.ok) {
-          const body = (await res.json()) as { status?: string };
-          if (body.status === 'ok') return;
+          // /health answers `ok` as soon as the web server binds — which is BEFORE the migration
+          // runner finishes (it runs as an ApplicationRunner, after the port is open). Gating only on
+          // status would let the renderer mount and fire its initial queries straight into a
+          // half-migrated DB (those requests fail and never retry). Require dbReady too, so the poll
+          // waits the extra few ms until the schema exists. createWindow() runs only after start()
+          // resolves, so this closes the race at the root.
+          const body = (await res.json()) as { status?: string; dbReady?: boolean };
+          if (body.status === 'ok' && body.dbReady === true) return;
         }
       } catch (err) {
         lastError = err;
