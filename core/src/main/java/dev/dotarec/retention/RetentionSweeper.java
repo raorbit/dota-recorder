@@ -186,7 +186,7 @@ public class RetentionSweeper {
                     break;
                 }
                 if (!driveReachable(clip.videoPath())) {
-                    continue; // file on an offline drive: can't delete, and excluded from the budget too
+                    continue; // file on an offline drive: can't delete, but its bytes still count toward the budget (via clips.sumFileSizeBytes())
                 }
                 long clipSize = clipSizeBytes(clip);
                 boolean clipGone = deleteFileQuietly(clip.videoPath());
