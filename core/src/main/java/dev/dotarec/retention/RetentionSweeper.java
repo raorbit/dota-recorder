@@ -102,8 +102,14 @@ public class RetentionSweeper {
         this.totalSpace = totalSpace;
     }
 
-    /** Scheduled hourly sweep with no protected match (nothing is actively recording from here). */
-    @Scheduled(fixedDelay = 3_600_000L)
+    /**
+     * Scheduled hourly sweep with no protected match (nothing is actively recording from here). The
+     * initialDelay keeps the first sweep from firing the instant the scheduler starts — before the
+     * startup {@code MigrationRunner} runs — so it can't query the {@code clips}/{@code matches} tables
+     * before a pending migration has created them (a fresh/upgrade boot otherwise logged a spurious
+     * "no such table" error).
+     */
+    @Scheduled(initialDelay = 60_000L, fixedDelay = 3_600_000L)
     public void sweep() {
         sweep(null);
     }

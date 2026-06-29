@@ -53,8 +53,13 @@ public class ClipQueue {
         }
     }
 
-    /** Polls and re-dispatches pending clip rows. Cadence mirrors {@code EnrichmentQueue}. */
-    @Scheduled(fixedDelay = 60_000L)
+    /**
+     * Polls and re-dispatches pending clip rows. Cadence mirrors {@code EnrichmentQueue}. The
+     * initialDelay keeps this first poll from firing the instant the scheduler starts (the tail of
+     * context refresh) — before the startup {@code MigrationRunner} has created the {@code clips}
+     * table on a fresh/upgrade boot, which would otherwise log a spurious "no such table" error.
+     */
+    @Scheduled(initialDelay = 60_000L, fixedDelay = 60_000L)
     public void sweep() {
         List<ClipRow> pending = clips.findByStatus("pending");
         if (pending.isEmpty()) {
