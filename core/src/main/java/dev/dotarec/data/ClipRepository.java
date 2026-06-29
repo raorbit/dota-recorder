@@ -146,6 +146,37 @@ public class ClipRepository {
         return out;
     }
 
+    /**
+     * Clips wedged in {@code generating} since before {@code createdBefore} (epoch millis), oldest
+     * first. Backs the periodic self-heal: a row whose worker died after the cut but before the
+     * status write (e.g. a back-to-back SQLITE_BUSY at finalize) stays {@code generating} forever,
+     * since the boot-only orphan reconcile never runs again. The sweep re-pends these so they recover
+     * without a reboot. The {@code createdBefore} cutoff keeps a row that is genuinely mid-cut from
+     * being re-pended (and double-cut) while a worker is still rendering it.
+     */
+    public List<ClipRow> findStaleGenerating(long createdBefore) {
+        String sql = """
+                SELECT id, parent_match_id, kind, trigger_reason, start_offset_s, end_offset_s,
+                       label, video_path, thumb_path, file_size_bytes, status, error, created_at, starred
+                FROM clips
+                WHERE status = 'generating' AND created_at < ?
+                ORDER BY created_at ASC, id ASC
+                """;
+        List<ClipRow> out = new ArrayList<>();
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, createdBefore);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    out.add(map(rs));
+                }
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to query stale generating clips", e);
+        }
+        return out;
+    }
+
     /** Every clip, newest first — backs the library "Clips" bucket's flat list. */
     public List<ClipRow> findAll() {
         String sql = """
@@ -238,6 +269,30 @@ public class ClipRepository {
             return ps.executeUpdate() == 1;
         } catch (SQLException e) {
             throw new IllegalStateException("Failed to claim clip " + id + " for generation", e);
+        }
+    }
+
+    /**
+     * Re-pends a wedged {@code generating} row, but ONLY if it is still {@code generating} — a
+     * compare-and-set ({@code WHERE id=? AND status='generating'}) so a worker that flipped the row to
+     * {@code ready}/{@code failed} between the sweep's stale query and this write is not clobbered back
+     * to {@code pending} (which would re-cut a finished clip). Clears the prior generator outputs.
+     *
+     * @return true only if THIS call re-pended the row.
+     */
+    public boolean rependIfStale(long id) {
+        String sql = """
+                UPDATE clips
+                SET status = 'pending', video_path = NULL, file_size_bytes = NULL,
+                    thumb_path = NULL, error = NULL
+                WHERE id = ? AND status = 'generating'
+                """;
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, id);
+            return ps.executeUpdate() == 1;
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to re-pend stale clip " + id, e);
         }
     }
 

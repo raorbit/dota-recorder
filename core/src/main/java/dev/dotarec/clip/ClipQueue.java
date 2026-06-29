@@ -29,6 +29,15 @@ public class ClipQueue {
 
     private static final Logger log = LoggerFactory.getLogger(ClipQueue.class);
 
+    /**
+     * A {@code generating} row older than this (since {@code created_at}) is assumed wedged — its
+     * worker died after the cut but before the status write (e.g. a back-to-back SQLITE_BUSY at
+     * finalize), so the {@code @Async} method's exception escaped and the row never reached a terminal
+     * state. Comfortably past the cut + thumbnail process ceilings ({@code Clipper}'s 10-min timeout,
+     * twice) plus margin, so a genuinely in-flight render is never re-pended (and double-cut).
+     */
+    private static final long STALE_GENERATING_MS = 30L * 60_000L;
+
     private final ClipRepository clips;
     private final ClipService clipService;
 
@@ -61,6 +70,18 @@ public class ClipQueue {
      */
     @Scheduled(initialDelay = 60_000L, fixedDelay = 60_000L)
     public void sweep() {
+        // Self-heal rows wedged in 'generating' past the stale cutoff. Unlike reconcileOrphans (boot
+        // only), this runs every interval, so a row stranded mid-flight by a finalize-time DB failure
+        // (the @Async exception escaped before it could be marked failed) recovers without a reboot.
+        // rependIfStale is a compare-and-set on status='generating', so a worker that just finished is
+        // not clobbered back to pending. Re-pended rows are picked up by the pending dispatch below.
+        for (ClipRow stuck : clips.findStaleGenerating(System.currentTimeMillis() - STALE_GENERATING_MS)) {
+            if (clips.rependIfStale(stuck.id())) {
+                log.info("Re-pending clip {} wedged in 'generating' since {} (stale > {}ms)",
+                        stuck.id(), stuck.createdAt(), STALE_GENERATING_MS);
+            }
+        }
+
         List<ClipRow> pending = clips.findByStatus("pending");
         if (pending.isEmpty()) {
             return;

@@ -283,6 +283,70 @@ class ClipServiceTest {
         assertThat(row.error()).contains("missing on disk");
     }
 
+    // ---- queue self-heal of wedged 'generating' rows ----------------------------------------
+
+    @Test
+    void sweep_stale_generating_row_is_rependedAndRegenerated() throws Exception {
+        long parent = seedMatchWithVideo(1800);
+        stubClipperToWriteRealFiles(64L);
+
+        // Simulate a row wedged in 'generating' from a finalize-time double DB failure: its worker
+        // exited without ever flipping it to ready/failed. created_at is well past the stale cutoff.
+        long staleCreatedAt = System.currentTimeMillis() - (60L * 60_000L);
+        long clipId = clips.insert(parent, "manual", null, 30.0, 45.0, null,
+                null, null, null, "generating", null, staleCreatedAt);
+
+        ClipQueue queue = new ClipQueue(clips, service);
+        queue.sweep();
+
+        // The sweep re-pends the wedged row and the pending dispatch (synchronous in test) regenerates
+        // it, so it recovers to ready without a reboot.
+        ClipRow row = clips.findById(clipId).orElseThrow();
+        assertThat(row.status()).isEqualTo("ready");
+        assertThat(row.videoPath()).isNotNull();
+        verify(clipper, times(1)).clip(any(), anyDouble(), anyDouble(), any());
+    }
+
+    @Test
+    void sweep_fresh_generating_row_is_left_alone() throws Exception {
+        long parent = seedMatchWithVideo(1800);
+
+        // A row that is genuinely mid-cut (created just now) must NOT be re-pended (and double-cut).
+        long clipId = clips.insert(parent, "manual", null, 30.0, 45.0, null,
+                null, null, null, "generating", null, System.currentTimeMillis());
+
+        ClipQueue queue = new ClipQueue(clips, service);
+        queue.sweep();
+
+        assertThat(clips.findById(clipId).orElseThrow().status()).isEqualTo("generating");
+        verify(clipper, never()).clip(any(), anyDouble(), anyDouble(), any());
+    }
+
+    @Test
+    void failClip_statusWriteFailure_doesNotEscapeGenerateAsync() throws Exception {
+        // A failClip whose updateStatus throws (double DB failure at finalize) must not let the
+        // exception escape the @Async method — otherwise the row stays wedged in 'generating'. Here the
+        // cut throws (driving failClip) AND the status write throws; generateAsync must return cleanly.
+        long parent = seedMatchWithVideo(1800);
+        ClipRepository throwingClips = mock(ClipRepository.class);
+        long clipId = clips.insert(parent, "manual", null, 30.0, 45.0, null,
+                null, null, null, "pending", null, System.currentTimeMillis());
+        ClipRow row = clips.findById(clipId).orElseThrow();
+        when(throwingClips.findById(clipId)).thenReturn(Optional.of(row));
+        when(throwingClips.claimForGeneration(clipId)).thenReturn(true);
+        when(throwingClips.updateStatus(eq(clipId), eq("failed"), any(), any(), any(), any()))
+                .thenThrow(new IllegalStateException("SQLITE_BUSY"));
+        when(clipper.clip(any(), anyDouble(), anyDouble(), any()))
+                .thenThrow(new IllegalStateException("ffmpeg blew up"));
+
+        ClipService svc = new ClipService(throwingClips, matches, clipper, events, settings, paths,
+                maintenanceLock, null);
+        setSelf(svc, svc);
+
+        // Must not throw despite both the cut and the status write failing.
+        svc.generateAsync(clipId);
+    }
+
     // ---- helpers ----------------------------------------------------------------------------
 
     /** Makes the mock clipper write a real {@code sizeBytes} output + a real thumbnail file. */
