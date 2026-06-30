@@ -1,6 +1,6 @@
 {
   "name": "dota-recorder",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "private": true,
   "description": "Dota 2 Recorder - personal desktop app that auto-records matches, tags moments, and browses VODs.",
   "license": "MIT",

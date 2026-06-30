@@ -29,7 +29,7 @@ public class HealthController {
         // Project version is stamped at build time; fall back to a literal if the implementation
         // version is unavailable (e.g. exploded dev runs).
         String impl = HealthController.class.getPackage().getImplementationVersion();
-        this.version = (impl != null) ? impl : "0.1.2";
+        this.version = (impl != null) ? impl : "0.1.3";
     }
 
     @GetMapping("/health")
