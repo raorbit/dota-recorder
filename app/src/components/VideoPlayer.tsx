@@ -529,14 +529,16 @@ export function VideoPlayer({
   // The time readout prefers the actual loaded media duration (the DB value is a recorded estimate
   // that can disagree); falls back to the DB duration before metadata loads / on a no-file row.
   const readoutDur = mediaDurationS ?? dur;
-  // The clip-range overlay must align with the PLAYHEAD (media duration), not the DB
-  // estimate used for marker/pause placement — otherwise the handles drift from where
-  // the playhead sits and from the offset actually cut by ffmpeg.
+  // Markers, pause spans, and the clip-range overlay must all align with the PLAYHEAD, which moves on
+  // the loaded media's real duration. The DB durationS can disagree — notably, enrichment overwrites
+  // it with the OpenDota IN-GAME length, which is shorter than the VIDEO (the recording also spans
+  // draft / pre-game / post-game). Positioning on durationS drifts every marker rightward and
+  // overflows any past the in-game end. So position on the media duration; fall back to durationS only
+  // before metadata loads / on a no-file row (marker.videoOffsetS is already in the video timebase).
   const scrubDur = mediaDurationS ?? dur;
-  // Only place bars when we have a usable positive duration; otherwise hide them
-  // rather than pile every marker at 0 (a misleading stack). Seeded rows usually
-  // carry a real durationS, so bars position even without a video file.
-  const canPosition = dur > 0;
+  // Place bars whenever we have a usable positive duration (media if loaded, else the DB value);
+  // otherwise hide them rather than pile every marker at 0 (a misleading stack).
+  const canPosition = scrubDur > 0;
   // Assist markers are hidden from the scrub bar: a teamfight racks up many assists, which clutter
   // the timeline and bury the kill/death moments that matter. They're still tagged + stored and
   // counted in KDA — just not drawn here.
@@ -611,10 +613,10 @@ export function VideoPlayer({
               // known end of the recording.
               const anchor = recordStartWall;
               const startOffsetS = (p.startWall - anchor) / 1000;
-              const endOffsetS = p.endWall != null ? (p.endWall - anchor) / 1000 : dur;
+              const endOffsetS = p.endWall != null ? (p.endWall - anchor) / 1000 : scrubDur;
               if (Number.isNaN(startOffsetS) || Number.isNaN(endOffsetS)) return null;
-              const startPct = Math.min(100, Math.max(0, (startOffsetS / dur) * 100));
-              const endPct = Math.min(100, Math.max(0, (endOffsetS / dur) * 100));
+              const startPct = Math.min(100, Math.max(0, (startOffsetS / scrubDur) * 100));
+              const endPct = Math.min(100, Math.max(0, (endOffsetS / scrubDur) * 100));
               const widthPct = Math.max(0, endPct - startPct);
               if (widthPct <= 0) return null; // degenerate span collapses to nothing
               return (
@@ -635,7 +637,7 @@ export function VideoPlayer({
               if (offset == null || Number.isNaN(offset)) return null;
               // Clamp to [0,100]%: offsets past the recorded end pin to the right
               // edge instead of overflowing the scrubber.
-              const pct = Math.min(100, Math.max(0, (offset / dur) * 100));
+              const pct = Math.min(100, Math.max(0, (offset / scrubDur) * 100));
               const title = `${m.type}${
                 m.gameClock != null && Number.isFinite(m.gameClock)
                   ? ` · ${formatClock(m.gameClock)}`
