@@ -1,5 +1,6 @@
+import { useEffect, useState } from 'react';
 import { useLibraryStore, type Bucket } from '../store/library';
-import type { BucketCounts, Status } from '../api/client';
+import { stopRecording, type BucketCounts, type Status } from '../api/client';
 import './sidebar.css';
 
 export type SettingsTab = 'recording' | 'gsi' | 'general';
@@ -81,6 +82,40 @@ export function Sidebar({
 
   const card = deriveStatus(status);
 
+  // Manual stop: a two-click confirm guards against an accidental click cutting a live
+  // match in half. First click arms ("Confirm stop?"); second click finalizes. The arm
+  // resets whenever recording ends (here, or via the normal POST_GAME/watchdog path).
+  const [confirming, setConfirming] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  const [stopError, setStopError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (card.state !== 'recording') {
+      setConfirming(false);
+      setStopError(null);
+    }
+  }, [card.state]);
+
+  const onStopClick = (): void => {
+    if (!confirming) {
+      setConfirming(true);
+      return;
+    }
+    setConfirming(false);
+    setStopping(true);
+    setStopError(null);
+    // On success the next status frame (the core pushes one right after finalize) flips the
+    // card off 'recording', which unmounts this button. On failure, surface the message and
+    // leave the button so the user can retry.
+    stopRecording()
+      .catch((err: unknown) => {
+        setStopError(err instanceof Error ? err.message : 'Failed to stop recording');
+      })
+      .finally(() => {
+        setStopping(false);
+      });
+  };
+
   const selectBucket = (key: Bucket): void => {
     setBucket(key);
     onOpenLibrary();
@@ -130,6 +165,33 @@ export function Sidebar({
         <div className="sb-status-text" data-state={card.state}>
           {card.text}
         </div>
+        {card.state === 'recording' && (
+          <div className="sb-stop-wrap">
+            <button
+              type="button"
+              className="sb-stop-btn"
+              data-confirming={confirming ? 'true' : 'false'}
+              onClick={onStopClick}
+              disabled={stopping}
+            >
+              {stopping ? 'Stopping…' : confirming ? 'Confirm stop?' : 'Stop recording'}
+            </button>
+            {confirming && !stopping && (
+              <button
+                type="button"
+                className="sb-stop-cancel"
+                onClick={() => setConfirming(false)}
+              >
+                Cancel
+              </button>
+            )}
+            {stopError && (
+              <span className="sb-stop-error" role="alert">
+                {stopError}
+              </span>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="sb-group-label">RECORDINGS</div>

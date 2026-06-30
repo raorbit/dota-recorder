@@ -360,6 +360,21 @@ export function fetchStatus(): Promise<StatusSnapshot> {
   return getJson<StatusSnapshot>('/status');
 }
 
+// POST /recording/stop result. `wasRecording` is whether a recording was actually in
+// flight when the call landed, so the UI can say "stopped" vs "nothing to stop".
+export interface StopRecordingResult {
+  readonly wasRecording: boolean;
+}
+
+// Manually force-finalizes the in-flight recording (POST /recording/stop): capture
+// thumbnail, stop OBS, persist the match row + buffered markers, reset to IDLE — the
+// same path the GSI-silence watchdog uses. The user's escape hatch for a match that
+// never sent POST_GAME (bot/custom/abandoned), where the recorder would otherwise stay
+// stuck in RECORDING. Idempotent server-side: a no-op when nothing is recording.
+export function stopRecording(): Promise<StopRecordingResult> {
+  return postJson<StopRecordingResult>('/recording/stop');
+}
+
 export function fetchSettings(): Promise<Settings> {
   return getJson<Settings>('/settings');
 }
