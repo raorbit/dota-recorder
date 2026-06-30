@@ -305,6 +305,35 @@ export function VideoPlayer({
     void v.play?.().catch(() => {});
   }, [activeClipId]);
 
+  // Arrow keys seek ±10s (a familiar video shortcut). A window listener so it works without first
+  // clicking into the player; ignored while typing in a field, with a modifier held, or when no video
+  // is loaded, so it never hijacks text editing, the table's menus, or browser shortcuts.
+  useEffect(() => {
+    const STEP_S = 10;
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+      if (e.altKey || e.ctrlKey || e.metaKey) return;
+      const t = e.target as HTMLElement | null;
+      if (
+        t &&
+        (t.tagName === 'INPUT' ||
+          t.tagName === 'TEXTAREA' ||
+          t.tagName === 'SELECT' ||
+          t.isContentEditable)
+      ) {
+        return;
+      }
+      const v = videoRef.current;
+      if (!v || !v.currentSrc) return; // no video loaded — let the key behave normally
+      e.preventDefault();
+      const d = usableDuration(v);
+      const target = Math.max(0, v.currentTime + (e.key === 'ArrowLeft' ? -STEP_S : STEP_S));
+      v.currentTime = d !== null ? Math.min(target, d) : target;
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
   const caption = match
     ? `${heroDisplayName(match.hero)} · ${bucketLabelOf(match)}`
     : 'Storm Spirit · Mid · 38:12';
