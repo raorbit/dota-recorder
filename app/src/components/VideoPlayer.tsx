@@ -537,6 +537,10 @@ export function VideoPlayer({
   // rather than pile every marker at 0 (a misleading stack). Seeded rows usually
   // carry a real durationS, so bars position even without a video file.
   const canPosition = dur > 0;
+  // Assist markers are hidden from the scrub bar: a teamfight racks up many assists, which clutter
+  // the timeline and bury the kill/death moments that matter. They're still tagged + stored and
+  // counted in KDA — just not drawn here.
+  const visibleMarkers = markers.filter((m) => m.type !== 'assist');
 
   // Clip controls (scissors + range handles) only make sense over a real, playable
   // VOD — disabled on a seeded / pruned no-file row.
@@ -624,7 +628,7 @@ export function VideoPlayer({
               );
             })}
           {canPosition &&
-            markers.map((m) => {
+            visibleMarkers.map((m) => {
               const offset = m.videoOffsetS;
               // Defensive: Marker.videoOffsetS is typed non-null, but skip a
               // malformed null/NaN offset rather than position it at NaN%.
