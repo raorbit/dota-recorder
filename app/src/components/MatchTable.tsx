@@ -794,6 +794,10 @@ export function MatchTable(): React.JSX.Element {
           .map((id) => matchById.get(id))
           .filter((m): m is MatchSummary => m != null);
         const revealable = targets.filter((m) => canReveal(m));
+        // Mirror the single-row menu: offer Star only when something is unstarred, Unstar only when
+        // something is starred (none starred -> Star only; all starred -> Unstar only; mixed -> both).
+        const anyStarred = targets.some((m) => m.starred);
+        const anyUnstarred = targets.some((m) => !m.starred);
         const bulkStar = (starred: boolean): void => {
           targets.forEach((m) => void toggleStar(m.id, starred));
           closeRowMenu();
@@ -879,22 +883,26 @@ export function MatchTable(): React.JSX.Element {
                 <div className="ctx-menu-head" aria-hidden="true">
                   {count} SELECTED
                 </div>
-                <button
-                  type="button"
-                  className="ctx-item"
-                  role="menuitem"
-                  onClick={() => bulkStar(true)}
-                >
-                  Star {count} (keep from auto-delete)
-                </button>
-                <button
-                  type="button"
-                  className="ctx-item"
-                  role="menuitem"
-                  onClick={() => bulkStar(false)}
-                >
-                  Unstar {count}
-                </button>
+                {anyUnstarred && (
+                  <button
+                    type="button"
+                    className="ctx-item"
+                    role="menuitem"
+                    onClick={() => bulkStar(true)}
+                  >
+                    Star {count} (keep from auto-delete)
+                  </button>
+                )}
+                {anyStarred && (
+                  <button
+                    type="button"
+                    className="ctx-item"
+                    role="menuitem"
+                    onClick={() => bulkStar(false)}
+                  >
+                    Unstar {count}
+                  </button>
+                )}
                 {revealable.length > 0 && (
                   <button
                     type="button"
