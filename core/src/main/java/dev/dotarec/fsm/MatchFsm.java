@@ -421,10 +421,23 @@ public class MatchFsm {
             Long fileSizeBytes,
             int durationS,
             long now) {
-        NewMatch row = newMatchRow(s, videoPath, thumbPath, fileSizeBytes, durationS, now);
         try (Connection conn = dataSource.getConnection()) {
             conn.setAutoCommit(false);
             try {
+                Long dotaMatchId = s.getMatchId() != 0L ? s.getMatchId() : null;
+                // dota_match_id is UNIQUE. If this match id was already persisted -- a re-record after
+                // a mid-match roll, an abandon+rejoin, or a manual/watchdog stop of a re-entered match
+                // -- inserting it again throws SQLITE_CONSTRAINT_UNIQUE and rolls back the WHOLE
+                // finalize, so the row + buffered markers are lost and the .mp4 is orphaned with no
+                // library entry. Preserve the recording instead by saving it WITHOUT the match-id link
+                // (a standalone, un-enrichable row under Unsorted): a duplicate entry beats silent loss.
+                if (dotaMatchId != null && matches.existsByDotaMatchId(conn, dotaMatchId)) {
+                    log.warn("Match {} already recorded; saving this recording without the "
+                            + "dota_match_id link to avoid losing it", dotaMatchId);
+                    dotaMatchId = null;
+                }
+                NewMatch row =
+                        newMatchRow(s, dotaMatchId, videoPath, thumbPath, fileSizeBytes, durationS, now);
                 long matchRowId = matches.insert(conn, row);
                 for (PendingMarker m : s.getMarkers()) {
                     // Re-clamp the live offset to the now-known real duration so a marker can't sit
@@ -497,12 +510,12 @@ public class MatchFsm {
 
     private NewMatch newMatchRow(
             RecordingSession s,
+            Long dotaMatchId,
             String videoPath,
             String thumbPath,
             Long fileSizeBytes,
             int durationS,
             long now) {
-        Long dotaMatchId = s.getMatchId() != 0L ? s.getMatchId() : null;
         return new NewMatch(
                 dotaMatchId,
                 "match",

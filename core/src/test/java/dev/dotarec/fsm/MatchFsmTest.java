@@ -337,6 +337,50 @@ class MatchFsmTest {
     }
 
     @Test
+    void postGame_whenDotaMatchIdAlreadyRecorded_savesWithoutTheLink_notLosingTheRecording() {
+        // A row for this Dota match id already exists (it was recorded once, then re-recorded after a
+        // mid-match roll / abandon+rejoin). dota_match_id is UNIQUE, so a naive insert throws and rolls
+        // back the WHOLE finalize -- losing this recording's row + markers and orphaning its .mp4. The
+        // finalize must instead persist the recording WITHOUT the colliding match-id link.
+        long existingId = matches.insert(new MatchRepository.NewMatch(
+                8873844218L,             // dotaMatchId
+                "match",                 // recordKind
+                "enriched",              // enrichmentState
+                "npc_dota_hero_spectre", // hero
+                null, null, null,        // kills, deaths, assists
+                null, null, null, null,  // gpm, xpm, netWorth, lastHits
+                "loss",                  // result
+                null, null, null, null,  // lobbyType, gameMode, rankTier, mmrDelta
+                600,                     // durationS
+                1_000L,                  // playedAt
+                "C:\\videos\\first.mkv", // videoPath
+                null,                    // thumbPath
+                null,                    // fileSizeBytes
+                false,                   // starred
+                1_000L,                  // createdAt
+                1_000L));                // recordStartedWallMs
+
+        // Record + finalize the SAME match id again.
+        fsm.onFrame(frame().matchId(8873844218L)
+                .state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing")
+                .hero("npc_dota_hero_spectre").build());
+        assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
+        fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_POST_GAME").noHero().build());
+
+        // Finalize succeeded (not stranded in STOPPING) and a SECOND row was written, keeping the video.
+        assertThat(fsm.getState()).isEqualTo(MatchState.IDLE);
+        List<MatchSummary> rows = matches.findAll();
+        assertThat(rows).hasSize(2);
+        MatchSummary fresh =
+                rows.stream().filter(r -> r.id() != existingId).findFirst().orElseThrow();
+        assertThat(fresh.dotaMatchId())
+                .as("re-record saved without the colliding match-id link").isNull();
+        assertThat(fresh.videoPath()).isEqualTo("C:\\videos\\match.mkv");
+        assertThat(fresh.hero()).isEqualTo("npc_dota_hero_spectre");
+        verify(events).publish(eq("match.recorded"), any());
+    }
+
+    @Test
     void recordingJournalTracksSessionEventsAndDeletesOnSuccessfulFinalize() {
         fsm.onFrame(frame().wall(1_000L)
                 .state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")
