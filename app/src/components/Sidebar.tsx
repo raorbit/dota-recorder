@@ -222,7 +222,7 @@ export function Sidebar({
         ))}
       </div>
 
-      <div className="sb-version">v0.1.2</div>
+      <div className="sb-version">v0.1.3</div>
     </aside>
   );
 }
