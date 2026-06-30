@@ -37,12 +37,14 @@ public class AudioController {
 
     private static final String SCENE_NAME = ObsSceneConfigurer.SCENE_NAME;
     /**
-     * Prefix for the hidden helper input each enumeration call creates and removes. A fresh UUID is
-     * appended per call so concurrent enumerations (the settings UI primes application/output/input in
-     * parallel at mount) never collide on one input name — which would make a created probe fail and a
-     * sibling's finally remove another call's probe mid-enumerate.
+     * Prefix for the hidden helper input each enumeration call creates and removes (shared with
+     * {@link ObsSceneConfigurer#PROBE_PREFIX} so the scene reconcile can sweep any probe a failed
+     * removal leaves behind). A fresh UUID is appended per call so concurrent enumerations (the
+     * settings UI primes application/output/input in parallel at mount) never collide on one input
+     * name — which would make a created probe fail and a sibling's finally remove another call's probe
+     * mid-enumerate.
      */
-    private static final String PROBE_PREFIX = "__dotarec_probe_audio_";
+    private static final String PROBE_PREFIX = ObsSceneConfigurer.PROBE_PREFIX;
     private static final long REQUEST_TIMEOUT_MS = 5_000L;
 
     private final ObsController obsController;
