@@ -108,6 +108,10 @@ export function VideoPlayer({
   clipPlayToken = 0,
 }: VideoPlayerProps): React.JSX.Element {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  // Fullscreen targets the whole stage, not the bare <video>: the scrub bar, markers, and
+  // controls are siblings of the <video> inside .vp-stage, so fullscreening the element alone
+  // would show only the raw video surface (with the browser's native controls) and hide them.
+  const stageRef = useRef<HTMLDivElement | null>(null);
 
   // Marker / duration / video state is LOCAL to the player — the zustand library
   // store is scoped to list/filter/selection and deliberately doesn't carry it.
@@ -359,7 +363,16 @@ export function VideoPlayer({
   }
 
   function toggleFullscreen(): void {
-    void videoRef.current?.requestFullscreen?.().catch(() => {});
+    // Fullscreen (or exit) the whole stage so the custom scrub bar + markers + controls stay
+    // visible. Fullscreening the bare <video> instead shows only the video surface with the
+    // browser's native controls, hiding the marker overlay (which lives outside the element).
+    const stage = stageRef.current;
+    if (!stage) return;
+    if (document.fullscreenElement) {
+      void document.exitFullscreen?.().catch(() => {});
+    } else {
+      void stage.requestFullscreen?.().catch(() => {});
+    }
   }
 
   // Enter/Space activates a role="button" control (the glyph controls aren't <button>s).
@@ -537,7 +550,7 @@ export function VideoPlayer({
   const playSrc = activeClipId !== null ? clipStreamUrl(activeClipId) : (videoUrl ?? undefined);
 
   return (
-    <div className="vp-stage">
+    <div className="vp-stage" ref={stageRef}>
       <div className="vp-hatch" aria-hidden="true" />
 
       {/* Real VOD behind the chrome. videoUrl points at the authed loopback range
