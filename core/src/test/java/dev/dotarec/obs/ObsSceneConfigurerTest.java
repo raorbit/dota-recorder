@@ -29,6 +29,13 @@ class ObsSceneConfigurerTest {
         return i;
     }
 
+    private static Input input(String name, String kind) {
+        Input i = new Input();
+        i.setInputName(name);
+        i.setInputKind(kind);
+        return i;
+    }
+
     private static AudioSource source(String id, String kind, String target) {
         return new AudioSource(id, kind, target, "label", 100, false);
     }
@@ -157,5 +164,46 @@ class ObsSceneConfigurerTest {
                 List.of(input("dotarec:a"), input("Game Capture"), input("dotarec:b"), input(null));
         assertThat(ObsSceneConfigurer.ownedInputNames(inputs))
                 .containsExactlyInAnyOrder("dotarec:a", "dotarec:b");
+    }
+
+    @Test
+    void foreignAudioInputs_picksTheBuiltinGlobalsButNotOurOwnInputs() {
+        // OBS's built-in Desktop Audio + Mic/Aux globals are WASAPI audio inputs we do NOT own; these
+        // are exactly the ones reconcile must mute so they never leak the desktop mix / microphone.
+        List<Input> inputs =
+                List.of(
+                        input("Desktop Audio", "wasapi_output_capture"),
+                        input("Mic/Aux", "wasapi_input_capture"),
+                        input("dotarec:builtin-desktop", "wasapi_output_capture"),
+                        input("dotarec:builtin-microphone", "wasapi_input_capture"),
+                        input("dotarec:abc", "wasapi_process_output_capture"));
+
+        assertThat(ObsSceneConfigurer.foreignAudioInputs(inputs))
+                .containsExactly("Desktop Audio", "Mic/Aux");
+    }
+
+    @Test
+    void foreignAudioInputs_includesStaleEnumerationProbes() {
+        // A leftover enumeration probe (AudioController's transient helper) is non-owned and WASAPI, so
+        // it would leak the default device too if its removal failed — mute it as well.
+        List<Input> inputs =
+                List.of(
+                        input("__dotarec_probe_audio_xyz", "wasapi_input_capture"),
+                        input("dotarec:abc", "wasapi_process_output_capture"));
+
+        assertThat(ObsSceneConfigurer.foreignAudioInputs(inputs))
+                .containsExactly("__dotarec_probe_audio_xyz");
+    }
+
+    @Test
+    void foreignAudioInputs_ignoresNonAudioInputsAndNulls() {
+        // Game Capture (video) and a null name/kind are not audio leaks; leave them out.
+        List<Input> inputs =
+                List.of(
+                        input(ObsSceneConfigurer.GAME_CAPTURE_INPUT, "game_capture"),
+                        input("no-kind"),
+                        input(null, "wasapi_output_capture"));
+
+        assertThat(ObsSceneConfigurer.foreignAudioInputs(inputs)).isEmpty();
     }
 }

@@ -5,6 +5,8 @@ import {
   fetchSettings,
   fetchStorageUsage,
   updateSettings,
+  BUILTIN_DESKTOP_ID,
+  BUILTIN_MICROPHONE_ID,
   type AudioInputOption,
   type AudioSource,
   type AudioSourceKind,
@@ -122,22 +124,46 @@ function capExceedsDrive(capGb: number, usage: DriveUsage | undefined): boolean 
   return capGb * 1024 ** 3 > reachableBytes;
 }
 
-// The three audio-source kinds offered by the "Add source" chooser, with a label
-// and the single-glyph icon shown in each row's kind chip (also via [data-kind]).
-const AUDIO_KINDS: ReadonlyArray<{
-  readonly kind: AudioSourceKind;
-  readonly label: string;
-  readonly icon: string;
-}> = [
-  { kind: 'application', label: 'Application', icon: '◫' },
-  { kind: 'output', label: 'Output device', icon: '🔊' },
-  { kind: 'input', label: 'Microphone', icon: '🎙' },
-];
+// Single-glyph icon per WASAPI kind, shown in each mixer row's chip (also keyed via [data-kind]).
+const AUDIO_KIND_ICON: Record<AudioSourceKind, string> = {
+  application: '◫',
+  output: '🔊',
+  input: '🎙',
+};
 
 const AUDIO_KIND_LABEL: Record<AudioSourceKind, string> = {
   application: 'Application',
   output: 'Output device',
   input: 'Microphone',
+};
+
+// Which mixer row a source renders as: the two built-ins (matched by reserved id) are fixed,
+// non-removable rows; everything else is a removable application/app capture.
+type MixerRowKind = 'microphone' | 'desktop' | 'app';
+
+function mixerRowKind(src: AudioSource): MixerRowKind {
+  if (src.id === BUILTIN_MICROPHONE_ID) return 'microphone';
+  if (src.id === BUILTIN_DESKTOP_ID) return 'desktop';
+  return 'app';
+}
+
+// Static presentation for the two always-present built-in rows. `dataKind` drives the chip tint.
+const BUILTIN_ROW_META: Record<
+  'microphone' | 'desktop',
+  { readonly icon: string; readonly name: string; readonly desc: string; readonly dataKind: AudioSourceKind }
+> = {
+  microphone: {
+    icon: '🎙',
+    name: 'Microphone',
+    desc: 'Your voice · default device',
+    dataKind: 'input',
+  },
+  desktop: {
+    icon: '🔊',
+    name: 'Desktop audio',
+    desc: 'All system sound — including Discord, browser, music',
+    dataKind: 'output',
+  },
 };
 
 // Single self-describing "Recorder" indicator. The recorder is app-managed now,
@@ -342,37 +368,25 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
   // ── Audio-source mutators. Each edits the list immutably and resets saveState to
   // 'idle' (matching the other onChange handlers) so Save re-arms after a tweak. ──
 
-  const addSource = (kind: AudioSourceKind): void => {
+  // Add an application capture (the only add path in the mixer — the mic + desktop rows are
+  // always present). Target is null until the user picks a running app from the row's picker.
+  const addApp = (): void => {
     const source: AudioSource = {
       id: crypto.randomUUID(),
-      kind,
-      // application matches a process (null until a window is picked); output/input
-      // default to the system default device.
-      target: kind === 'application' ? null : 'default',
+      kind: 'application',
+      target: null,
       label: '',
       volume: 100,
       muted: false,
     };
     setAudioSources((prev) => [...prev, source]);
-    // The process/device list may have changed since mount — refetch for the new kind.
-    refreshInputs(kind);
+    // The running-process list is volatile — refetch so the new row's picker is current.
+    refreshInputs('application');
     setSaveState('idle');
   };
 
   const removeAt = (i: number): void => {
     setAudioSources((prev) => prev.filter((_, idx) => idx !== i));
-    setSaveState('idle');
-  };
-
-  const setKind = (i: number, kind: AudioSourceKind): void => {
-    setAudioSources((prev) =>
-      prev.map((s, idx) =>
-        idx === i
-          ? { ...s, kind, target: kind === 'application' ? null : 'default', label: '' }
-          : s,
-      ),
-    );
-    refreshInputs(kind);
     setSaveState('idle');
   };
 
@@ -1025,17 +1039,85 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
             </div>
           </section>
 
-          <section className="rec-card" aria-label="Audio sources">
-            <h3 className="rec-sec">Audio sources</h3>
+          <section className="rec-card" aria-label="Audio">
+            <h3 className="rec-sec">Audio</h3>
             <p className="rec-desc aud-intro">
-              Each source is captured into the recording. Add your speakers, a
-              microphone, or a specific app like Discord.
+              Everything switched on here is mixed into your recording. Microphone and Desktop audio
+              are off by default, so nothing is captured behind your back.
             </p>
 
             {audioSources.map((src, i) => {
-              // Option list for this row's kind; ensure output/input always offer
-              // "Default", and surface an unknown stored target as a leading option
-              // so a picked device that's not currently enumerable still shows.
+              const row = mixerRowKind(src);
+              const volId = `aud-vol-${src.id}`;
+              // Display name for the row's accessible labels: the built-in name, or the app's label
+              // (falling back to a generic word until one is picked).
+              const rowName =
+                row === 'app' ? src.label || 'application' : BUILTIN_ROW_META[row].name;
+
+              // Volume + On/Off cluster, identical for every row kind. The slider dims when the row is
+              // off (muted) to reinforce the toggle, but stays adjustable so you can pre-set a level.
+              const controls = (
+                <>
+                  <div className={`rec-slider aud-volume${src.muted ? ' aud-volume-off' : ''}`}>
+                    <label className="aud-srlabel" htmlFor={volId}>
+                      Volume
+                    </label>
+                    <input
+                      id={volId}
+                      className="rec-range"
+                      type="range"
+                      min={0}
+                      max={100}
+                      value={src.volume}
+                      onChange={(e) => setVolume(i, Number(e.target.value))}
+                    />
+                    <span className="rec-rangeval aud-volval">{src.volume}%</span>
+                  </div>
+                  <button
+                    type="button"
+                    className="aud-mute"
+                    data-muted={src.muted ? 'on' : 'off'}
+                    aria-pressed={!src.muted}
+                    aria-label={src.muted ? `Turn ${rowName} on` : `Turn ${rowName} off`}
+                    title={src.muted ? 'Turn on' : 'Turn off'}
+                    onClick={() => toggleMute(i)}
+                  >
+                    {src.muted ? 'Off' : 'On'}
+                  </button>
+                </>
+              );
+
+              // Built-in microphone / desktop rows: fixed name + description, no picker, no remove.
+              if (row !== 'app') {
+                const meta = BUILTIN_ROW_META[row];
+                return (
+                  <div className="rec-row aud-row" key={src.id}>
+                    <div className="rec-rowlabel aud-meta">
+                      <span
+                        className="aud-kind"
+                        data-kind={meta.dataKind}
+                        aria-hidden="true"
+                        title={meta.name}
+                      >
+                        {meta.icon}
+                      </span>
+                      <div className="aud-rowtext">
+                        <span className="rec-label">{meta.name}</span>
+                        <p className="rec-desc aud-rowdesc">{meta.desc}</p>
+                      </div>
+                    </div>
+                    <div className="rec-control aud-control">
+                      {controls}
+                      {/* Keep the right edge aligned with app rows, which have a remove button here. */}
+                      <span className="aud-remove-spacer" aria-hidden="true" />
+                    </div>
+                  </div>
+                );
+              }
+
+              // App-capture row: an app picker (the only dropdown left), volume, On/Off, and remove.
+              // Surface an unknown stored target as a leading option so a previously-picked app that
+              // isn't currently running still shows instead of silently resetting.
               const opts = inputsByKind[src.kind];
               const withDefault =
                 src.kind === 'application' || opts.some((o) => o.value === 'default')
@@ -1046,9 +1128,7 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
                 selectValue !== '' && !withDefault.some((o) => o.value === selectValue)
                   ? [{ value: selectValue, label: src.label || selectValue }, ...withDefault]
                   : withDefault;
-              const kindMeta = AUDIO_KINDS.find((k) => k.kind === src.kind);
               const targetId = `aud-target-${src.id}`;
-              const volId = `aud-vol-${src.id}`;
 
               return (
                 <div className="rec-row aud-row" key={src.id}>
@@ -1059,25 +1139,9 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
                       aria-hidden="true"
                       title={AUDIO_KIND_LABEL[src.kind]}
                     >
-                      {kindMeta?.icon ?? '♪'}
+                      {AUDIO_KIND_ICON[src.kind]}
                     </span>
                     <div className="aud-fields">
-                      <label className="rec-label aud-kind-label" htmlFor={`aud-kind-${src.id}`}>
-                        {AUDIO_KIND_LABEL[src.kind]}
-                      </label>
-                      <select
-                        id={`aud-kind-${src.id}`}
-                        className="rec-select aud-kind-select"
-                        aria-label="Source kind"
-                        value={src.kind}
-                        onChange={(e) => setKind(i, e.target.value as AudioSourceKind)}
-                      >
-                        {AUDIO_KINDS.map((k) => (
-                          <option key={k.kind} value={k.kind}>
-                            {k.label}
-                          </option>
-                        ))}
-                      </select>
                       <label className="aud-srlabel" htmlFor={targetId}>
                         {src.kind === 'application' ? 'Application' : 'Device'}
                       </label>
@@ -1102,36 +1166,11 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
                     </div>
                   </div>
                   <div className="rec-control aud-control">
-                    <div className="rec-slider aud-volume">
-                      <label className="aud-srlabel" htmlFor={volId}>
-                        Volume
-                      </label>
-                      <input
-                        id={volId}
-                        className="rec-range"
-                        type="range"
-                        min={0}
-                        max={100}
-                        value={src.volume}
-                        onChange={(e) => setVolume(i, Number(e.target.value))}
-                      />
-                      <span className="rec-rangeval aud-volval">{src.volume}%</span>
-                    </div>
-                    <button
-                      type="button"
-                      className="aud-mute"
-                      data-muted={src.muted ? 'on' : 'off'}
-                      aria-pressed={src.muted}
-                      aria-label={src.muted ? 'Unmute source' : 'Mute source'}
-                      title={src.muted ? 'Unmute' : 'Mute'}
-                      onClick={() => toggleMute(i)}
-                    >
-                      {src.muted ? 'Muted' : 'On'}
-                    </button>
+                    {controls}
                     <button
                       type="button"
                       className="aud-remove"
-                      aria-label="Remove source"
+                      aria-label={`Remove ${rowName}`}
                       title="Remove source"
                       onClick={() => removeAt(i)}
                     >
@@ -1144,20 +1183,13 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
 
             <div className="rec-row aud-addrow">
               <div className="rec-rowlabel">
-                <span className="rec-label">Add a source</span>
-                <p className="rec-desc">Capture another device or application.</p>
+                <span className="rec-label">Capture a specific app</span>
+                <p className="rec-desc">Record just one program&apos;s sound, like Discord or Spotify.</p>
               </div>
               <div className="rec-control aud-add">
-                {AUDIO_KINDS.map((k) => (
-                  <button
-                    key={k.kind}
-                    type="button"
-                    className="rec-browse aud-add-kind"
-                    onClick={() => addSource(k.kind)}
-                  >
-                    <span aria-hidden="true">{k.icon}</span> {k.label}
-                  </button>
-                ))}
+                <button type="button" className="rec-browse aud-add-kind" onClick={addApp}>
+                  <span aria-hidden="true">＋</span> Add app
+                </button>
               </div>
             </div>
           </section>

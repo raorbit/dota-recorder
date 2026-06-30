@@ -314,6 +314,20 @@ public class ObsSceneConfigurer {
             }
             log.info("Removed orphaned audio input '{}'", orphan);
         }
+
+        // Silence the audio inputs we do NOT own — OBS's built-in "Desktop Audio" and "Mic/Aux" globals
+        // (and any stale enumeration probe). They are unmuted out of the box, so without this they leak
+        // the user's whole desktop mix (incl. Discord) and microphone into every recording even when the
+        // mixer only lists the game. Muting (not removing) is reversible and survives an OBS restart;
+        // the user's own mic/desktop capture, when wanted, comes from a managed dotarec: input instead.
+        for (String foreign : foreignAudioInputs(inputs.getInputs())) {
+            SetInputMuteResponse muted = controller.setInputMute(foreign, Boolean.TRUE, REQUEST_TIMEOUT_MS);
+            if (muted == null || !muted.isSuccessful()) {
+                log.warn("Failed to mute non-managed audio input '{}'; continuing", foreign);
+                continue;
+            }
+            log.debug("Muted non-managed audio input '{}' (kept out of the recording)", foreign);
+        }
     }
 
     private void ensureProgramScene(OBSRemoteController controller) {
@@ -408,6 +422,31 @@ public class ObsSceneConfigurer {
             }
         }
         return owned;
+    }
+
+    /**
+     * Pure: the names of WASAPI <em>audio</em> inputs we do NOT own — OBS's built-in Desktop Audio /
+     * Mic-Aux globals — which {@link #reconcileAudioInputs} mutes so they never leak into a recording.
+     * An input qualifies when its kind is one of the three WASAPI capture kinds AND its name is not
+     * {@code dotarec:}-prefixed (those are our managed sources, controlled per-source). Non-audio
+     * inputs (e.g. {@code Game Capture}) are ignored. Null-safe; null name/kind entries are skipped.
+     */
+    static Set<String> foreignAudioInputs(List<Input> inputs) {
+        Set<String> foreign = new LinkedHashSet<>();
+        if (inputs == null) {
+            return foreign;
+        }
+        for (Input i : inputs) {
+            String name = i.getInputName();
+            String kind = i.getInputKind();
+            if (name == null || kind == null || name.startsWith(OWNED_PREFIX)) {
+                continue;
+            }
+            if (KIND_APPLICATION.equals(kind) || KIND_OUTPUT.equals(kind) || KIND_INPUT.equals(kind)) {
+                foreign.add(name);
+            }
+        }
+        return foreign;
     }
 
     /** Map of {@code dotarec:}-prefixed input name -> its current OBS input kind (null-safe). */
