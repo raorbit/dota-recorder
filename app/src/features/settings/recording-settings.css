@@ -595,6 +595,13 @@
   border-color: var(--loss);
 }
 
+.aud-mute:focus-visible,
+.aud-remove:focus-visible,
+.aud-add-kind:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 /* Invisible stand-in for the remove button on built-in rows, so their On/Off pill lines up
    vertically with the app rows' pills (which sit left of a 32px remove button). */
 .aud-remove-spacer {
@@ -602,15 +609,13 @@
   width: 32px;
 }
 
-/* Add-source affordance: one chip per kind */
+/* Add-source affordance: a single "Add app" button */
 .aud-addrow {
   align-items: center;
 }
 
 .aud-add {
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
   justify-content: flex-end;
 }
 

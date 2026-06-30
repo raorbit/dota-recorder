@@ -150,16 +150,14 @@ function mixerRowKind(src: AudioSource): MixerRowKind {
 // Static presentation for the two always-present built-in rows. `dataKind` drives the chip tint.
 const BUILTIN_ROW_META: Record<
   'microphone' | 'desktop',
-  { readonly icon: string; readonly name: string; readonly desc: string; readonly dataKind: AudioSourceKind }
+  { readonly name: string; readonly desc: string; readonly dataKind: AudioSourceKind }
 > = {
   microphone: {
-    icon: '🎙',
     name: 'Microphone',
     desc: 'Your voice · default device',
     dataKind: 'input',
   },
   desktop: {
-    icon: '🔊',
     name: 'Desktop audio',
     desc: 'All system sound — including Discord, browser, music',
     dataKind: 'output',
@@ -1052,7 +1050,9 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
               // Display name for the row's accessible labels: the built-in name, or the app's label
               // (falling back to a generic word until one is picked).
               const rowName =
-                row === 'app' ? src.label || 'application' : BUILTIN_ROW_META[row].name;
+                row === 'app'
+                  ? src.label || (src.kind === 'application' ? 'application' : 'device')
+                  : BUILTIN_ROW_META[row].name;
 
               // Volume + On/Off cluster, identical for every row kind. The slider dims when the row is
               // off (muted) to reinforce the toggle, but stays adjustable so you can pre-set a level.
@@ -1068,6 +1068,7 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
                       type="range"
                       min={0}
                       max={100}
+                      aria-label={`${rowName} volume`}
                       value={src.volume}
                       onChange={(e) => setVolume(i, Number(e.target.value))}
                     />
@@ -1079,7 +1080,7 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
                     data-muted={src.muted ? 'on' : 'off'}
                     aria-pressed={!src.muted}
                     aria-label={src.muted ? `Turn ${rowName} on` : `Turn ${rowName} off`}
-                    title={src.muted ? 'Turn on' : 'Turn off'}
+                    title={src.muted ? `Turn ${rowName} on` : `Turn ${rowName} off`}
                     onClick={() => toggleMute(i)}
                   >
                     {src.muted ? 'Off' : 'On'}
@@ -1099,7 +1100,7 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
                         aria-hidden="true"
                         title={meta.name}
                       >
-                        {meta.icon}
+                        {AUDIO_KIND_ICON[meta.dataKind]}
                       </span>
                       <div className="aud-rowtext">
                         <span className="rec-label">{meta.name}</span>
@@ -1163,6 +1164,11 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
                           </option>
                         ))}
                       </select>
+                      {src.target?.includes('dota2.exe') && (
+                        <p className="rec-desc aud-rowdesc">
+                          Removing this stops recording game audio.
+                        </p>
+                      )}
                     </div>
                   </div>
                   <div className="rec-control aud-control">

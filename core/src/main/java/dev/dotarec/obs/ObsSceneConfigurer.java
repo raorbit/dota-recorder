@@ -325,10 +325,11 @@ public class ObsSceneConfigurer {
 
         // Sweep leftover audio-enumeration probes. AudioController removes each probe in a finally, so
         // any still present is an orphan from a failed/raced removal; without this they pile up as
-        // permanent hidden scene items. Operates on the snapshot taken at the top of this reconcile, so
-        // a probe created by a concurrent live enumeration (not yet in that snapshot) is never touched;
-        // the connect-edge reconcile that cleans prior-session orphans runs before the settings UI is
-        // even mounted, so there is nothing live to race with there.
+        // permanent hidden scene items. Race-safe even though AudioController.enumerate is not serialized
+        // against this method (e.g. settings-PUT reconciles run while a settings picker primes audio):
+        // we only ever remove probes present in the input snapshot taken at the top of this reconcile, so
+        // a probe created by a concurrent live enumeration AFTER that snapshot is invisible here and never
+        // touched, and a removeInput on an already-removed probe is a harmless debug-logged no-op.
         for (String probe : probeInputsToRemove(inputs.getInputs())) {
             RemoveInputResponse rmProbe = controller.removeInput(probe, REQUEST_TIMEOUT_MS);
             if (rmProbe == null || !rmProbe.isSuccessful()) {
