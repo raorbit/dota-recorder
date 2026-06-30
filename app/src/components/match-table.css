@@ -129,6 +129,8 @@
   font-family: var(--font-body);
   text-align: left;
   cursor: pointer;
+  /* Shift-click multi-select must not drag-select the row's text. */
+  user-select: none;
 }
 
 /* Zebra: even rows pick up a faint alt fill, like the mockup's 3rd row. */

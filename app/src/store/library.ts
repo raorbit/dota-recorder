@@ -81,6 +81,9 @@ export interface LibraryState {
   // Star/unstar a clip (exempts it from the retention sweep), mirroring toggleStar for matches.
   readonly toggleClipStar: (id: number, starred: boolean) => Promise<void>;
   readonly deleteMatch: (id: number) => Promise<void>;
+  // Bulk-delete several matches at once (the table's multi-select). Deletes each server-side,
+  // then drops the survivors and refreshes counts in one shot.
+  readonly deleteMatches: (ids: readonly number[]) => Promise<void>;
   readonly load: () => Promise<void>;
 }
 
@@ -182,6 +185,37 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
       clips: s.clips.filter((c) => c.parentMatchId !== id),
       selectedMatchId: s.selectedMatchId === id ? null : s.selectedMatchId,
       selectedClipId: s.selectedMatchId === id ? null : s.selectedClipId,
+    }));
+    try {
+      set({ counts: await fetchBucketCounts() });
+    } catch {
+      /* leave the stale badge; the next load() reconciles */
+    }
+  },
+
+  // Bulk-delete (table multi-select). Deletes each server-side first — sequentially, bounded by the
+  // small selection size — then drops all survivors in ONE state update and refreshes counts once
+  // (rather than the per-row count fetch deleteMatch does). A single failed delete is skipped so the
+  // rest still go; the next load() reconciles any straggler.
+  deleteMatches: async (ids) => {
+    const deleted = new Set<number>();
+    for (const id of ids) {
+      try {
+        await apiDeleteMatch(id);
+        deleted.add(id);
+      } catch {
+        /* skip this one; the rest still delete and the next load() reconciles */
+      }
+    }
+    if (deleted.size === 0) return;
+    invalidatePendingLoad();
+    set((s) => ({
+      matches: s.matches.filter((m) => !deleted.has(m.id)),
+      clips: s.clips.filter((c) => !deleted.has(c.parentMatchId)),
+      selectedMatchId:
+        s.selectedMatchId !== null && deleted.has(s.selectedMatchId) ? null : s.selectedMatchId,
+      selectedClipId:
+        s.selectedMatchId !== null && deleted.has(s.selectedMatchId) ? null : s.selectedClipId,
     }));
     try {
       set({ counts: await fetchBucketCounts() });
