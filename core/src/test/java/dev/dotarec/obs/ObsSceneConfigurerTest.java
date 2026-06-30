@@ -1,14 +1,31 @@
 package dev.dotarec.obs;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import com.google.gson.JsonObject;
+import dev.dotarec.config.AppPaths;
+import dev.dotarec.config.SettingsStore;
 import dev.dotarec.config.SettingsStore.AudioSource;
+import io.obswebsocket.community.client.OBSRemoteController;
+import io.obswebsocket.community.client.message.response.inputs.GetInputListResponse;
+import io.obswebsocket.community.client.message.response.inputs.RemoveInputResponse;
+import io.obswebsocket.community.client.message.response.inputs.SetInputMuteResponse;
 import io.obswebsocket.community.client.model.Input;
 import io.obswebsocket.community.client.model.Scene;
+import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 /**
  * Unit tests for the deterministic decision logic of {@link ObsSceneConfigurer} -- the
@@ -222,5 +239,46 @@ class ObsSceneConfigurerTest {
                         input(null, "wasapi_output_capture"));
 
         assertThat(ObsSceneConfigurer.foreignAudioInputs(inputs)).isEmpty();
+    }
+
+    @Test
+    void reconcileAudioInputs_mutesForeignGlobalsAndSweepsStaleProbes(@TempDir Path dir) {
+        // Wiring check for the two reconcile side effects the pure helpers can't prove: a foreign OBS
+        // global ("Desktop Audio") is actually MUTED and a leftover enumeration probe is actually
+        // REMOVED. Empty audioSources makes the desired-source loop a no-op, isolating these two steps.
+        AppPaths paths = new AppPaths(dir.toString(), dir.resolve("obs").toString());
+        SettingsStore store = new SettingsStore(paths);
+        store.update(
+                s -> {
+                    s.audioSources = new ArrayList<>();
+                    return s;
+                });
+        ObsSceneConfigurer configurer = new ObsSceneConfigurer(store);
+
+        String staleProbe = ObsSceneConfigurer.PROBE_PREFIX + "stale";
+        GetInputListResponse listResponse = mock(GetInputListResponse.class);
+        when(listResponse.isSuccessful()).thenReturn(true);
+        when(listResponse.getInputs())
+                .thenReturn(
+                        List.of(
+                                input("Desktop Audio", "wasapi_output_capture"),
+                                input(staleProbe, "wasapi_input_capture")));
+
+        OBSRemoteController controller = mock(OBSRemoteController.class);
+        when(controller.getInputList(any(), anyLong())).thenReturn(listResponse);
+        RemoveInputResponse removeOk = mock(RemoveInputResponse.class);
+        lenient().when(removeOk.isSuccessful()).thenReturn(true);
+        when(controller.removeInput(any(), anyLong())).thenReturn(removeOk);
+        SetInputMuteResponse muteOk = mock(SetInputMuteResponse.class);
+        lenient().when(muteOk.isSuccessful()).thenReturn(true);
+        when(controller.setInputMute(any(), any(), anyLong())).thenReturn(muteOk);
+
+        configurer.reconcileAudioInputs(controller);
+
+        verify(controller).setInputMute(eq("Desktop Audio"), eq(Boolean.TRUE), anyLong());
+        verify(controller).removeInput(eq(staleProbe), anyLong());
+        // The probe is swept, never muted; the global is muted, never removed.
+        verify(controller, never()).setInputMute(eq(staleProbe), any(), anyLong());
+        verify(controller, never()).removeInput(eq("Desktop Audio"), anyLong());
     }
 }
