@@ -279,8 +279,9 @@ class SettingsControllerTest {
                         null, null, null, null, null, null);
         assertThatThrownBy(() -> controller.putSettings(patch))
                 .isInstanceOf(ResponseStatusException.class);
-        // Rejected before persist: still the seeded Dota default, list not replaced.
-        assertThat(store.get().audioSources).hasSize(1);
+        // Rejected before persist: still the fresh-install seed (Dota + the two built-in rows), not
+        // replaced by the invalid list.
+        assertThat(store.get().audioSources).hasSize(3);
     }
 
     @Test
@@ -292,20 +293,34 @@ class SettingsControllerTest {
                         null, null, null, null, null, null);
         assertThatThrownBy(() -> controller.putSettings(patch))
                 .isInstanceOf(ResponseStatusException.class);
-        assertThat(store.get().audioSources).hasSize(1);
+        assertThat(store.get().audioSources).hasSize(3);
     }
 
     @Test
     void getSettings_audioSourcesAlwaysNonEmptyOnFreshInstall() {
-        // The fresh-install seed: exactly one Dota application-capture source so a fresh install
-        // records the game's audio out of the box.
+        // The fresh-install seed: a Dota application capture (on) so the game's audio records out of
+        // the box, plus the two always-present built-in mixer rows (microphone + desktop audio), both
+        // off so neither the mic nor the desktop mix leaks into a recording uninvited.
         SettingsView view = controller.getSettings();
-        assertThat(view.audioSources()).hasSize(1);
-        AudioSource seed = view.audioSources().get(0);
-        assertThat(seed.kind()).isEqualTo("application");
-        assertThat(seed.target()).isEqualTo("::dota2.exe");
-        assertThat(seed.volume()).isEqualTo(100);
-        assertThat(seed.muted()).isFalse();
+        assertThat(view.audioSources()).hasSize(3);
+
+        AudioSource game =
+                view.audioSources().stream()
+                        .filter(s -> "application".equals(s.kind()))
+                        .findFirst()
+                        .orElseThrow();
+        assertThat(game.target()).isEqualTo("::dota2.exe");
+        assertThat(game.volume()).isEqualTo(100);
+        assertThat(game.muted()).isFalse();
+
+        assertThat(view.audioSources())
+                .filteredOn(s -> SettingsStore.BUILTIN_MICROPHONE_ID.equals(s.id()))
+                .singleElement()
+                .satisfies(s -> assertThat(s.muted()).isTrue());
+        assertThat(view.audioSources())
+                .filteredOn(s -> SettingsStore.BUILTIN_DESKTOP_ID.equals(s.id()))
+                .singleElement()
+                .satisfies(s -> assertThat(s.muted()).isTrue());
     }
 
     @Test

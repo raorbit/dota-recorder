@@ -495,21 +495,16 @@
   border-color: rgba(217, 164, 65, 0.4);
 }
 
-.aud-kind-label {
-  /* The visible kind name lives in the select; keep a screen-reader-only label. */
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  margin: -1px;
-  padding: 0;
-  overflow: hidden;
-  clip: rect(0 0 0 0);
-  white-space: nowrap;
-  border: 0;
+/* Built-in row (microphone / desktop audio): fixed name + description, no picker */
+.aud-rowtext {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
 }
 
-.aud-kind-select {
-  min-width: 150px;
+.aud-rowdesc {
+  margin: 2px 0 0;
+  max-width: none;
 }
 
 .aud-target {
@@ -538,6 +533,12 @@
   min-width: 200px;
 }
 
+/* Dim the volume cluster when the row is off (muted) to reinforce the toggle. Still interactive
+   so a level can be pre-set before turning the source on. */
+.aud-volume-off {
+  opacity: 0.5;
+}
+
 .aud-volval {
   min-width: 44px;
 }
@@ -555,15 +556,18 @@
   cursor: pointer;
 }
 
+/* Off (muted): a calm neutral pill — off is a normal state, not an error, so it is NOT red. */
 .aud-mute[data-muted='on'] {
-  color: var(--loss);
-  border-color: var(--loss);
-  background: rgba(224, 122, 111, 0.12);
+  color: var(--text-muted);
+  border-color: var(--border-strong);
+  background: var(--surface-header);
 }
 
+/* On (unmuted): the source is being recorded — green. */
 .aud-mute[data-muted='off'] {
   color: var(--win);
   border-color: rgba(126, 196, 143, 0.4);
+  background: rgba(91, 191, 106, 0.1);
 }
 
 .aud-mute:hover {
@@ -589,6 +593,13 @@
 .aud-remove:hover {
   color: var(--loss);
   border-color: var(--loss);
+}
+
+/* Invisible stand-in for the remove button on built-in rows, so their On/Off pill lines up
+   vertically with the app rows' pills (which sit left of a 32px remove button). */
+.aud-remove-spacer {
+  flex: 0 0 auto;
+  width: 32px;
 }
 
 /* Add-source affordance: one chip per kind */

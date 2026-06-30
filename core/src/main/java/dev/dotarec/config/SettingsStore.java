@@ -95,17 +95,24 @@ public class SettingsStore {
          */
         public String gsiAuthToken = "";
         /**
-         * User-managed audio source list captured into every recording. Each source is one OBS WASAPI
-         * input (application/output/input) with a 0–100 volume and a mute toggle. Seeded on
-         * {@link #load} with a single Dota application-capture source so a fresh install records the
-         * game's audio (and nothing else) out of the box; the user adds more sources (e.g. Discord, a
-         * mic) in the UI. The OBS scene configurer reconciles this list into {@code dotarec:<id>}-named
-         * inputs.
+         * Audio source list captured into every recording, presented to the user as a single mixer.
+         * Each source is one OBS WASAPI input (application/output/input) with a 0–100 volume and a mute
+         * toggle (mute = the mixer's "Off"). The OBS scene configurer reconciles this list into
+         * {@code dotarec:<id>}-named inputs.
          *
-         * <p>Defaults to {@code null} (NOT an empty list) on purpose: load() seeds the Dota default
-         * ONLY when the field is null (a fresh install or a legacy settings.json predating the field),
-         * so an explicit empty list the user saved by clearing every source is durable and is NOT
-         * re-seeded on the next launch.
+         * <p>Two rows are <em>built-in</em> and identified by the reserved ids {@link #BUILTIN_MICROPHONE_ID}
+         * and {@link #BUILTIN_DESKTOP_ID}: a microphone capture and a desktop-audio capture. They are
+         * always present (so nothing is ever captured invisibly) and default to <b>muted/off</b> — the
+         * reason a fresh recording no longer leaks the user's mic or their whole desktop mix (e.g.
+         * friends on Discord). The configurer additionally mutes OBS's own built-in Desktop Audio /
+         * Mic-Aux globals so only this list controls what is recorded.
+         *
+         * <p>Defaults to {@code null} (NOT an empty list) on purpose: load() seeds the Dota
+         * application-capture default ONLY when the field is null (a fresh install or a legacy
+         * settings.json predating the field), so an explicit empty list the user saved by clearing every
+         * source is durable and is NOT re-seeded. The two built-in rows are the exception — {@link #load}
+         * backfills them whenever they are missing (including for an existing install migrating onto the
+         * mixer), since they must always exist; they come back muted, so re-adding them records nothing.
          */
         public List<AudioSource> audioSources;
         /**
@@ -170,6 +177,15 @@ public class SettingsStore {
      */
     public record StorageLocation(String id, String path, int capGb) {}
 
+    /**
+     * Reserved {@link AudioSource#id() id} of the always-present microphone mixer row. Stable (not a
+     * UUID) so {@link #load} can recognise and backfill exactly one of it, and the renderer can render
+     * it as a fixed, non-removable row. Becomes the OBS input name {@code dotarec:builtin-microphone}.
+     */
+    public static final String BUILTIN_MICROPHONE_ID = "builtin-microphone";
+    /** Reserved id of the always-present desktop-audio mixer row (OBS input {@code dotarec:builtin-desktop}). */
+    public static final String BUILTIN_DESKTOP_ID = "builtin-desktop";
+
     private static final Logger log = LoggerFactory.getLogger(SettingsStore.class);
 
     private static final String FILE_NAME = "settings.json";
@@ -231,11 +247,12 @@ public class SettingsStore {
         if (loaded.clipPaddingSeconds <= 0) {
             loaded.clipPaddingSeconds = 8;
         }
-        // Seed one Dota application-capture source ONLY on a genuinely fresh field (null = fresh
+        // Seed the Dota application-capture source ONLY on a genuinely fresh field (null = fresh
         // install or a legacy settings.json predating audioSources) so the game's audio records out of
-        // the box. An explicit empty list (the user cleared every source) is left empty and durable.
-        // The window match "::dota2.exe" is the encoded "title:class:exe" string the scene configurer
-        // pairs with priority=2 (match by executable), so it binds whenever dota2.exe is running.
+        // the box. An explicit empty list (the user cleared every source) is left empty and durable — we
+        // do NOT resurrect the removed app capture. The window match "::dota2.exe" is the encoded
+        // "title:class:exe" string the scene configurer pairs with priority=2 (match by executable), so
+        // it binds whenever dota2.exe is running.
         if (loaded.audioSources == null) {
             loaded.audioSources =
                     new ArrayList<>(
@@ -248,12 +265,36 @@ public class SettingsStore {
                                             100,
                                             false)));
         }
+        // Guarantee the two built-in mixer rows (microphone, desktop audio) exist regardless of list
+        // state, appending each muted/off when absent. Runs for a fresh seed (adds both), an existing
+        // install migrating onto the mixer (its [Dota] list gains them), and an explicitly-cleared empty
+        // list. They come back OFF, so this captures nothing — it only ensures the user can always SEE
+        // and toggle their mic / desktop audio instead of OBS capturing them invisibly.
+        ensureBuiltinAudioRow(loaded.audioSources, BUILTIN_MICROPHONE_ID, "input", "Microphone");
+        ensureBuiltinAudioRow(loaded.audioSources, BUILTIN_DESKTOP_ID, "output", "Desktop audio");
         // Backfill an empty archive list on a fresh/legacy field. Empty = single-drive behavior, so a
         // settings.json predating storageLocations keeps recording exactly as before.
         if (loaded.storageLocations == null) {
             loaded.storageLocations = new ArrayList<>();
         }
         return loaded;
+    }
+
+    /**
+     * Appends a muted/off built-in mixer row with the reserved {@code id} when no element already
+     * carries that id. Idempotent: a second call (or a list that already has the row) is a no-op, so a
+     * row the user toggled on/changed the volume of is never reset. Target is the literal {@code
+     * "default"} device (output/input coerce blank to default anyway), and the row is created muted so a
+     * backfill never starts capturing audio on its own.
+     */
+    private static void ensureBuiltinAudioRow(
+            List<AudioSource> sources, String id, String kind, String label) {
+        for (AudioSource s : sources) {
+            if (s != null && id.equals(s.id())) {
+                return;
+            }
+        }
+        sources.add(new AudioSource(id, kind, "default", label, 100, true));
     }
 
     /** Reads and parses a settings file, or {@code null} when it is absent, unreadable, or corrupt. */

@@ -130,6 +130,13 @@ export interface AudioSource {
   readonly muted: boolean;
 }
 
+// Reserved AudioSource.id values for the two always-present mixer rows (microphone +
+// desktop audio). The core seeds/backfills these exact ids (see SettingsStore
+// BUILTIN_MICROPHONE_ID / BUILTIN_DESKTOP_ID) and the renderer renders a source with
+// one of these ids as a fixed, non-removable row. Keep the strings in sync with the core.
+export const BUILTIN_MICROPHONE_ID = 'builtin-microphone';
+export const BUILTIN_DESKTOP_ID = 'builtin-desktop';
+
 // User-editable configuration mirrored from the core's config/SettingsStore.
 // The OBS connection is app-managed and no longer part of this surface; only the
 // recording knobs are exposed. Writes go through PUT /settings as a partial patch

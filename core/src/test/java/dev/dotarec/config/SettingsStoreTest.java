@@ -114,16 +114,78 @@ class SettingsStoreTest {
     }
 
     @Test
-    void freshStore_seedsExactlyOneDotaApplicationAudioSource(@TempDir Path dir) {
+    void freshStore_seedsDotaOnPlusTwoBuiltinRowsOff(@TempDir Path dir) {
         SettingsStore store = new SettingsStore(paths(dir));
 
-        assertThat(store.get().audioSources).hasSize(1);
-        AudioSource seed = store.get().audioSources.get(0);
-        assertThat(seed.kind()).isEqualTo("application");
-        assertThat(seed.target()).isEqualTo("::dota2.exe");
-        assertThat(seed.volume()).isEqualTo(100);
-        assertThat(seed.muted()).isFalse();
-        assertThat(seed.id()).isNotBlank();
+        // Fresh install = the Dota game capture (on) + the two always-present built-in rows (off).
+        assertThat(store.get().audioSources).hasSize(3);
+
+        AudioSource game = store.get().audioSources.get(0);
+        assertThat(game.kind()).isEqualTo("application");
+        assertThat(game.target()).isEqualTo("::dota2.exe");
+        assertThat(game.volume()).isEqualTo(100);
+        assertThat(game.muted()).isFalse();
+        assertThat(game.id()).isNotBlank();
+
+        AudioSource mic = byId(store, SettingsStore.BUILTIN_MICROPHONE_ID);
+        assertThat(mic.kind()).isEqualTo("input");
+        assertThat(mic.muted()).isTrue(); // off by default — no surprise mic capture
+
+        AudioSource desktop = byId(store, SettingsStore.BUILTIN_DESKTOP_ID);
+        assertThat(desktop.kind()).isEqualTo("output");
+        assertThat(desktop.muted()).isTrue(); // off by default — no surprise desktop/Discord capture
+    }
+
+    @Test
+    void load_backfillsBuiltinRowsForAnExistingList_preservingTheUsersApps(@TempDir Path dir)
+            throws Exception {
+        // An existing install (predating the mixer) has only its Dota app source. load() must migrate
+        // it onto the mixer by appending the two off built-in rows WITHOUT touching the app source.
+        Files.createDirectories(dir);
+        Files.writeString(
+                dir.resolve("settings.json"),
+                "{\"audioSources\":[{\"id\":\"dota-1\",\"kind\":\"application\","
+                        + "\"target\":\"::dota2.exe\",\"label\":\"Dota 2\",\"volume\":100,\"muted\":false}]}");
+
+        SettingsStore store = new SettingsStore(paths(dir));
+
+        assertThat(store.get().audioSources).hasSize(3);
+        assertThat(byId(store, "dota-1").target()).isEqualTo("::dota2.exe");
+        assertThat(byId(store, SettingsStore.BUILTIN_MICROPHONE_ID).muted()).isTrue();
+        assertThat(byId(store, SettingsStore.BUILTIN_DESKTOP_ID).muted()).isTrue();
+    }
+
+    @Test
+    void load_doesNotDuplicateOrResetAnAlreadyPresentBuiltinRow(@TempDir Path dir) throws Exception {
+        // A user who turned their microphone ON (muted=false, custom volume) must keep that state: the
+        // backfill is keyed by reserved id, so it neither duplicates the row nor resets its toggle.
+        Files.createDirectories(dir);
+        Files.writeString(
+                dir.resolve("settings.json"),
+                "{\"audioSources\":[{\"id\":\"" + SettingsStore.BUILTIN_MICROPHONE_ID + "\","
+                        + "\"kind\":\"input\",\"target\":\"default\",\"label\":\"Microphone\","
+                        + "\"volume\":60,\"muted\":false}]}");
+
+        SettingsStore store = new SettingsStore(paths(dir));
+
+        long mics =
+                store.get().audioSources.stream()
+                        .filter(s -> SettingsStore.BUILTIN_MICROPHONE_ID.equals(s.id()))
+                        .count();
+        assertThat(mics).isEqualTo(1); // not duplicated
+        AudioSource mic = byId(store, SettingsStore.BUILTIN_MICROPHONE_ID);
+        assertThat(mic.muted()).isFalse(); // the user's "on" survived
+        assertThat(mic.volume()).isEqualTo(60); // and their volume
+        // Desktop was absent, so it is still backfilled (off).
+        assertThat(byId(store, SettingsStore.BUILTIN_DESKTOP_ID).muted()).isTrue();
+    }
+
+    /** The one audio source with the given id (fails the test if absent). */
+    private static AudioSource byId(SettingsStore store, String id) {
+        return store.get().audioSources.stream()
+                .filter(s -> id.equals(s.id()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("no audio source with id " + id));
     }
 
     @Test
@@ -196,21 +258,25 @@ class SettingsStoreTest {
                     return s;
                 });
 
+        // In memory the list is exactly what the user set (load()'s backfill doesn't run on update()).
         assertThat(store.get().audioSources).hasSize(1);
         assertThat(store.get().audioSources.get(0).id()).isEqualTo("a");
         assertThat(store.get().audioSources.get(0).muted()).isTrue();
 
-        // And it round-trips through settings.json.
+        // And the user's source round-trips through settings.json; the reload also backfills the two
+        // built-in mic/desktop rows alongside it (they must always exist).
         SettingsStore reloaded = new SettingsStore(paths(dir));
-        assertThat(reloaded.get().audioSources).hasSize(1);
-        assertThat(reloaded.get().audioSources.get(0).target()).isEqualTo("mic");
+        assertThat(reloaded.get().audioSources).hasSize(3);
+        assertThat(byId(reloaded, "a").target()).isEqualTo("mic");
+        assertThat(byId(reloaded, SettingsStore.BUILTIN_MICROPHONE_ID)).isNotNull();
+        assertThat(byId(reloaded, SettingsStore.BUILTIN_DESKTOP_ID)).isNotNull();
     }
 
     @Test
-    void clearedAudioSources_areDurable_notReseededOnReload(@TempDir Path dir) {
+    void clearedAppSources_stayCleared_butBuiltinRowsAreGuaranteed(@TempDir Path dir) {
         SettingsStore store = new SettingsStore(paths(dir));
-        // Fresh install seeds the Dota default.
-        assertThat(store.get().audioSources).hasSize(1);
+        // Fresh install: Dota app capture + the two built-in rows.
+        assertThat(store.get().audioSources).hasSize(3);
 
         // The user clears every audio source (an explicit empty list, not a missing field).
         store.update(
@@ -218,10 +284,18 @@ class SettingsStoreTest {
                     s.audioSources = new java.util.ArrayList<>();
                     return s;
                 });
-        assertThat(store.get().audioSources).isEmpty();
 
-        // A reload must NOT resurrect the Dota default — only a null (fresh/legacy) field re-seeds.
+        // A reload must NOT resurrect the Dota app capture (an explicit-empty list is durable for app
+        // sources) — but the two built-in mic/desktop rows ARE re-added (off), since they must always
+        // exist so the user can see and control them.
         SettingsStore reloaded = new SettingsStore(paths(dir));
-        assertThat(reloaded.get().audioSources).isEmpty();
+        assertThat(reloaded.get().audioSources).hasSize(2);
+        assertThat(reloaded.get().audioSources)
+                .extracting(AudioSource::id)
+                .containsExactlyInAnyOrder(
+                        SettingsStore.BUILTIN_MICROPHONE_ID, SettingsStore.BUILTIN_DESKTOP_ID);
+        assertThat(reloaded.get().audioSources).allMatch(AudioSource::muted);
+        // The removed Dota application capture is NOT brought back.
+        assertThat(reloaded.get().audioSources).noneMatch(s -> "application".equals(s.kind()));
     }
 }
