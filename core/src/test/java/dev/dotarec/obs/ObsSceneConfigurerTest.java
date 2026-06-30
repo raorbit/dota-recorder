@@ -183,16 +183,33 @@ class ObsSceneConfigurerTest {
     }
 
     @Test
-    void foreignAudioInputs_includesStaleEnumerationProbes() {
-        // A leftover enumeration probe (AudioController's transient helper) is non-owned and WASAPI, so
-        // it would leak the default device too if its removal failed — mute it as well.
+    void foreignAudioInputs_excludesEnumerationProbesAndOwnedInputs() {
+        // A leftover enumeration probe is handled by removal (probeInputsToRemove), not muting, so the
+        // mute set excludes it as well as our own dotarec: inputs — leaving nothing here to mute.
         List<Input> inputs =
                 List.of(
-                        input("__dotarec_probe_audio_xyz", "wasapi_input_capture"),
+                        input(ObsSceneConfigurer.PROBE_PREFIX + "xyz", "wasapi_input_capture"),
                         input("dotarec:abc", "wasapi_process_output_capture"));
 
-        assertThat(ObsSceneConfigurer.foreignAudioInputs(inputs))
-                .containsExactly("__dotarec_probe_audio_xyz");
+        assertThat(ObsSceneConfigurer.foreignAudioInputs(inputs)).isEmpty();
+    }
+
+    @Test
+    void probeInputsToRemove_picksOnlyProbePrefixedInputs() {
+        // Only the transient enumeration probes are swept; the globals (muted instead) and our own
+        // managed inputs and Game Capture stay.
+        List<Input> inputs =
+                List.of(
+                        input(ObsSceneConfigurer.PROBE_PREFIX + "1", "wasapi_input_capture"),
+                        input(ObsSceneConfigurer.PROBE_PREFIX + "2", "wasapi_output_capture"),
+                        input("Desktop Audio", "wasapi_output_capture"),
+                        input("dotarec:abc", "wasapi_process_output_capture"),
+                        input(ObsSceneConfigurer.GAME_CAPTURE_INPUT, "game_capture"),
+                        input(null));
+
+        assertThat(ObsSceneConfigurer.probeInputsToRemove(inputs))
+                .containsExactly(
+                        ObsSceneConfigurer.PROBE_PREFIX + "1", ObsSceneConfigurer.PROBE_PREFIX + "2");
     }
 
     @Test

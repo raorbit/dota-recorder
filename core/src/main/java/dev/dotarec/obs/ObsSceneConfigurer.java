@@ -82,6 +82,14 @@ public class ObsSceneConfigurer {
     /** App-owned prefix for every input we create, so reconcile can diff/clean only our inputs. */
     static final String OWNED_PREFIX = "dotarec:";
 
+    /**
+     * Name prefix of the transient hidden inputs {@code AudioController} creates to enumerate a
+     * device/window property and then removes. Public so {@code AudioController} mints its probe names
+     * from this single source of truth and {@link #probeInputsToRemove} recognises any that a failed
+     * removal left behind. A probe should never outlive its one enumerate() call.
+     */
+    public static final String PROBE_PREFIX = "__dotarec_probe_audio_";
+
     private static final long REQUEST_TIMEOUT_MS = 5_000L;
 
     private final SettingsStore settings;
@@ -315,11 +323,26 @@ public class ObsSceneConfigurer {
             log.info("Removed orphaned audio input '{}'", orphan);
         }
 
-        // Silence the audio inputs we do NOT own — OBS's built-in "Desktop Audio" and "Mic/Aux" globals
-        // (and any stale enumeration probe). They are unmuted out of the box, so without this they leak
-        // the user's whole desktop mix (incl. Discord) and microphone into every recording even when the
-        // mixer only lists the game. Muting (not removing) is reversible and survives an OBS restart;
-        // the user's own mic/desktop capture, when wanted, comes from a managed dotarec: input instead.
+        // Sweep leftover audio-enumeration probes. AudioController removes each probe in a finally, so
+        // any still present is an orphan from a failed/raced removal; without this they pile up as
+        // permanent hidden scene items. Operates on the snapshot taken at the top of this reconcile, so
+        // a probe created by a concurrent live enumeration (not yet in that snapshot) is never touched;
+        // the connect-edge reconcile that cleans prior-session orphans runs before the settings UI is
+        // even mounted, so there is nothing live to race with there.
+        for (String probe : probeInputsToRemove(inputs.getInputs())) {
+            RemoveInputResponse rmProbe = controller.removeInput(probe, REQUEST_TIMEOUT_MS);
+            if (rmProbe == null || !rmProbe.isSuccessful()) {
+                log.debug("Failed to remove orphaned enumeration probe '{}'; continuing", probe);
+                continue;
+            }
+            log.debug("Removed orphaned enumeration probe '{}'", probe);
+        }
+
+        // Silence the audio inputs we do NOT own — OBS's built-in "Desktop Audio" and "Mic/Aux" globals.
+        // They are unmuted out of the box, so without this they leak the user's whole desktop mix (incl.
+        // Discord) and microphone into every recording even when the mixer only lists the game. Muting
+        // (not removing) is reversible and survives an OBS restart; the user's own mic/desktop capture,
+        // when wanted, comes from a managed dotarec: input instead.
         for (String foreign : foreignAudioInputs(inputs.getInputs())) {
             SetInputMuteResponse muted = controller.setInputMute(foreign, Boolean.TRUE, REQUEST_TIMEOUT_MS);
             if (muted == null || !muted.isSuccessful()) {
@@ -427,8 +450,9 @@ public class ObsSceneConfigurer {
     /**
      * Pure: the names of WASAPI <em>audio</em> inputs we do NOT own — OBS's built-in Desktop Audio /
      * Mic-Aux globals — which {@link #reconcileAudioInputs} mutes so they never leak into a recording.
-     * An input qualifies when its kind is one of the three WASAPI capture kinds AND its name is not
-     * {@code dotarec:}-prefixed (those are our managed sources, controlled per-source). Non-audio
+     * An input qualifies when its kind is one of the three WASAPI capture kinds AND its name is neither
+     * {@code dotarec:}-prefixed (our managed sources, controlled per-source) nor a {@link #PROBE_PREFIX}
+     * enumeration probe (those are removed, not muted, by {@link #probeInputsToRemove}). Non-audio
      * inputs (e.g. {@code Game Capture}) are ignored. Null-safe; null name/kind entries are skipped.
      */
     static Set<String> foreignAudioInputs(List<Input> inputs) {
@@ -439,7 +463,8 @@ public class ObsSceneConfigurer {
         for (Input i : inputs) {
             String name = i.getInputName();
             String kind = i.getInputKind();
-            if (name == null || kind == null || name.startsWith(OWNED_PREFIX)) {
+            if (name == null || kind == null || name.startsWith(OWNED_PREFIX)
+                    || name.startsWith(PROBE_PREFIX)) {
                 continue;
             }
             if (KIND_APPLICATION.equals(kind) || KIND_OUTPUT.equals(kind) || KIND_INPUT.equals(kind)) {
@@ -447,6 +472,27 @@ public class ObsSceneConfigurer {
             }
         }
         return foreign;
+    }
+
+    /**
+     * Pure: the names of leftover audio-enumeration probe inputs ({@link #PROBE_PREFIX}-prefixed).
+     * {@code AudioController} creates one of these hidden inputs to enumerate a property and removes it
+     * in a {@code finally}; a probe outlives that single call only when its removal failed or raced, so
+     * any probe still present is an orphan. {@link #reconcileAudioInputs} removes them so they don't
+     * accumulate as permanent hidden scene items. Null-safe; null names are skipped.
+     */
+    static Set<String> probeInputsToRemove(List<Input> inputs) {
+        Set<String> probes = new LinkedHashSet<>();
+        if (inputs == null) {
+            return probes;
+        }
+        for (Input i : inputs) {
+            String name = i.getInputName();
+            if (name != null && name.startsWith(PROBE_PREFIX)) {
+                probes.add(name);
+            }
+        }
+        return probes;
     }
 
     /** Map of {@code dotarec:}-prefixed input name -> its current OBS input kind (null-safe). */
