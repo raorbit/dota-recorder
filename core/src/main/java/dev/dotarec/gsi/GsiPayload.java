@@ -36,13 +36,20 @@ public class GsiPayload {
         return auth != null ? auth.token : null;
     }
 
-    /** The player's 32-bit Dota account id, or null when absent/blank/unparseable. */
+    /**
+     * The player's 32-bit Dota account id, or null when absent/blank/unparseable/out-of-range.
+     *
+     * <p>Dota reports {@code "0"} in Hero Demo / bot games; that (and any negative or >2^32-1 value)
+     * is not a real account id, so it maps to null rather than being latched by auto-capture. The
+     * valid range (1..2^32-1) mirrors {@code SettingsController}'s user-supplied accountId check.
+     */
     public Long parseAccountId() {
         if (player == null || player.accountid == null || player.accountid.isBlank()) {
             return null;
         }
         try {
-            return Long.parseLong(player.accountid.trim());
+            long v = Long.parseLong(player.accountid.trim());
+            return (v > 0 && v <= 0xFFFFFFFFL) ? v : null;
         } catch (NumberFormatException e) {
             return null;
         }
