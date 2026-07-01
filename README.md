@@ -12,15 +12,30 @@ point it at your Dota install once and it records in the background.
 
 ## Status
 
-v0.1.1 — first tagged release. The full feature surface is built, the core
+v0.1.5. The full feature surface is built, the core
 **detect → record → tag → store → seek** loop is validated end-to-end against a real Dota
-match, and the packaged Windows installer is confirmed installing and running.
+match, and the packaged Windows installer is confirmed installing and running. Releases
+since v0.1.1 have added a manual stop-recording control, multi-select bulk actions and
+keyboard seek in the browse UI, and a reworked audio mixer.
 
 - [x] Application framework chosen / scaffolded
 - [x] Core implemented (recording brain, GSI, OBS control, storage, browse UI)
 - [x] Live record → tag → seek proven end-to-end
 - [x] Packaged installer end-to-end + tagged release
-- [ ] Real-Dota *bot-match* capture validated at the keyboard (only a demo match proven so far)
+- [x] Real-Dota match capture validated at the keyboard
+
+## Features
+
+- **Automatic recording** — detects match start from GSI and records in the background; no
+  manual OBS wrangling. A stop button in the status card force-finalizes the current recording.
+- **Death/kill markers** — diffs your own kills and deaths into timeline markers, anchored to
+  wall-clock so a click seeks the video to the right frame.
+- **Browse & review** — filter your match library, multi-select with shift/ctrl-click for bulk
+  actions (star, delete), and seek ±10s with the arrow keys in the player.
+- **Audio mixer** — a single mixer with game, mic, and desktop sources; mic and desktop default
+  off so Discord/system audio don't leak into VODs.
+- **Retention** — a disk-cap sweeper reclaims space by deleting old VODs while keeping each
+  match's metadata and markers.
 
 ## Install
 
