@@ -232,6 +232,27 @@ class EventTaggerTest {
                 .hasSize(1);
     }
 
+    @Test
+    void fallingEdgeBeforeAnyPlayerPresentFrame_tagsNothing_andDoesNotCorruptTheBaseline() {
+        // A hero alive->dead edge can land before ANY player-present frame has seeded the deaths baseline
+        // (emittedDeaths still UNSEEN). The edge path's deathsSeeded() guard must skip it -- without the
+        // guard the edge would emit a phantom death AND seed the high-water mark at 0, so the first real
+        // player-present frame (deaths=3) would then burst three more phantom deaths via the counter path.
+        // A player-block-less frame keeps the hero defaults (heroPresent=true, alive=true), so the pair
+        // below forms a real-looking falling edge while the baseline is still unseeded.
+        GsiFrame beforeSeed0 =
+                frame().wall(ANCHOR + 7_000L).noPlayer().alive(true).heroPresent(true).build();
+        GsiFrame beforeSeed1 =
+                frame().wall(ANCHOR + 7_100L).alive(false).heroPresent(true).playerPresent(false).build();
+        GsiFrame firstPresent =
+                frame().wall(ANCHOR + 7_200L).deaths(3).alive(true).heroPresent(true).playerPresent(true).build();
+
+        assertThat(replay(beforeSeed0, beforeSeed1, firstPresent))
+                .filteredOn(m -> m.type().equals("death"))
+                .as("an unseeded falling edge tags no death and never seeds the baseline at 0")
+                .isEmpty();
+    }
+
     // ---- Finding C: a death during a single-frame player-block dropout is not lost -------------
 
     @Test
