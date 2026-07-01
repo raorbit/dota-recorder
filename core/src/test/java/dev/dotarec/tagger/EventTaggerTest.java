@@ -202,6 +202,36 @@ class EventTaggerTest {
         assertThat(all).filteredOn(m -> m.type().equals("death")).hasSize(2);
     }
 
+    @Test
+    void twoDeathsWithTheRespawnWindowEntirelyUnobserved_emitTwoDeaths() {
+        // Regression from the review of PR #47: the WHOLE alive window between two deaths is dropped by
+        // GSI, so no respawn rising edge is ever seen. The deaths counter is still monotonic, so the
+        // second death must still be tagged -- the episode latch must NOT swallow it. (A latch that gated
+        // the counter path emitted only 1 here; the high-water-mark counter path emits both.)
+        GsiFrame f0 = frame().wall(ANCHOR + 5_000L).deaths(1).alive(true).build();
+        GsiFrame f1 = frame().wall(ANCHOR + 5_100L).deaths(2).alive(false).build(); // first death
+        GsiFrame f2 = frame().wall(ANCHOR + 5_200L).deaths(3).alive(false).build(); // second death, respawn unseen
+
+        assertThat(replay(f0, f1, f2)).filteredOn(m -> m.type().equals("death"))
+                .as("a second death is still tagged when its respawn window was never observed")
+                .hasSize(2);
+    }
+
+    @Test
+    void deathCounterCatchesUpAfterRespawnResetsTheLatch_stillOneDeath() {
+        // Regression from the review of PR #47: the falling edge tags a death while the counter lags; the
+        // hero then respawns (clearing the latch) BEFORE the counter catches up. Without a high-water mark
+        // the lagging counter increment would re-emit the same death (double count). The mark suppresses it.
+        GsiFrame f0 = frame().wall(ANCHOR + 6_000L).deaths(0).alive(true).build();
+        GsiFrame f1 = frame().wall(ANCHOR + 6_100L).deaths(0).alive(false).build(); // edge death, counter lags
+        GsiFrame f2 = frame().wall(ANCHOR + 6_200L).deaths(0).alive(true).build();  // respawn, counter still lags
+        GsiFrame f3 = frame().wall(ANCHOR + 6_300L).deaths(1).alive(true).build();  // counter catches up post-respawn
+
+        assertThat(replay(f0, f1, f2, f3)).filteredOn(m -> m.type().equals("death"))
+                .as("a counter increment landing after respawn must not re-emit the edge death")
+                .hasSize(1);
+    }
+
     // ---- Finding C: a death during a single-frame player-block dropout is not lost -------------
 
     @Test

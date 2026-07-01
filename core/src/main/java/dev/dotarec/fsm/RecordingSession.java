@@ -253,57 +253,50 @@ public class RecordingSession {
 
     /**
      * Mutable per-session state the {@code EventTagger} threads across ticks to make death detection
-     * robust to two failure modes the stateless raw prev-&gt;curr diff misses:
+     * robust to desyncs the stateless raw prev-&gt;curr diff misses (see {@code EventTagger} for the
+     * exact rules):
      *
      * <ul>
-     *   <li><b>Last-good present counters</b> ({@link #lastGoodDeaths} etc.): the K/D/A from the last
-     *       frame that actually HAD the player block. A heartbeat/reconnect zeroes the block's counters
-     *       (GsiPayload.toFrame), so diffing a returning frame against the raw absent prev would either
-     *       misread the counters or, worse, drop a death that happened on the dropout tick. Diffing
-     *       against these last-good values instead emits that death when the block returns. Seeded to
-     *       {@code -1} = "no good frame seen yet" so the first real present frame doesn't diff against a
-     *       phantom 0/0/0 (which would burst-emit the full running totals as markers).</li>
-     *   <li><b>Death-episode dedupe</b> ({@link #deathEmittedThisEpisode}): the deaths counter and the
-     *       {@code alive} true-&gt;false edge describe the SAME death but can land on ADJACENT ticks; a
-     *       naive per-tick "same-tick only" suppression then double-counts. This latch records that a
-     *       death marker was already emitted for the current dead episode and is reset the next time the
-     *       hero is observed alive/spawns, so one death yields exactly one marker regardless of which
-     *       signal (counter or edge) arrives first or how far apart.</li>
+     *   <li><b>{@link #emittedDeaths} high-water mark</b>: the number of deaths already tagged as
+     *       markers. The counter path emits only deaths beyond it, and the falling edge advances it by
+     *       one, so one death yields exactly one marker whichever signal (counter or edge) arrives first
+     *       or how far apart -- and a death revealed only after a block dropout / unobserved respawn is
+     *       still tagged once the monotonic counter passes the mark. Seeded to {@link #UNSEEN} until the
+     *       first player-present frame sets it to that frame's running death total, so a recording that
+     *       joins a match in progress does not burst-emit the pre-existing deaths.</li>
+     *   <li><b>{@link #deathEmittedThisEpisode} latch</b>: records that a death was already tagged for
+     *       the current dead episode so the falling-edge fallback fires at most once per episode; reset
+     *       the next time the hero is observed alive (a respawn rising edge). It gates ONLY the edge, not
+     *       the counter path, so a genuinely new death the counter reveals is never suppressed.</li>
      * </ul>
      */
     public static final class TaggerState {
-        /** Sentinel: no player-present frame observed yet, so the first one must not diff against 0/0/0. */
+        /** Sentinel: no player-present frame observed yet, so the first one seeds the baseline. */
         static final int UNSEEN = -1;
 
-        private int lastGoodKills = UNSEEN;
-        private int lastGoodDeaths = UNSEEN;
-        private int lastGoodAssists = UNSEEN;
+        /** High-water mark of deaths already tagged; UNSEEN until the first player-present frame. */
+        private int emittedDeaths = UNSEEN;
 
         /** True once THIS dead episode has already produced a death marker; reset on the next alive. */
         private boolean deathEmittedThisEpisode;
 
-        public int lastGoodKills() {
-            return lastGoodKills;
+        /** True once the deaths baseline has been seeded from a player-present frame. */
+        public boolean deathsSeeded() {
+            return emittedDeaths != UNSEEN;
         }
 
-        public int lastGoodDeaths() {
-            return lastGoodDeaths;
+        /** Seeds the high-water mark to the running death total of the first player-present frame. */
+        public void seedDeaths(int deaths) {
+            this.emittedDeaths = deaths;
         }
 
-        public int lastGoodAssists() {
-            return lastGoodAssists;
+        public int emittedDeaths() {
+            return emittedDeaths;
         }
 
-        /** True when no player-present frame has been observed yet (counters are still the sentinel). */
-        public boolean hasNoGoodCounters() {
-            return lastGoodKills == UNSEEN;
-        }
-
-        /** Records the K/D/A from a frame that HAD the player block as the new last-good baseline. */
-        public void updateLastGoodCounters(int kills, int deaths, int assists) {
-            this.lastGoodKills = kills;
-            this.lastGoodDeaths = deaths;
-            this.lastGoodAssists = assists;
+        /** Advances the high-water mark to {@code n} (the count of deaths tagged so far). */
+        public void setEmittedDeaths(int n) {
+            this.emittedDeaths = n;
         }
 
         public boolean deathEmittedThisEpisode() {
@@ -314,7 +307,7 @@ public class RecordingSession {
             this.deathEmittedThisEpisode = true;
         }
 
-        /** Clears the dedupe latch so a NEW dead episode can emit again (called when the hero is alive). */
+        /** Clears the dedupe latch so a NEW dead episode's falling edge can emit (hero is alive again). */
         public void resetDeathEpisode() {
             this.deathEmittedThisEpisode = false;
         }
