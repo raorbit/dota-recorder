@@ -15,6 +15,7 @@ import {
 } from '../api/client';
 import { bucketLabelOf } from '../store/buckets';
 import { heroDisplayName } from '../data/heroes';
+import { shouldShowVodOverlay } from '../lib/marker-overlay';
 import { useLibraryStore } from '../store/library';
 import './video-player.css';
 
@@ -568,6 +569,12 @@ export function VideoPlayer({
   // Place bars whenever we have a usable positive duration (media if loaded, else the DB value);
   // otherwise hide them rather than pile every marker at 0 (a misleading stack).
   const canPosition = scrubDur > 0;
+  // Markers/pauses carry PARENT-VOD offsets and are positioned against the media duration — valid
+  // only while over the full VOD. During clip playback (activeClipId set) the media timebase is
+  // clip-relative, so those offsets would mis-position (piling every marker at the right edge) and a
+  // marker-click would seek to the clip end. Gate the overlay + marker seek on being over the VOD,
+  // mirroring the canClip guard; hide the bars during clip playback rather than mispositioning them.
+  const showVodOverlay = shouldShowVodOverlay(canPosition, activeClipId);
   // Assist markers are hidden from the scrub bar: a teamfight racks up many assists, which clutter
   // the timeline and bury the kill/death moments that matter. They're still tagged + stored and
   // counted in KDA — just not drawn here.
@@ -633,8 +640,9 @@ export function VideoPlayer({
           {/* Dimmed pause spans render BEHIND the markers/playhead (lower z-index,
               pointer-events:none in CSS) so they never intercept seek clicks. Only
               when we have a positive duration AND a record-start anchor; seeded rows
-              (null anchor) render nothing rather than mis-position. */}
-          {canPosition &&
+              (null anchor) render nothing rather than mis-position. Hidden during clip
+              playback (showVodOverlay): pause offsets are in the parent-VOD timebase. */}
+          {showVodOverlay &&
             recordStartWall !== null &&
             pauses.map((p) => {
               // Convert wall-clock pause edges into video offsets relative to the
@@ -658,7 +666,7 @@ export function VideoPlayer({
                 />
               );
             })}
-          {canPosition &&
+          {showVodOverlay &&
             visibleMarkers.map((m) => {
               const offset = m.videoOffsetS;
               // Defensive: Marker.videoOffsetS is typed non-null, but skip a
