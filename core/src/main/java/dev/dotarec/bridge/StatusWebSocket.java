@@ -46,14 +46,22 @@ public class StatusWebSocket extends TextWebSocketHandler {
 
     @Override
     public void afterConnectionEstablished(WebSocketSession session) {
-        sessions.add(session);
         // Prime the new client with current status so its card isn't blank until the next change.
-        try {
-            String frame = mapper.writeValueAsString(envelope("status", statusService.snapshot()));
-            sendTo(session, frame);
-        } catch (JsonProcessingException e) {
-            // Serialization of our own snapshot should never fail; log and keep the session open.
-            log.warn("Failed to serialize initial status frame", e);
+        // Ordering: build + send the priming frame, then publish the session to the broadcast set --
+        // all under the SAME per-session monitor sendTo()/broadcast() use. The session isn't visible
+        // to a concurrent broadcast() until priming has been sent, and the shared lock serializes that
+        // broadcast's send AFTER the priming send, so a heartbeat can't overtake the initial frame and
+        // leave the client showing stale state.
+        synchronized (session) {
+            try {
+                String frame =
+                        mapper.writeValueAsString(envelope("status", statusService.snapshot()));
+                sendTo(session, frame);
+            } catch (JsonProcessingException e) {
+                // Serialization of our own snapshot should never fail; log and keep the session open.
+                log.warn("Failed to serialize initial status frame", e);
+            }
+            sessions.add(session);
         }
     }
 
