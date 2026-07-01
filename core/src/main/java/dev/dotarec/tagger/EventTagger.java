@@ -29,16 +29,19 @@ import org.springframework.stereotype.Service;
  *
  * <p>Death detection is NOT a pure per-tick prev-&gt;curr diff: it carries a small {@link TaggerState}
  * across ticks (owned by the {@code RecordingSession}, written only under the FSM's synchronized
- * {@code onFrame}) so it survives two desync modes the raw diff misses:
+ * {@code onFrame}). It keeps {@code emittedDeaths} -- a HIGH-WATER MARK of deaths already tagged,
+ * seeded to the running total on the first player-present frame -- plus a per-dead-episode dedupe
+ * latch, so it survives desync modes the raw diff misses:
  * <ul>
  *   <li><b>Counter/alive straddle (Finding B):</b> the deaths increment and the alive true-&gt;false
- *       edge can land on adjacent ticks. A per-episode dedupe latch ({@code deathEmittedThisEpisode})
- *       ensures exactly one marker per dead episode, reset on the next respawn (a dead-&gt;alive rising
- *       edge), so it works whichever signal leads.</li>
- *   <li><b>Block dropout on the death tick (Finding C):</b> if the player/hero block vanishes on the
- *       exact death tick (a heartbeat/reconnect zeroes the counters), the death is diffed against the
- *       last frame that actually HAD the player block ({@code lastGood*} counters) rather than the raw
- *       block-absent prev, so it is emitted when the block returns.</li>
+ *       edge describe one death but can land on adjacent ticks. The counter path emits deaths beyond
+ *       the high-water mark; the falling edge is a fallback gated by the latch that also advances the
+ *       high-water mark, so the counter catching up later -- even after a respawn cleared the latch --
+ *       never re-emits it. Exactly one marker per death whichever signal leads and however far apart.</li>
+ *   <li><b>Block dropout / unobserved respawn (Finding C):</b> if the player/hero block vanishes on the
+ *       death tick, or the whole respawn window between two deaths is dropped by GSI, the monotonic
+ *       counter still reveals those deaths against the high-water mark once the block returns, so none
+ *       are lost -- the counter path is deliberately NOT gated by the episode latch.</li>
  * </ul>
  *
  * <p>Each marker's {@code video_offset_s} comes from {@link VideoOffsetCalculator} anchored on the
@@ -80,66 +83,65 @@ public class EventTagger {
                         curr.monotonicNanos(), recordConfirmedNanos, durationS);
         Integer gameClock = curr.gameClock();
 
-        // Seed the last-good baseline from prev on the FIRST diff (state still empty): a single unit-test
-        // diff() call, and the FSM's first tagAndObserve, otherwise have no earlier player-present frame
-        // folded in yet. Redundant-but-harmless once the state has been primed by prior curr updates.
-        if (state.hasNoGoodCounters() && prev.playerPresent()) {
-            state.updateLastGoodCounters(prev.kills(), prev.deaths(), prev.assists());
+        // Seed the deaths high-water mark from the first player-present frame's running total, so joining
+        // a match already in progress (or a recording that arms mid-life) never burst-emits the
+        // pre-existing death count as markers. Seeded from prev so the very first prev->curr delta (a
+        // single-pair diff, or the FSM's first tag) is still captured.
+        if (!state.deathsSeeded() && prev.playerPresent()) {
+            state.seedDeaths(prev.deaths());
         }
 
-        // Respawn resets the dead-episode dedupe latch so the NEXT death can emit again. A rising edge
-        // (dead / hero-absent prev -> alive+hero-present curr) marks the end of the current dead episode.
-        // Reset on the RISING edge only (not on every alive frame) so the counter-leads-edge case -- where
-        // the deaths counter increments while alive is still true, the flip coming a tick later -- does not
-        // clear the latch between the two signals and double-count.
+        // Respawn resets the dead-episode dedupe latch so the NEXT death's falling edge can emit again. A
+        // rising edge (dead / hero-absent prev -> alive+hero-present curr) marks the end of the current
+        // dead episode. Reset on the RISING edge only (not on every alive frame) so the counter-leads-edge
+        // case -- the deaths counter increments while alive is still true, the flip coming a tick later --
+        // does not clear the latch between the two signals and double-count.
         boolean respawned =
                 curr.heroPresent() && curr.alive() && (!prev.heroPresent() || !prev.alive());
         if (respawned) {
             state.resetDeathEpisode();
         }
 
-        // Kill/assist counters: unchanged raw prev->curr diff, gated on the player block being present on
-        // BOTH frames (a dropout zeroes the counters, so a returning frame would otherwise burst-emit).
+        // Kill/assist counters: raw prev->curr diff, gated on the player block being present on BOTH frames
+        // (a dropout zeroes the counters, so a returning frame would otherwise burst-emit phantom markers).
         if (prev.playerPresent() && curr.playerPresent()) {
             emitIncrements(markers, "kill", curr.kills() - prev.kills(), offset, gameClock);
             emitIncrements(markers, "assist", curr.assists() - prev.assists(), offset, gameClock);
         }
 
-        // Death counter path (primary). Diffed against the LAST-GOOD deaths total (the last player-present
-        // frame's), not the raw prev, so a death on a single-frame block dropout is still caught when the
-        // block returns (Finding C). Gated on curr carrying the player block AND on having a good baseline
-        // (hasNoGoodCounters == a player block has never been seen yet -> diffing would burst-emit the full
-        // running total). Deduped per dead episode: if the falling edge already emitted this death on an
-        // earlier tick, the latch suppresses the counter catching up now (Finding B).
+        // Death counter path (primary, authoritative). The running deaths counter is monotonic, so emit
+        // every death it shows BEYOND emittedDeaths, the high-water mark of deaths already tagged. This is
+        // deliberately NOT gated by the episode latch: a death is still emitted when the intervening
+        // respawn window was never observed (dropped frames) or a block-dropout tick hid the death -- the
+        // counter reveals it once the player block returns (Finding C). The high-water mark also means the
+        // counter never re-emits a death the falling edge already tagged (it cannot re-cross that value).
         boolean deathCounterFired = false;
-        if (curr.playerPresent() && !state.hasNoGoodCounters()) {
-            int deathDelta = curr.deaths() - state.lastGoodDeaths();
-            if (deathDelta > 0 && !state.deathEmittedThisEpisode()) {
-                emitIncrements(markers, "death", deathDelta, offset, gameClock);
+        if (curr.playerPresent() && state.deathsSeeded()) {
+            int newDeaths = curr.deaths() - state.emittedDeaths();
+            if (newDeaths > 0) {
+                emitIncrements(markers, "death", newDeaths, offset, gameClock);
+                state.setEmittedDeaths(curr.deaths());
                 state.markDeathEmittedThisEpisode();
                 deathCounterFired = true;
             }
         }
 
-        // Falling-edge death (fallback) for when the counter lagged or didn't move. Gated on hero presence
-        // on BOTH frames so a vanished hero block (load / hero-select / reconnect) can't manufacture a
-        // phantom death. Skipped when the counter already emitted a death this tick, or when this dead
-        // episode already produced a marker (the counter emitted it on an earlier tick) -- so one death is
-        // one marker whether the counter and edge land on the same or adjacent ticks (Finding B).
+        // Falling-edge death (fallback) for when the deaths counter lags or never moves. Gated on hero
+        // presence on BOTH frames (so a vanished hero block can't manufacture a phantom death) AND on the
+        // per-episode latch (so it fires at most once per dead episode and never duplicates a death the
+        // counter already tagged). It advances the high-water mark by one, so the counter catching up later
+        // -- even after a respawn cleared the latch -- cannot re-emit the same death (Finding B, both the
+        // counter-leads and the counter-lags-past-respawn cases).
         if (!deathCounterFired
                 && !state.deathEmittedThisEpisode()
+                && state.deathsSeeded()
                 && prev.heroPresent()
                 && curr.heroPresent()
                 && prev.alive()
                 && !curr.alive()) {
             markers.add(PendingMarker.gsi("death", offset, gameClock));
+            state.setEmittedDeaths(state.emittedDeaths() + 1);
             state.markDeathEmittedThisEpisode();
-        }
-
-        // Roll the last-good counters forward to curr when it carries the player block, so the next tick
-        // diffs against the freshest present totals (and a dropout tick holds the prior good baseline).
-        if (curr.playerPresent()) {
-            state.updateLastGoodCounters(curr.kills(), curr.deaths(), curr.assists());
         }
 
         return markers;
