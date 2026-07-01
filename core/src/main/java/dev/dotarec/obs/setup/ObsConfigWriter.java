@@ -8,6 +8,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -16,6 +17,8 @@ import java.util.Base64;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -267,27 +270,68 @@ public class ObsConfigWriter {
         // path" and recording never starts (no OUTPUT_STARTED -> every match aborts). OBS itself
         // writes this key with forward slashes; match that so the path round-trips intact.
         String recPathIni = recPath.replace('\\', '/');
-        String ini =
-                loadTemplate(PROFILE_TEMPLATE)
-                        .replace("@REC_PATH@", recPathIni)
-                        .replace("@REC_ENCODER@", encoder)
-                        .replace("@BASE_CX@", Integer.toString(res[0]))
-                        .replace("@BASE_CY@", Integer.toString(res[1]))
-                        .replace("@OUT_CX@", Integer.toString(res[0]))
-                        .replace("@OUT_CY@", Integer.toString(res[1]))
-                        // FPS/quality/format are user settings (defaults backfilled in SettingsStore.load).
-                        // Guard null/blank defensively in case a legacy settings.json bypassed the backfill.
-                        .replace("@FPS@", Integer.toString(s.fps > 0 ? s.fps : 60))
-                        .replace(
-                                "@REC_QUALITY@",
-                                (s.quality == null || s.quality.isBlank()) ? "HQ" : s.quality)
-                        .replace(
-                                "@REC_FORMAT@",
-                                (s.format == null || s.format.isBlank()) ? "hybrid_mp4" : s.format);
-        Path file = layout.profileIni();
+        // Substitute every @TOKEN@ in a SINGLE regex pass so an inserted value is never re-scanned as
+        // a template token. @REC_PATH@ is user-controlled and can legitimately contain another token's
+        // literal text (e.g. D:\clips\@FPS@\dota); an ordered chain of String.replace would let that
+        // later replace corrupt the path. appendReplacement over the token regex substitutes each match
+        // exactly once from the map (quoteReplacement so a value's $/\ are not treated as $-group refs).
+        Map<String, String> tokens = new LinkedHashMap<>();
+        tokens.put("REC_PATH", recPathIni);
+        tokens.put("REC_ENCODER", encoder);
+        tokens.put("BASE_CX", Integer.toString(res[0]));
+        tokens.put("BASE_CY", Integer.toString(res[1]));
+        tokens.put("OUT_CX", Integer.toString(res[0]));
+        tokens.put("OUT_CY", Integer.toString(res[1]));
+        // FPS/quality/format are user settings (defaults backfilled in SettingsStore.load).
+        // Guard null/blank defensively in case a legacy settings.json bypassed the backfill.
+        tokens.put("FPS", Integer.toString(s.fps > 0 ? s.fps : 60));
+        tokens.put("REC_QUALITY", (s.quality == null || s.quality.isBlank()) ? "HQ" : s.quality);
+        tokens.put("REC_FORMAT", (s.format == null || s.format.isBlank()) ? "hybrid_mp4" : s.format);
+        String ini = substituteTokens(loadTemplate(PROFILE_TEMPLATE), tokens);
+        writeAtomically(layout.profileIni(), ini);
+    }
+
+    /** Matches a {@code @TOKEN@} placeholder ({@code A-Z}, {@code 0-9}, {@code _}) in the template. */
+    private static final Pattern TOKEN = Pattern.compile("@([A-Z0-9_]+)@");
+
+    /**
+     * Replaces each {@code @TOKEN@} in {@code template} with its mapped value in ONE pass over the
+     * input, so an inserted value can never be re-interpreted as a placeholder. An unknown token (not
+     * in {@code values}) is left verbatim rather than blanked.
+     */
+    private static String substituteTokens(String template, Map<String, String> values) {
+        Matcher m = TOKEN.matcher(template);
+        StringBuilder out = new StringBuilder();
+        while (m.find()) {
+            String value = values.get(m.group(1));
+            m.appendReplacement(out, value == null ? Matcher.quoteReplacement(m.group()) : Matcher.quoteReplacement(value));
+        }
+        m.appendTail(out);
+        return out.toString();
+    }
+
+    /**
+     * Writes {@code content} to {@code file} ATOMICALLY: serialize to a sibling {@code .tmp} in the
+     * same directory, then atomic-move it over the target (falling back to a plain replace where the
+     * filesystem rejects an atomic move). A failure mid-write can only leave the discardable temp or
+     * the intact previous file — never a truncated {@code basic.ini}, which OBS would reject as a bad
+     * profile so it would never emit OUTPUT_STARTED. Mirrors {@link SettingsStore#save}.
+     */
+    private static void writeAtomically(Path file, String content) {
+        Path tmp = file.resolveSibling(file.getFileName() + ".tmp");
         try {
             Files.createDirectories(file.getParent());
-            Files.writeString(file, ini, StandardCharsets.UTF_8);
+            Files.writeString(tmp, content, StandardCharsets.UTF_8);
+            try {
+                Files.move(
+                        tmp,
+                        file,
+                        StandardCopyOption.ATOMIC_MOVE,
+                        StandardCopyOption.REPLACE_EXISTING);
+            } catch (AtomicMoveNotSupportedException e) {
+                // Rare (same-dir NTFS supports atomic move); fall back to a plain replace.
+                Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING);
+            }
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to write OBS profile: " + file, e);
         }

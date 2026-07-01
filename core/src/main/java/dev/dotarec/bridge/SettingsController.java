@@ -195,12 +195,19 @@ public class SettingsController {
         }
         // Re-write basic.ini from the saved settings so the recording profile (fps/quality/format/
         // encoder/resolution) is fresh for the NEXT OBS launch instead of stale until the next reboot.
-        // Best-effort and side-effect-free (no copy/probe/websocket rewrite); the saved settings are the
-        // source of truth and boot-time configure() is authoritative, so a failure here must never 500.
+        // Unlike the audio reconcile above, this is a local disk write that must NOT be swallowed: a
+        // failure leaves an unchanged (or, absent atomicity, corrupt) profile that configure() only
+        // re-runs at boot, so OBS silently keeps recording with the old profile for the rest of the
+        // session. writeProfile is now atomic, so on-disk basic.ini is always whole (old or new); we
+        // still surface the failure (500) instead of returning 200, so a failed reconfigure is visible.
+        // The settings were persisted above, so a retry (or the next boot) still picks them up.
         try {
             obsConfigWriter.applyProfile();
         } catch (Exception e) {
-            log.debug("Profile re-write after settings PUT failed: {}", e.toString());
+            log.error("Profile re-write after settings PUT failed: {}", e.toString(), e);
+            throw new ResponseStatusException(
+                    HttpStatus.INTERNAL_SERVER_ERROR,
+                    "settings saved but the OBS recording profile could not be updated");
         }
         return SettingsView.of(store.get());
     }
