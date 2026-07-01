@@ -11,7 +11,7 @@ import * as path from 'node:path';
 import { JvmSupervisor } from './jvm-supervisor';
 import { ObsSupervisor } from './obs-supervisor';
 import { SupervisionController } from './supervision';
-import { revealablePath } from './reveal-path-guard';
+import { pathIsAccessible, revealablePath } from './reveal-path-guard';
 import {
   applyLaunchAtLogin,
   getLaunchAtLogin,
@@ -136,11 +136,15 @@ function registerPrefsIpc(): void {
   // target — but the path is renderer-supplied (ultimately a DB video_path), so revealablePath()
   // gates it (non-blank, absolute, no `..`) rather than trusting it blindly. See reveal-path-guard.ts.
   ipcMain.removeHandler('shell:revealPath');
-  ipcMain.handle('shell:revealPath', (_event, p: unknown) => {
+  ipcMain.handle('shell:revealPath', async (_event, p: unknown) => {
     const target = revealablePath(p);
+    if (target === null) return;
     // Also require the file to still exist: a retention-swept row can keep its path in the UI until
     // the next reload, and revealing a missing file just opens an empty folder — so no-op instead.
-    if (target !== null && fs.existsSync(target)) shell.showItemInFolder(target);
+    // The check is async + timeout-bounded (never a synchronous fs.existsSync on a possibly-UNC path):
+    // an offline network-share videoPath would otherwise block the main event loop for the full SMB
+    // timeout, freezing the UI, tray, and crash-supervision. See pathIsAccessible in reveal-path-guard.
+    if (await pathIsAccessible(target)) shell.showItemInFolder(target);
   });
 }
 
