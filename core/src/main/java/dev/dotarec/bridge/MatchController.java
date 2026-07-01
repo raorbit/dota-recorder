@@ -11,8 +11,10 @@ import dev.dotarec.data.MatchRepository;
 import dev.dotarec.data.MatchSummary;
 import dev.dotarec.data.PauseRepository;
 import dev.dotarec.data.PauseSpan;
+import dev.dotarec.retention.StorageMaintenanceLock;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -70,14 +72,28 @@ public class MatchController {
     private final PauseRepository pauses;
     private final ClipRepository clips;
     private final SettingsStore settings;
+    private final StorageMaintenanceLock maintenanceLock;
 
+    @Autowired
     public MatchController(MatchRepository matches, MarkerRepository markers, PauseRepository pauses,
-                           ClipRepository clips, SettingsStore settings) {
+                           ClipRepository clips, SettingsStore settings,
+                           StorageMaintenanceLock maintenanceLock) {
         this.matches = matches;
         this.markers = markers;
         this.pauses = pauses;
         this.clips = clips;
         this.settings = settings;
+        this.maintenanceLock = maintenanceLock;
+    }
+
+    /**
+     * Backward-compatible constructor for existing tests that drive the controller with no concurrent
+     * archiver/sweeper: defaults a fresh {@link StorageMaintenanceLock} (a private instance is fine
+     * when nothing else contends for it).
+     */
+    public MatchController(MatchRepository matches, MarkerRepository markers, PauseRepository pauses,
+                           ClipRepository clips, SettingsStore settings) {
+        this(matches, markers, pauses, clips, settings, new StorageMaintenanceLock());
     }
 
     @GetMapping("/matches")
@@ -157,21 +173,44 @@ public class MatchController {
      * {@code .mp4}/thumbnail on disk, then the row (its markers, pauses, and clip rows cascade via the
      * FK). 404 when the id is unknown. File unlinks are best-effort — a missing or locked file is logged
      * and never blocks the row delete (so a half-pruned recording can still be removed). No undo.
+     *
+     * <p>Serializes against the storage-maintenance passes ({@link dev.dotarec.retention.RecordingArchiver}
+     * archive + {@link dev.dotarec.retention.RetentionSweeper} sweep) via {@link StorageMaintenanceLock}:
+     * the archiver copies a VOD cross-store, repoints the row, then deletes the source, so an unguarded
+     * delete could interleave and unlink the now-moved (stale) source while dropping the repointed row —
+     * stranding the archived .mp4/thumb for {@code CrashRecoveryRunner} to re-import as a phantom match.
+     * Under the lock the row's CURRENT paths are RE-READ (by id) immediately before unlinking, so the
+     * files removed are always the row's present locations even if the archiver just repointed them.
      */
     @DeleteMapping("/matches/{id}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void delete(@PathVariable long id) {
-        MatchSummary m = matches.findById(id)
+        // Existence probe outside the lock so an unknown id is a cheap 404 without serializing on
+        // maintenance; the authoritative paths are re-read under the lock below.
+        matches.findById(id)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "No match " + id));
-        deleteFileQuietly(m.videoPath());
-        deleteFileQuietly(m.thumbPath());
-        // Clip rows cascade-delete with the match (FK ON DELETE CASCADE); their on-disk files do not,
-        // so unlink them here to avoid orphaning .mp4/thumb bytes the cascade leaves behind.
-        for (ClipRow clip : clips.findByParentMatchId(id)) {
-            deleteFileQuietly(clip.videoPath());
-            deleteFileQuietly(clip.thumbPath());
+        maintenanceLock.lock();
+        try {
+            // Re-read the CURRENT row inside the lock: the archiver may have repointed video_path/
+            // thumb_path to an archive drive since the probe above, so unlink the present locations, not
+            // the pre-move ones (which would be a no-op leaving the moved file stranded). A row deleted
+            // by a concurrent pass leaves nothing to unlink; the row delete below is then a no-op.
+            matches.findById(id).ifPresent(m -> {
+                deleteFileQuietly(m.videoPath());
+                deleteFileQuietly(m.thumbPath());
+            });
+            // Clip rows cascade-delete with the match (FK ON DELETE CASCADE); their on-disk files do
+            // not, so unlink them here to avoid orphaning .mp4/thumb bytes the cascade leaves behind.
+            // Re-read under the lock too so a clip the archiver just repointed is unlinked at its
+            // current location.
+            for (ClipRow clip : clips.findByParentMatchId(id)) {
+                deleteFileQuietly(clip.videoPath());
+                deleteFileQuietly(clip.thumbPath());
+            }
+            matches.delete(id);
+        } finally {
+            maintenanceLock.unlock();
         }
-        matches.delete(id);
     }
 
     /**

@@ -9,10 +9,14 @@ import dev.dotarec.data.ClipRepository;
 import dev.dotarec.data.MarkerRepository;
 import dev.dotarec.data.MatchRepository;
 import dev.dotarec.data.MatchRepository.NewMatch;
+import dev.dotarec.data.MatchSummary;
 import dev.dotarec.data.PauseRepository;
 import dev.dotarec.data.TestDb;
+import dev.dotarec.retention.StorageMaintenanceLock;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -31,6 +35,7 @@ class MatchControllerDeleteTest {
     private MatchRepository repo;
     private MarkerRepository markers;
     private ClipRepository clips;
+    private SettingsStore settings;
     private MatchController controller;
 
     @BeforeEach
@@ -39,7 +44,7 @@ class MatchControllerDeleteTest {
         repo = new MatchRepository(ds);
         markers = new MarkerRepository(ds);
         clips = new ClipRepository(ds);
-        SettingsStore settings = new SettingsStore(
+        settings = new SettingsStore(
                 new AppPaths(dir.resolve("data").toString(), dir.resolve("obs").toString()));
         settings.get().videoDir = dir.toString();
         controller = new MatchController(repo, markers, new PauseRepository(ds), clips, settings);
@@ -97,6 +102,83 @@ class MatchControllerDeleteTest {
         long ghostFile = insert(dir.resolve("gone.mp4").toString(), null);
         controller.delete(ghostFile);
         assertThat(repo.findById(ghostFile)).isEmpty();
+    }
+
+    @Test
+    void delete_reReadsCurrentPathsUnderLock_unlinksRepointedFile() throws Exception {
+        // Simulate the archiver relocating the VOD (repointing video_path/thumb_path to an archive
+        // drive) in the window between the delete handler's existence probe and its unlink. The delete
+        // must unlink the CURRENT (repointed) files, not the pre-move ones — otherwise the archived
+        // copy is stranded (the CrashRecoveryRunner re-import bug this fix closes).
+        Path staleVod = writeFile("stale.mp4", new byte[] {1, 2, 3});
+        Path staleThumb = writeFile("stale.jpg", new byte[] {4});
+        Path movedVod = writeFile("moved.mp4", new byte[] {5, 6, 7});
+        Path movedThumb = writeFile("moved.jpg", new byte[] {8});
+        long id = insert(staleVod.toString(), staleThumb.toString());
+
+        // A repository that repoints the row (as the archiver would) on the first findById AFTER the
+        // handler's existence probe — i.e. the re-read inside the lock sees the moved locations.
+        AtomicBoolean repointed = new AtomicBoolean(false);
+        MatchRepository repointing = new MatchRepository(ds) {
+            @Override
+            public Optional<MatchSummary> findById(long queryId) {
+                if (queryId == id && repointed.compareAndSet(false, true)) {
+                    // First probe returns the pre-move row, then flips paths to the archive drive so the
+                    // handler's re-read under the lock observes the repointed locations.
+                    updateVideoPath(id, movedVod.toString(), movedThumb.toString());
+                    return super.findById(queryId).map(m -> new MatchSummary(
+                            m.id(), m.dotaMatchId(), m.recordKind(), m.enrichmentState(), m.hero(),
+                            m.kills(), m.deaths(), m.assists(), m.gpm(), m.xpm(), m.netWorth(),
+                            m.lastHits(), m.result(), m.lobbyType(), m.gameMode(), m.rankTier(),
+                            m.mmrDelta(), m.durationS(), m.playedAt(), staleVod.toString(),
+                            staleThumb.toString(), m.fileSizeBytes(), m.starred(), m.createdAt(),
+                            m.recordStartedWallMs()));
+                }
+                return super.findById(queryId);
+            }
+        };
+        MatchController c = new MatchController(repointing, markers, new PauseRepository(ds), clips,
+                settings, new StorageMaintenanceLock());
+
+        c.delete(id);
+
+        assertThat(repo.findById(id)).isEmpty();
+        // The CURRENT (repointed) files are unlinked...
+        assertThat(Files.exists(movedVod)).isFalse();
+        assertThat(Files.exists(movedThumb)).isFalse();
+        // ...and the pre-move (stale) source is left untouched (the archiver already consumed it in a
+        // real move; here it proves the handler unlinked the re-read paths, not the probe's paths).
+        assertThat(Files.exists(staleVod)).isTrue();
+        assertThat(Files.exists(staleThumb)).isTrue();
+    }
+
+    @Test
+    void delete_releasesLock_soASubsequentPassCanAcquire() throws Exception {
+        // The handler must release the maintenance lock in a finally; a shared lock the archiver/sweeper
+        // also use would deadlock the next pass if the delete leaked a hold. Probe from ANOTHER thread
+        // so reentrancy can't mask a leaked hold (a same-thread re-acquire always succeeds).
+        StorageMaintenanceLock lock = new StorageMaintenanceLock();
+        MatchController c = new MatchController(repo, markers, new PauseRepository(ds), clips,
+                settings, lock);
+        long id = insert(dir.resolve("gone.mp4").toString(), null);
+
+        c.delete(id);
+
+        assertThat(repo.findById(id)).isEmpty();
+        // A different thread can acquire the lock only if the delete released every hold it took.
+        AtomicBoolean acquired = new AtomicBoolean(false);
+        Thread t = new Thread(() -> {
+            lock.lock();
+            try {
+                acquired.set(true);
+            } finally {
+                lock.unlock();
+            }
+        });
+        t.start();
+        t.join(2_000);
+        assertThat(t.isAlive()).as("delete must not leak a maintenance-lock hold").isFalse();
+        assertThat(acquired).isTrue();
     }
 
     @Test

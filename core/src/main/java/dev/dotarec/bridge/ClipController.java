@@ -6,8 +6,10 @@ import dev.dotarec.config.SettingsStore.StorageLocation;
 import dev.dotarec.data.ClipRepository;
 import dev.dotarec.data.ClipRow;
 import dev.dotarec.data.MatchRepository;
+import dev.dotarec.retention.StorageMaintenanceLock;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -67,13 +69,26 @@ public class ClipController {
     private final ClipService clipService;
     private final MatchRepository matches;
     private final SettingsStore settings;
+    private final StorageMaintenanceLock maintenanceLock;
 
+    @Autowired
     public ClipController(ClipRepository clips, ClipService clipService, MatchRepository matches,
-                          SettingsStore settings) {
+                          SettingsStore settings, StorageMaintenanceLock maintenanceLock) {
         this.clips = clips;
         this.clipService = clipService;
         this.matches = matches;
         this.settings = settings;
+        this.maintenanceLock = maintenanceLock;
+    }
+
+    /**
+     * Backward-compatible constructor for existing tests that drive the controller with no concurrent
+     * archiver/sweeper: defaults a fresh {@link StorageMaintenanceLock} (a private instance is fine
+     * when nothing else contends for it).
+     */
+    public ClipController(ClipRepository clips, ClipService clipService, MatchRepository matches,
+                          SettingsStore settings) {
+        this(clips, clipService, matches, settings, new StorageMaintenanceLock());
     }
 
     /** Every clip across all matches, newest first — backs the library "Clips" bucket's flat list. */
@@ -133,15 +148,37 @@ public class ClipController {
      * Permanently deletes a clip: the rendered {@code .mp4} + thumbnail on disk, then the row. 404 when
      * the id is unknown. File unlinks are best-effort — a missing or locked file is logged and never
      * blocks the row delete (so a half-rendered clip can still be removed). No undo.
+     *
+     * <p>Serializes against the storage-maintenance passes ({@link dev.dotarec.retention.RecordingArchiver}
+     * archive + {@link dev.dotarec.retention.RetentionSweeper} sweep) via {@link StorageMaintenanceLock}:
+     * the archiver treats clips as first-class movable files — it copies a clip cross-store, repoints the
+     * row via {@code clips.updateVideoPath}, then deletes the source. Unguarded, this delete could
+     * interleave and unlink the now-moved (stale) source while dropping the repointed row, stranding the
+     * archived clip for {@code CrashRecoveryRunner} to re-adopt as a spurious match. Under the lock the
+     * row's CURRENT paths are RE-READ (by id) immediately before unlinking, so the files removed are
+     * always the row's present locations even if the archiver just repointed them.
      */
     @DeleteMapping("/clips/{clipId}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void delete(@PathVariable long clipId) {
-        ClipRow c = clips.findById(clipId)
+        // Existence probe outside the lock so an unknown id is a cheap 404 without serializing on
+        // maintenance; the authoritative paths are re-read under the lock below.
+        clips.findById(clipId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "No clip " + clipId));
-        deleteFileQuietly(c.videoPath());
-        deleteFileQuietly(c.thumbPath());
-        clips.delete(clipId);
+        maintenanceLock.lock();
+        try {
+            // Re-read the CURRENT row inside the lock: the archiver may have repointed video_path/
+            // thumb_path to an archive drive since the probe above, so unlink the present locations, not
+            // the pre-move ones (which would be a no-op leaving the moved file stranded). A row deleted
+            // by a concurrent pass leaves nothing to unlink; the row delete below is then a no-op.
+            clips.findById(clipId).ifPresent(c -> {
+                deleteFileQuietly(c.videoPath());
+                deleteFileQuietly(c.thumbPath());
+            });
+            clips.delete(clipId);
+        } finally {
+            maintenanceLock.unlock();
+        }
     }
 
     /**

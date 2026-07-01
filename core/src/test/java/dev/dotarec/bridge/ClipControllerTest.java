@@ -17,8 +17,11 @@ import dev.dotarec.data.ClipRow;
 import dev.dotarec.data.MatchRepository;
 import dev.dotarec.data.MatchRepository.NewMatch;
 import dev.dotarec.data.TestDb;
+import dev.dotarec.retention.StorageMaintenanceLock;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -45,6 +48,7 @@ class ClipControllerTest {
 
     @TempDir Path dir;
 
+    private DataSource ds;
     private ClipRepository clips;
     private MatchRepository matches;
     private ClipService clipService;
@@ -55,7 +59,7 @@ class ClipControllerTest {
 
     @BeforeEach
     void setUp() throws Exception {
-        DataSource ds = TestDb.migrated(dir);
+        ds = TestDb.migrated(dir);
         clips = new ClipRepository(ds);
         matches = new MatchRepository(ds);
         clipService = mock(ClipService.class);
@@ -272,6 +276,81 @@ class ClipControllerTest {
         } finally {
             Files.deleteIfExists(outside);
         }
+    }
+
+    @Test
+    void delete_reReadsCurrentPathsUnderLock_unlinksRepointedFile() throws Exception {
+        // Simulate the archiver relocating the clip (repointing video_path/thumb_path to the archive
+        // drive via clips.updateVideoPath) in the window between the delete handler's existence probe
+        // and its unlink. The delete must unlink the CURRENT (repointed) files, not the pre-move ones —
+        // otherwise the archived copy is stranded and re-adopted as a spurious gsi_only match.
+        Path staleVod = dir.resolve("stale.mp4");
+        Path staleThumb = dir.resolve("stale.jpg");
+        Path movedVod = archiveDir.resolve("moved.mp4");
+        Path movedThumb = archiveDir.resolve("moved.jpg");
+        Files.write(staleVod, new byte[] {1, 2, 3});
+        Files.write(staleThumb, new byte[] {4});
+        Files.write(movedVod, new byte[] {5, 6, 7});
+        Files.write(movedThumb, new byte[] {8});
+        long clipId = insertClip("ready", staleVod.toString(), staleThumb.toString());
+
+        // A repository that repoints the row (as the archiver would) on the first findById AFTER the
+        // handler's existence probe — so the re-read inside the lock observes the moved locations.
+        AtomicBoolean repointed = new AtomicBoolean(false);
+        ClipRepository repointing = new ClipRepository(ds) {
+            @Override
+            public Optional<ClipRow> findById(long queryId) {
+                if (queryId == clipId && repointed.compareAndSet(false, true)) {
+                    // First probe returns the pre-move row, then flips paths to the archive drive so the
+                    // handler's re-read under the lock observes the repointed locations.
+                    Optional<ClipRow> pre = super.findById(queryId);
+                    updateVideoPath(clipId, movedVod.toString(), movedThumb.toString());
+                    return pre;
+                }
+                return super.findById(queryId);
+            }
+        };
+        ClipController c = new ClipController(repointing, clipService, matches, settings,
+                new StorageMaintenanceLock());
+
+        c.delete(clipId);
+
+        assertThat(clips.findById(clipId)).isEmpty();
+        // The CURRENT (repointed) files are unlinked...
+        assertThat(Files.exists(movedVod)).isFalse();
+        assertThat(Files.exists(movedThumb)).isFalse();
+        // ...and the pre-move (stale) source is left untouched (proving the handler unlinked the re-read
+        // paths, not the probe's paths).
+        assertThat(Files.exists(staleVod)).isTrue();
+        assertThat(Files.exists(staleThumb)).isTrue();
+    }
+
+    @Test
+    void delete_releasesLock_soASubsequentPassCanAcquire() throws Exception {
+        // The handler must release the maintenance lock in a finally; a shared lock the archiver/sweeper
+        // also use would deadlock the next pass if the delete leaked a hold. Probe from ANOTHER thread
+        // so reentrancy can't mask a leaked hold (a same-thread re-acquire always succeeds).
+        StorageMaintenanceLock lock = new StorageMaintenanceLock();
+        ClipController c = new ClipController(clips, clipService, matches, settings, lock);
+        long clipId = insertClip("ready", dir.resolve("gone.mp4").toString(), null);
+
+        c.delete(clipId);
+
+        assertThat(clips.findById(clipId)).isEmpty();
+        // A different thread can acquire the lock only if the delete released every hold it took.
+        AtomicBoolean acquired = new AtomicBoolean(false);
+        Thread t = new Thread(() -> {
+            lock.lock();
+            try {
+                acquired.set(true);
+            } finally {
+                lock.unlock();
+            }
+        });
+        t.start();
+        t.join(2_000);
+        assertThat(t.isAlive()).as("delete must not leak a maintenance-lock hold").isFalse();
+        assertThat(acquired).isTrue();
     }
 
     @Test
