@@ -3,6 +3,7 @@ package dev.dotarec.obs;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -377,9 +378,9 @@ class ObsControllerTest {
 
     @Test
     void refreshRecordingActive_resyncsHealthFromLiveObsRecordState() {
-        // A websocket blip fired onConnectionLost(), optimistically clearing health.recording -- but OBS
-        // kept recording across the drop. On reconnect, refreshRecordingActive must re-sync the flag from
-        // OBS's live GetRecordStatus so the next match's corrective StopRecord fires instead of OBS
+        // On reconnect, refreshRecordingActive must re-sync health.recording from OBS's live
+        // GetRecordStatus so the flag reflects reality (whether OBS kept recording across the blip or
+        // stopped) and the next match's corrective StopRecord fires when appropriate instead of OBS
         // rejecting StartRecord ("output already active").
         ObsHealth health = new ObsHealth();
         ObsController controller =
@@ -418,5 +419,110 @@ class ObsControllerTest {
         assertThat(health.isRecording())
                 .as("a failed status answer must leave health.recording as-is")
                 .isTrue();
+    }
+
+    @Test
+    void isReady_probesUseTheShortReadinessTimeoutNotTheFullRequestTimeout() {
+        // Finding 1: isReady() runs on the GSI thread under the MatchFsm lock. Against a
+        // connected-but-unresponsive OBS, using the 5s REQUEST_TIMEOUT_MS per chained call (scene +
+        // input list + one mute) would block 10-25s with that lock held, stalling arm/finalize and the
+        // watchdog. Prove the probes are issued with the ~1s READINESS_TIMEOUT_MS instead. Asserting the
+        // per-call timeout is the robust check (a wall-clock bound would only measure the mock and flake
+        // on a loaded CI box).
+        ObsHealth health = new ObsHealth();
+        SettingsStore settings = mock(SettingsStore.class);
+        SettingsStore.Settings s = new SettingsStore.Settings();
+        s.audioSources =
+                List.of(new AudioSource("a", "application", "::dota2.exe", "Dota", 100, false));
+        when(settings.get()).thenReturn(s);
+
+        ObsController controller =
+                new ObsController(settings, health, new ObsEvents(health), sceneConfigurer());
+        OBSRemoteController obs = mock(OBSRemoteController.class);
+        GetCurrentProgramSceneResponse scene = mock(GetCurrentProgramSceneResponse.class);
+        when(scene.isSuccessful()).thenReturn(true);
+        when(scene.getCurrentProgramSceneName()).thenReturn("Dota");
+        when(obs.getCurrentProgramScene(anyLong())).thenReturn(scene);
+        GetInputListResponse inputs = mock(GetInputListResponse.class);
+        when(inputs.isSuccessful()).thenReturn(true);
+        when(inputs.getInputs()).thenReturn(List.of());
+        when(obs.getInputList(nullable(String.class), anyLong())).thenReturn(inputs);
+        ReflectionTestUtils.setField(controller, "controller", obs);
+        health.setConnected(true);
+
+        controller.isReady();
+
+        long readinessTimeoutMs =
+                (long)
+                        ReflectionTestUtils.getField(
+                                ObsController.class, "READINESS_TIMEOUT_MS");
+        long requestTimeoutMs =
+                (long) ReflectionTestUtils.getField(ObsController.class, "REQUEST_TIMEOUT_MS");
+        assertThat(readinessTimeoutMs)
+                .as("readiness probes must use a much shorter budget than the 5s request timeout")
+                .isLessThan(requestTimeoutMs);
+        // Both probes must be issued with the short readiness timeout, never the 5s request timeout.
+        verify(obs).getCurrentProgramScene(readinessTimeoutMs);
+        verify(obs).getCurrentProgramScene(anyLong()); // exactly once, at the readiness timeout
+        verify(obs).getInputList(nullable(String.class), eq(readinessTimeoutMs));
+        verify(obs, never()).getCurrentProgramScene(requestTimeoutMs);
+        verify(obs, never()).getInputList(nullable(String.class), eq(requestTimeoutMs));
+    }
+
+    @Test
+    void isReady_shortCircuitsOnNoActiveSceneWithoutProbingAudio() {
+        // Finding 1: no active program scene -> not ready, and we must NOT go on to probe audio (a
+        // second readiness timeout against a wedged OBS). Short-circuiting caps the wall time spent
+        // holding the FSM lock.
+        ObsHealth health = new ObsHealth();
+        SettingsStore settings = mock(SettingsStore.class);
+        SettingsStore.Settings s = new SettingsStore.Settings();
+        s.audioSources =
+                List.of(new AudioSource("a", "application", "::dota2.exe", "Dota", 100, false));
+        when(settings.get()).thenReturn(s);
+
+        ObsController controller =
+                new ObsController(settings, health, new ObsEvents(health), sceneConfigurer());
+        OBSRemoteController obs = mock(OBSRemoteController.class);
+        GetCurrentProgramSceneResponse scene = mock(GetCurrentProgramSceneResponse.class);
+        when(scene.isSuccessful()).thenReturn(true);
+        when(scene.getCurrentProgramSceneName()).thenReturn(""); // no active scene
+        when(obs.getCurrentProgramScene(anyLong())).thenReturn(scene);
+        ReflectionTestUtils.setField(controller, "controller", obs);
+        health.setConnected(true);
+
+        assertThat(controller.isReady())
+                .as("no active program scene must report not-ready")
+                .isFalse();
+        // Audio must not be probed at all once the scene check fails.
+        verify(obs, never()).getInputList(nullable(String.class), anyLong());
+    }
+
+    @Test
+    void onConnectionLost_leavesRecordingFlagUnchanged_clearsOnlyConnectedAndScene() {
+        // Finding 2: a transient websocket drop does NOT stop OBS -- it keeps recording. Clearing
+        // health.recording optimistically here opens a window where a finalize sees stopRecording()
+        // throw and then isRecording()==false, so stopRecordingWithRetry() skips its still-recording
+        // retry and persists the match with video_path=null. onConnectionLost must leave recording as-is
+        // (refreshRecordingActive re-syncs it on reconnect) while still clearing connected + sceneActive.
+        ObsHealth health = new ObsHealth();
+        ObsController controller =
+                new ObsController(null, health, new ObsEvents(health), sceneConfigurer());
+
+        health.setConnected(true);
+        health.setSceneActive(true);
+        health.setRecording(true); // OBS is mid-recording when the socket drops
+
+        ReflectionTestUtils.invokeMethod(controller, "onConnectionLost");
+
+        assertThat(health.isRecording())
+                .as("a transient drop must NOT clear recording -- OBS keeps recording; keeps the retry armed")
+                .isTrue();
+        assertThat(health.isConnected())
+                .as("connection-lost must still clear connected")
+                .isFalse();
+        assertThat(health.isSceneActive())
+                .as("connection-lost must still clear sceneActive")
+                .isFalse();
     }
 }
