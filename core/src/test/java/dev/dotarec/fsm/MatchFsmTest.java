@@ -441,7 +441,19 @@ class MatchFsmTest {
         // pinned in setUp). The kill frame's mono stamp sits a clean 3.5s after the anchor, while its
         // wall stamp is deliberately a wildly different value -- if the offset regressed to wall-clock
         // it would read 13.5s, not 3.5s.
-        fsm.onFrame(frame().wall(confirmedMs - 20_000L)
+        // The shared setUp fsm pins nanoClock to a CONSTANT ANCHOR_NANOS; with the monotonic finalize
+        // duration (Finding A) that would make durationS 0 and clamp the marker to 0. Use a stepping
+        // nano clock (anchor at start, +8s at finalize) so finalize sees real elapsed monotonic time,
+        // exactly as production's advancing System.nanoTime would. nanoClock is read twice: the start
+        // anchor, then finalize.
+        java.util.concurrent.atomic.AtomicInteger nanoReads =
+                new java.util.concurrent.atomic.AtomicInteger();
+        java.util.function.LongSupplier steppingNano =
+                () -> nanoReads.getAndIncrement() == 0 ? ANCHOR_NANOS : ANCHOR_NANOS + 8_000_000_000L;
+        MatchFsm localFsm = new MatchFsm(obs, thumbs, new EventTagger(), matches, markers, pauses,
+                journal, events, ds, clipService, settings, steppingNano);
+
+        localFsm.onFrame(frame().wall(confirmedMs - 20_000L)
                 .mono(ANCHOR_NANOS)
                 .state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")
                 .activity("playing")
@@ -451,7 +463,7 @@ class MatchFsmTest {
                 .assists(0)
                 .build());
 
-        fsm.onFrame(frame().wall(confirmedMs + 10_000L)
+        localFsm.onFrame(frame().wall(confirmedMs + 10_000L)
                 .mono(ANCHOR_NANOS + 3_500_000_000L)
                 .state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")
                 .activity("playing")
@@ -460,7 +472,7 @@ class MatchFsmTest {
                 .deaths(0)
                 .assists(0)
                 .build());
-        fsm.onFrame(frame().wall(confirmedMs + 8_000L)
+        localFsm.onFrame(frame().wall(confirmedMs + 8_000L)
                 .mono(ANCHOR_NANOS + 8_000_000_000L)
                 .state("DOTA_GAMERULES_STATE_POST_GAME")
                 .noHero()
@@ -476,6 +488,53 @@ class MatchFsmTest {
                             assertThat(marker.type()).isEqualTo("kill");
                             assertThat(marker.videoOffsetS()).isCloseTo(3.5, offset(0.001));
                         });
+    }
+
+    @Test
+    void finalizeDurationAndMarkerClampFollowMonotonicClock_notABackwardWallStep() {
+        // Finding A: durationS (the clamp upper bound for every marker + the stored duration_s) must be
+        // derived from the MONOTONIC clock, the same anchor the marker offsets use -- never the wall
+        // clock. Here the wall clock STEPS BACKWARD before finalize (an NTP correction). If the duration
+        // still read (now - recordConfirmedWallMs)/1000 it would go negative and clamp to 0, dragging
+        // every late marker to offset 0. With the monotonic derivation it is a clean 300s and the late
+        // marker keeps its true 250s offset.
+        long anchorNanos = 2_000_000_000_000L;
+        long finalizeNanos = anchorNanos + 300L * 1_000_000_000L; // +300s of real elapsed time
+        // nanoClock is read exactly twice: once in startRecording (the anchor), once in finalize.
+        java.util.concurrent.atomic.AtomicInteger nanoReads = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.function.LongSupplier steppingNano =
+                () -> nanoReads.getAndIncrement() == 0 ? anchorNanos : finalizeNanos;
+        // Wall clock jumps far backward at finalize (well before the record-confirmed wall anchor).
+        long backwardWall = System.currentTimeMillis() - 3_600_000L;
+        java.util.function.LongSupplier backwardWallClock = () -> backwardWall;
+
+        MatchFsm monoFsm = new MatchFsm(obs, thumbs, new EventTagger(), matches, markers, pauses,
+                journal, events, ds, clipService, settings, steppingNano, backwardWallClock);
+
+        // Start (consumes the anchor nano read).
+        monoFsm.onFrame(frame().mono(anchorNanos)
+                .state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing")
+                .hero("npc_dota_hero_lina").kills(0).deaths(0).assists(0).build());
+        assertThat(monoFsm.getState()).isEqualTo(MatchState.RECORDING);
+
+        // A LATE kill 250s (monotonic) into the recording -- comfortably within the real 300s duration.
+        monoFsm.onFrame(frame().mono(anchorNanos + 250L * 1_000_000_000L)
+                .state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing")
+                .hero("npc_dota_hero_lina").kills(1).deaths(0).assists(0).build());
+
+        // POST_GAME finalizes (consumes the finalize nano read).
+        monoFsm.onFrame(frame().state("DOTA_GAMERULES_STATE_POST_GAME").noHero().build());
+
+        MatchSummary row = matches.findAll().get(0);
+        assertThat(row.durationS()).as("duration from the monotonic clock, unaffected by the wall step")
+                .isEqualTo(300);
+        assertThat(markers.findByMatchId(row.id()))
+                .singleElement()
+                .satisfies(marker -> {
+                    assertThat(marker.type()).isEqualTo("kill");
+                    // The late marker is NOT dragged to 0 by a wall-derived duration of 0.
+                    assertThat(marker.videoOffsetS()).isCloseTo(250.0, offset(0.001));
+                });
     }
 
     @Test
