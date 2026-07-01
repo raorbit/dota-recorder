@@ -358,7 +358,7 @@ class ClipServiceTest {
         ClipRow row = clips.findById(clipId).orElseThrow();
         when(throwingClips.findById(clipId)).thenReturn(Optional.of(row));
         when(throwingClips.claimForGeneration(eq(clipId), anyLong())).thenReturn(true);
-        when(throwingClips.updateStatus(eq(clipId), eq("failed"), any(), any(), any(), any()))
+        when(throwingClips.updateStatusIfGenerating(eq(clipId), eq("failed"), any(), any(), any(), any()))
                 .thenThrow(new IllegalStateException("SQLITE_BUSY"));
         when(clipper.clip(any(), anyDouble(), anyDouble(), any()))
                 .thenThrow(new IllegalStateException("ffmpeg blew up"));

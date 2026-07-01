@@ -7,6 +7,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
+import org.springframework.core.task.TaskRejectedException;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -33,12 +34,16 @@ public class ClipQueue {
      * A {@code generating} row whose generation started longer ago than this is assumed wedged — its
      * worker died after the cut but before the status write (e.g. a back-to-back SQLITE_BUSY at
      * finalize), so the {@code @Async} method's exception escaped and the row never reached a terminal
-     * state. Comfortably past the cut + thumbnail process ceilings ({@code Clipper}'s 10-min timeout,
-     * twice) plus margin. The cutoff is measured from {@code generation_started_at} (set when the row
-     * was claimed), NOT {@code created_at}, so a clip that sat {@code pending} in a saturated queue for
-     * longer than this before being claimed is never re-pended mid-render (and double-cut).
+     * state. Must strictly EXCEED a single {@code generateAsync} run's true worst case: THREE
+     * back-to-back {@code Clipper} process ceilings — the copy attempt, the re-encode retry, and the
+     * thumbnail grab ({@code Clipper.PROCESS_TIMEOUT_MINUTES} = 10 min each, so up to 30 min) — plus
+     * generous margin, or a legitimately slow render would be re-pended while its original worker is
+     * still finalizing and the same sweep would dispatch a SECOND concurrent cut to the identical
+     * {@code -y} output path. The cutoff is measured from {@code generation_started_at} (set when the
+     * row was claimed), NOT {@code created_at}, so a clip that sat {@code pending} in a saturated queue
+     * for longer than this before being claimed is never re-pended mid-render (and double-cut).
      */
-    private static final long STALE_GENERATING_MS = 30L * 60_000L;
+    private static final long STALE_GENERATING_MS = 60L * 60_000L;
 
     private final ClipRepository clips;
     private final ClipService clipService;
@@ -92,7 +97,14 @@ public class ClipQueue {
         for (ClipRow clip : pending) {
             // @Async -> returns immediately, runs on clipExecutor. generateAsync flips the row to
             // generating before any work, so a still-pending row picked up here is never double-cut.
-            clipService.generateAsync(clip.id());
+            try {
+                clipService.generateAsync(clip.id());
+            } catch (TaskRejectedException e) {
+                // Executor saturated (AbortPolicy) — the first over-capacity dispatch throws. Log and
+                // continue so the rest of the batch still gets dispatched; the rejected row stays
+                // pending and is retried next tick. Mirrors ClipService.create()'s dispatch guard.
+                log.debug("Clip {} dispatch rejected (queue full); left pending for next sweep", clip.id());
+            }
         }
     }
 }

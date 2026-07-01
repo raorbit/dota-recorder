@@ -247,6 +247,40 @@ public class ClipRepository {
     }
 
     /**
+     * Compare-and-set variant of {@link #updateStatus} for the generator's TERMINAL writes: flips a
+     * clip to {@code ready}/{@code failed} (and its outputs) ONLY if the row is still
+     * {@code generating} ({@code WHERE id=? AND status='generating'}), mirroring
+     * {@link #rependIfStale}'s guard. This closes a double-cut race: if the periodic self-heal already
+     * re-pended a slow render and a SECOND worker re-claimed it, the ORIGINAL worker's terminal write
+     * must not resurrect/overwrite the row and point it at a file the second worker is still rewriting.
+     * The plain {@link #updateStatus} (unconditional {@code WHERE id=?}) is retained for the boot-time
+     * orphan reconcile, which legitimately flips {@code generating} → {@code pending}.
+     *
+     * @return the number of rows updated — 0 means the row is no longer {@code generating} (re-pended,
+     *     re-claimed, or deleted), so the caller must clean up the orphaned output it just wrote.
+     */
+    public int updateStatusIfGenerating(long id, String status, String videoPath, Long fileSizeBytes,
+                                        String thumbPath, String error) {
+        String sql = """
+                UPDATE clips
+                SET status = ?, video_path = ?, file_size_bytes = ?, thumb_path = ?, error = ?
+                WHERE id = ? AND status = 'generating'
+                """;
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, status);
+            ps.setString(2, videoPath);
+            setNullableLong(ps, 3, fileSizeBytes);
+            ps.setString(4, thumbPath);
+            ps.setString(5, error);
+            ps.setLong(6, id);
+            return ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to update status for clip " + id, e);
+        }
+    }
+
+    /**
      * Atomically claims a {@code pending} clip for generation by flipping it to {@code generating} and
      * stamping {@code generation_started_at = startedAt} (epoch millis), returning true only if THIS
      * call won the transition (one row matched {@code status='pending'}). A compare-and-set so a clip
