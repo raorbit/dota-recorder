@@ -244,12 +244,17 @@ public class ClipService {
         }
 
         try {
-            int updated = clips.updateStatus(clipId, "ready", result.output().toString(),
+            // Compare-and-set on status='generating': 0 rows means the row was deleted, OR the periodic
+            // self-heal re-pended this slow render and a SECOND worker re-claimed it — either way this
+            // worker must NOT overwrite/resurrect the row or point it at a file the other is rewriting.
+            int updated = clips.updateStatusIfGenerating(clipId, "ready", result.output().toString(),
                     result.sizeBytes(), thumbPath, null);
             if (updated == 0) {
-                // The row was deleted (user removed the clip) while we were generating. Don't leak the
-                // output we just wrote, and don't publish a ready event for a clip that no longer exists.
-                log.info("Clip {} (match {}) deleted during generation; discarding orphaned output {}",
+                // The row was deleted (user removed the clip), or it was re-pended and re-claimed, while
+                // we were generating. Don't leak the output we just wrote, and don't publish a ready
+                // event for a row this worker no longer owns.
+                log.info("Clip {} (match {}) no longer generating (deleted or re-claimed); "
+                        + "discarding orphaned output {}",
                         clipId, parentMatchId, result.output());
                 deleteQuietly(result.output());
                 if (thumbPath != null) {
@@ -278,11 +283,20 @@ public class ClipService {
         // The status write itself can fail (e.g. a back-to-back SQLITE_BUSY under WAL contention). Swallow
         // it here so the exception never escapes the @Async method — otherwise the row would stay stuck in
         // 'generating' forever. ClipQueue.sweep re-pends such a wedged row past its stale cutoff.
+        // Compare-and-set on status='generating': if the self-heal already re-pended this render and a
+        // second worker re-claimed it (or it was deleted), don't clobber the row back to 'failed' or
+        // publish a terminal event for a row this worker no longer owns.
+        int updated;
         try {
-            clips.updateStatus(clipId, "failed", null, null, null, error);
+            updated = clips.updateStatusIfGenerating(clipId, "failed", null, null, null, error);
         } catch (Exception e) {
             log.warn("Failed to mark clip {} (match {}) failed; ClipQueue will re-pend it once stale: {}",
                     clipId, parentMatchId, e.getMessage());
+            return;
+        }
+        if (updated == 0) {
+            log.info("Clip {} (match {}) no longer generating (deleted or re-claimed); not marking failed",
+                    clipId, parentMatchId);
             return;
         }
         events.publish("clip.ready", ready(clipId, parentMatchId, "failed", null));
