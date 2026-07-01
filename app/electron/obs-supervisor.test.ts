@@ -245,6 +245,77 @@ describe('ObsSupervisor', () => {
     expect(args).toEqual(['/PID', '8765', '/T', '/F']);
   });
 
+  // Case 6a: stop() lands WHILE start() is awaiting scopePortToLoopback() (netsh). The child handle is
+  // still null, so stop() flips `stopping` and returns with nothing to reap. The pre-spawn guard must
+  // then abort start() before spawning OBS, so no orphaned obs64.exe is left holding :4466.
+  it('aborts start() without spawning OBS when stop() lands during scopePortToLoopback', async () => {
+    setPlatform('win32');
+    // Hold netsh pending so start() is parked in scopePortToLoopback() while we call stop().
+    const pendingNetsh: Array<(err: unknown) => void> = [];
+    execFileImpl.fn = (_file, _args, _opts, cb: (err: unknown) => void) => {
+      pendingNetsh.push(cb);
+    };
+    const onUnexpectedExit = vi.fn();
+    const sup = new ObsSupervisor({ ...baseOpts, onLog: () => {}, onUnexpectedExit });
+
+    const starting = sup.start();
+    // Guard the stored promise so its (expected) rejection is never momentarily unhandled while we
+    // drive stop()/netsh below; it is asserted with expect(...).rejects further down.
+    void starting.catch(() => {});
+    await flush(0); // let start() reach the first awaited netsh call
+
+    // stop() during the scopePortToLoopback window: no child yet, so it just records the stop intent.
+    await sup.stop();
+
+    // Release netsh so start() unblocks and hits the pre-spawn stopping guard. scopePortToLoopback runs
+    // two netsh calls in sequence (delete then add), so drain repeatedly until none remain pending.
+    while (pendingNetsh.length > 0) {
+      for (const cb of pendingNetsh.splice(0)) cb(null);
+      await flush(0);
+    }
+
+    await expect(starting).rejects.toThrow(/aborted|stop was requested/i);
+
+    // The freshly-requested stop must have prevented the OBS spawn entirely: no obs64.exe launched.
+    const obsSpawns = spawnMock.mock.calls.filter(([cmd]) => String(cmd).includes('obs64'));
+    expect(obsSpawns).toHaveLength(0);
+    // A requested-stop abort is not a crash: onUnexpectedExit must stay silent.
+    expect(onUnexpectedExit).not.toHaveBeenCalled();
+  });
+
+  // Case 6b: stop() lands in the synchronous window right after spawn (post-spawn guard). The child was
+  // already created, so it must be reaped (SIGTERM/kill), cleared from the handle, and start() aborted —
+  // not left orphaned and not treated as a live OBS.
+  it('kills the just-spawned OBS when stop() lands right after spawn (post-spawn guard)', async () => {
+    setPlatform('win32');
+    const onUnexpectedExit = vi.fn();
+    const sup = new ObsSupervisor({ ...baseOpts, onLog: () => {}, onUnexpectedExit });
+
+    // Simulate a stop() landing in the synchronous window around spawn: as soon as the OBS child is
+    // created, request a stop (child handle is now set, so stop() flips `stopping`, SIGTERMs it, and
+    // start()'s post-spawn guard reaps + aborts).
+    let obsChild: FakeChild | undefined;
+    spawnMock.mockImplementation((...args: unknown[]) => {
+      const child = new FakeChild();
+      children.push(child);
+      if (String(args[0]).includes('obs64')) {
+        obsChild = child;
+        void sup.stop();
+      }
+      return child;
+    });
+
+    await expect(sup.start()).rejects.toThrow(/aborted|stop was requested/i);
+
+    expect(obsChild).toBeDefined();
+    // The just-spawned OBS was reaped (SIGTERM'd), not orphaned.
+    expect(obsChild?.kill).toHaveBeenCalledWith('SIGTERM');
+    // Aborting on a requested stop is not a crash.
+    expect(onUnexpectedExit).not.toHaveBeenCalled();
+    // A follow-up stop() finds no live child (the handle was cleared) — nothing more to reap.
+    await expect(sup.stop()).resolves.toBeUndefined();
+  });
+
   // Case 5: exact portable arg list and cwd = bin/64bit.
   it('spawns obs64.exe with the exact portable arg list and cwd = bin/64bit', async () => {
     const sup = new ObsSupervisor({ ...baseOpts, onLog: () => {} });

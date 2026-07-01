@@ -107,6 +107,14 @@ export class ObsSupervisor {
     // Scope the managed websocket port to loopback before OBS binds it (issue #14).
     await this.scopePortToLoopback();
 
+    // Spawn/stop race guard (mirrors JvmSupervisor's discipline): scopePortToLoopback() awaits netsh,
+    // and a stop() that lands during that window sees child===null, flips `stopping`, and returns
+    // without a child to reap. If we then spawn, the fresh OBS would be orphaned (holding :4466 and the
+    // capture lock) with nothing left to kill it. So bail before spawning once a stop is pending.
+    if (this.stopping) {
+      throw new Error('OBS start aborted: a stop was requested during launch.');
+    }
+
     // OBS resolves its `data/` tree relative to the working directory (it probes
     // `data/...` and `../../data/...`), so cwd MUST be bin/64bit where obs64.exe lives —
     // launching from the install root makes every data asset (theme included) fail to load,
@@ -118,7 +126,19 @@ export class ObsSupervisor {
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    // Assign the handle SYNCHRONOUSLY (mirrors JvmSupervisor) so a stop() from here on sees a live
+    // child to reap through the normal path — no await between spawn and this assignment.
     this.child = child;
+
+    // Second race-guard leg: if a stop was requested in the (synchronous) window around spawn — e.g.
+    // the pre-spawn check passed but stop() ran before this line executed — reap the freshly-spawned
+    // OBS immediately rather than leaving it orphaned, and abort start(). stop() sets stopping=true, so
+    // this child's own exit handler will correctly treat the kill as requested (no phantom-crash relaunch).
+    if (this.stopping) {
+      this.child = null;
+      this.killTree(child);
+      throw new Error('OBS start aborted: a stop was requested during launch.');
+    }
 
     if (child.pid !== undefined) {
       // Tie OBS's lifetime to this process: the OS reaps it on hard crash.
@@ -175,7 +195,6 @@ export class ObsSupervisor {
       this.child = null;
       return;
     }
-    const pid = child.pid;
 
     // Step 1: graceful. SIGTERM lets OBS flush its config and stop captures cleanly.
     try {
@@ -190,8 +209,33 @@ export class ObsSupervisor {
       return;
     }
 
-    // Step 2: hard tree-kill. The Job Object (if present) already covers a hard
-    // parent crash; taskkill /T /F is the explicit fallback on graceful quit.
+    // Step 2: hard tree-kill.
+    this.hardKill(child);
+    this.child = null;
+  }
+
+  /**
+   * Reap a spawned-but-unwanted OBS child on the spawn/stop race path (a stop arrived while start() was
+   * mid-launch). Fire-and-forget graceful-then-forceful kill — no grace-window await, since start() is
+   * bailing out and there's no live recording to flush. `stopping` is already true here, so the child's
+   * exit handler treats this as a requested stop (no phantom-crash relaunch).
+   */
+  private killTree(child: ChildProcess): void {
+    try {
+      child.kill('SIGTERM');
+    } catch {
+      /* ignore - escalate below. */
+    }
+    this.hardKill(child);
+  }
+
+  /**
+   * Hard tree-kill escalation shared by stop() and killTree(). The Job Object (if present) already
+   * covers a hard parent crash; taskkill /T /F is the explicit fallback on a graceful/requested kill.
+   */
+  private hardKill(child: ChildProcess): void {
+    const pid = child.pid;
+    if (pid === undefined) return;
     if (process.platform === 'win32') {
       try {
         const killer = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true });
@@ -211,7 +255,6 @@ export class ObsSupervisor {
     } else {
       child.kill('SIGKILL');
     }
-    this.child = null;
   }
 
   /**
