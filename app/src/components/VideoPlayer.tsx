@@ -520,6 +520,11 @@ export function VideoPlayer({
   // Return to the full match VOD (clears the clip src).
   function playFullVod(): void {
     setActiveClipId(null);
+    // Drop the clip's media duration so the parent-VOD overlay stays hidden until the reloaded VOD
+    // reports its real duration (onDurationChange). Without this, showVodOverlay re-enables the moment
+    // activeClipId is null while mediaDurationS still holds the clip's shorter duration, piling markers
+    // at the right edge for the render(s) before the VOD metadata loads.
+    setMediaDurationS(null);
   }
 
   // Delete a clip (unlinks the .mp4, drops the row), then refresh the strip. If the
@@ -527,7 +532,13 @@ export function VideoPlayer({
   async function onDeleteClip(clip: Clip): Promise<void> {
     try {
       await deleteClip(clip.id);
-      if (activeClipId === clip.id) setActiveClipId(null);
+      if (activeClipId === clip.id) {
+        setActiveClipId(null);
+        // Same transient as playFullVod: null the clip's media duration so the parent-VOD overlay
+        // stays hidden until the reloaded VOD reports its real duration, rather than positioning
+        // markers against the deleted clip's duration for the render(s) before metadata loads.
+        setMediaDurationS(null);
+      }
       // Bump so an in-flight clip fetch (e.g. a clip.* refresh issued before this delete) can't
       // resolve afterward and resurrect the just-deleted clip with pre-delete data.
       clipFetchTokenRef.current++;
