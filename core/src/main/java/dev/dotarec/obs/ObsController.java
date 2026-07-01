@@ -63,6 +63,18 @@ public class ObsController implements ObsRecorder {
     /** Per-request response timeout for synchronous obs-websocket calls. */
     private static final long REQUEST_TIMEOUT_MS = 5_000L;
 
+    /**
+     * Much shorter per-request timeout for the read-only {@link #isReady()} readiness probes. The FSM
+     * calls {@code isReady()} from {@code startRecording()} while holding the {@code MatchFsm} monitor
+     * on the GSI thread, and that same monitor gates arm/finalize and the {@code ForceStopWatchdog}. A
+     * connected-but-unresponsive OBS would block each of the chained readiness calls
+     * (getCurrentProgramScene, getInputList, one getInputMute) for the full {@link #REQUEST_TIMEOUT_MS}
+     * (5s each, 10-25s total) with that lock held, stalling both the GSI thread and the watchdog. These
+     * are optional pre-arm existence checks — degrading fast to "not ready" (and retrying on the next
+     * frame) is far better than wedging the FSM — so they use a ~1s budget instead of 5s.
+     */
+    private static final long READINESS_TIMEOUT_MS = 1_000L;
+
     /** How long to wait for the websocket to become identified/ready after connect(). */
     private static final int CONNECT_TIMEOUT_SECONDS = 3;
 
@@ -280,6 +292,11 @@ public class ObsController implements ObsRecorder {
         // app-owned audio input exists. These are read-only existence checks: they prove a
         // scene/source is CONFIGURED, not that pixels are non-black -- but they catch the common
         // "green GSI, OBS records nothing" failure (no scene, no audio device) before the FSM arms.
+        //
+        // The FSM calls this while holding the MatchFsm monitor on the GSI thread, so every probe here
+        // uses the short READINESS_TIMEOUT_MS (not the 5s REQUEST_TIMEOUT_MS) and we short-circuit as
+        // early as possible: a connected-but-wedged OBS must not stall the GSI thread + ForceStopWatchdog
+        // for a multi-of-5s budget. Failing fast to "not ready" just retries on the next frame.
         if (!health.isConnected()) {
             return false;
         }
@@ -288,13 +305,16 @@ public class ObsController implements ObsRecorder {
             return false;
         }
         try {
-            boolean sceneOk = refreshSceneActive();
+            // Scene check first, and short-circuit on it: no live scene -> not ready, no point probing
+            // audio (and no point spending a second readiness timeout on a wedged OBS).
+            if (!refreshSceneActive(READINESS_TIMEOUT_MS)) {
+                return false;
+            }
             // Only gate on audio when the user configured a source that will actually yield a live
             // audio track. An empty list -- OR a list whose every source is muted/ineffective -- is a
             // deliberate "record video only" choice; gating there would make isReady() permanently
             // false and silently disable ALL recording (the FSM never arms).
-            boolean audioOk = !expectsLiveAudio() || hasDesktopAudio(c);
-            return sceneOk && audioOk;
+            return !expectsLiveAudio() || hasDesktopAudio(c);
         } catch (Exception e) {
             log.warn("OBS readiness check failed: {}", e.toString());
             return false;
@@ -461,16 +481,27 @@ public class ObsController implements ObsRecorder {
 
     /**
      * Refreshes {@link ObsHealth#setSceneActive} from the current program scene and returns whether
-     * one is active. A non-blank current program scene name counts as active.
+     * one is active. Uses the full {@link #REQUEST_TIMEOUT_MS}; the readiness path calls the
+     * timeout-parameterized overload with the shorter budget.
      */
     private boolean refreshSceneActive() {
+        return refreshSceneActive(REQUEST_TIMEOUT_MS);
+    }
+
+    /**
+     * Refreshes {@link ObsHealth#setSceneActive} from the current program scene and returns whether
+     * one is active. A non-blank current program scene name counts as active. {@code requestTimeoutMs}
+     * bounds the single obs-websocket call so a wedged OBS cannot stall the caller (see
+     * {@link #READINESS_TIMEOUT_MS}).
+     */
+    private boolean refreshSceneActive(long requestTimeoutMs) {
         OBSRemoteController c = this.controller;
         if (c == null) {
             health.setSceneActive(false);
             return false;
         }
         try {
-            GetCurrentProgramSceneResponse scene = c.getCurrentProgramScene(REQUEST_TIMEOUT_MS);
+            GetCurrentProgramSceneResponse scene = c.getCurrentProgramScene(requestTimeoutMs);
             boolean active =
                     scene != null
                             && scene.isSuccessful()
@@ -485,13 +516,14 @@ public class ObsController implements ObsRecorder {
     }
 
     /**
-     * Re-syncs {@link ObsHealth#setRecording} from OBS's live record state on a (re)connect. A
-     * websocket drop fires {@code onConnectionLost()}, which optimistically clears
-     * {@code health.recording} -- but OBS itself keeps recording across a transient socket blip. Without
-     * this re-sync, the next match would see {@code recording=false}, skip its corrective StopRecord,
-     * and OBS would reject the StartRecord ("output already active"), silently breaking recording until
-     * restart. Best-effort: a failed/absent status answer leaves the flag as-is, since the corrective
-     * StopRecord guard in {@link #startRecording()} is the backstop for the "already active" case.
+     * Re-syncs {@link ObsHealth#setRecording} from OBS's live record state on a (re)connect.
+     * {@code onConnectionLost()} deliberately does NOT touch {@code health.recording} (OBS keeps
+     * recording across a transient socket blip, so clearing it optimistically would defeat the
+     * finalize-time still-recording retry), so this is where the flag is authoritatively re-aligned
+     * with OBS: whether OBS actually kept recording or stopped while the socket was down, GetRecordStatus
+     * on reconnect corrects the flag either way. Best-effort: a failed/absent status answer leaves the
+     * flag as-is, since the corrective StopRecord guard in {@link #startRecording()} is the backstop for
+     * the "already active" case.
      */
     private void refreshRecordingActive() {
         OBSRemoteController c = this.controller;
@@ -513,18 +545,23 @@ public class ObsController implements ObsRecorder {
      * muted. Catches the silent-VOD failure mode (recording with no live audio source). Any configured
      * source kind counts — a user who wires up only a mic or only application capture still passes
      * readiness — which is why this replaces the old GetSpecialInputs desktop1/desktop2 check.
+     *
+     * <p>Called only from {@link #isReady()}, so it uses the short {@link #READINESS_TIMEOUT_MS} and
+     * probes AT MOST ONE app-owned input's mute state: caps the readiness wall time (a wedged OBS with
+     * many owned inputs otherwise multiplies that timeout) while still catching the "one source, muted"
+     * silent-VOD case that motivates the gate.
      */
     private boolean hasDesktopAudio(OBSRemoteController c) {
-        GetInputListResponse inputs = c.getInputList(null, REQUEST_TIMEOUT_MS);
+        GetInputListResponse inputs = c.getInputList(null, READINESS_TIMEOUT_MS);
         if (inputs == null || !inputs.isSuccessful() || inputs.getInputs() == null) {
             return false;
         }
         for (Input input : inputs.getInputs()) {
             String name = input.getInputName();
-            if (name != null
-                    && name.startsWith(ObsSceneConfigurer.OWNED_PREFIX)
-                    && isAudioInputLive(c, name)) {
-                return true;
+            if (name != null && name.startsWith(ObsSceneConfigurer.OWNED_PREFIX)) {
+                // Probe only the first app-owned input, then decide: bounds isReady()'s total wall
+                // time to two short readiness probes (scene + one mute) regardless of input count.
+                return isAudioInputLive(c, name);
             }
         }
         return false;
@@ -535,7 +572,7 @@ public class ObsController implements ObsRecorder {
             return false;
         }
         try {
-            GetInputMuteResponse mute = c.getInputMute(inputName, REQUEST_TIMEOUT_MS);
+            GetInputMuteResponse mute = c.getInputMute(inputName, READINESS_TIMEOUT_MS);
             // Present and not muted. A muted desktop device would yield a silent VOD.
             return mute != null
                     && mute.isSuccessful()
@@ -578,7 +615,14 @@ public class ObsController implements ObsRecorder {
     private void onConnectionLost() {
         health.setConnected(false);
         health.setSceneActive(false);
-        health.setRecording(false);
+        // Do NOT clear health.recording here. A transient websocket drop does not stop OBS -- it keeps
+        // recording across the blip -- so optimistically clearing the flag opens a window where a
+        // finalize (POST_GAME / manual / watchdog) sees stopRecording() throw and then isRecording()
+        // == false, so stopRecordingWithRetry() skips its "OBS still recording" retry and persists the
+        // match with video_path=null, detaching the .mp4 from its markers. Leave the flag as-is;
+        // refreshRecordingActive() re-syncs it from OBS's live GetRecordStatus on the next reconnect,
+        // and the corrective StopRecord in startRecording() is the backstop for the "already active"
+        // case. (connected/sceneActive ARE cleared: those are genuinely false while the socket is down.)
         log.info("OBS connection lost");
     }
 
