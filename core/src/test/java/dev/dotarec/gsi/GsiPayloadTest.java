@@ -110,4 +110,27 @@ class GsiPayloadTest {
                 .parseAccountId()).isNull();
         assertThat(MAPPER.readValue("{}", GsiPayload.class).parseAccountId()).isNull();
     }
+
+    @Test
+    void parseAccountId_rejectsOutOfRangeValues() throws Exception {
+        // Hero Demo / bot games report accountid "0"; that is not a real id, so it must NOT be latched
+        // by auto-capture -- it maps to null, same as a negative or >2^32-1 value. Range mirrors
+        // SettingsController's 1..2^32-1 check.
+        assertThat(MAPPER.readValue("{\"player\":{\"accountid\":\"0\"}}", GsiPayload.class)
+                .parseAccountId()).isNull();
+        assertThat(MAPPER.readValue("{\"player\":{\"accountid\":\"-5\"}}", GsiPayload.class)
+                .parseAccountId()).isNull();
+        // Just past the 32-bit ceiling (2^32 = 4294967296) is out of range.
+        assertThat(MAPPER.readValue("{\"player\":{\"accountid\":\"4294967296\"}}", GsiPayload.class)
+                .parseAccountId()).isNull();
+        // A far-out huge value is out of range too.
+        assertThat(MAPPER.readValue("{\"player\":{\"accountid\":\"99999999999\"}}", GsiPayload.class)
+                .parseAccountId()).isNull();
+
+        // Boundaries of the valid range are accepted.
+        assertThat(MAPPER.readValue("{\"player\":{\"accountid\":\"1\"}}", GsiPayload.class)
+                .parseAccountId()).isEqualTo(1L);
+        assertThat(MAPPER.readValue("{\"player\":{\"accountid\":\"4294967295\"}}", GsiPayload.class)
+                .parseAccountId()).isEqualTo(0xFFFFFFFFL);
+    }
 }
