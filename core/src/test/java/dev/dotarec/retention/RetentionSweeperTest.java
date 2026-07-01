@@ -27,7 +27,9 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 
 /**
@@ -160,6 +162,85 @@ class RetentionSweeperTest {
         // The starred clip is kept even though it is the oldest of all.
         assertThat(Files.exists(videoDir.resolve("c-starred.mp4"))).isTrue();
         assertThat(clips.findById(starred)).isPresent();
+    }
+
+    @Test
+    void clipEvictionUsesRealDiskSizeOnBothSidesWhenDatabaseSizeIsStale() throws Exception {
+        // Cap 1 GiB. Two non-starred clips over a parent match with no VOD file (budget is all clips).
+        // The OLDEST clip's on-disk size (0.6 GiB) is much larger than its stale DB file_size_bytes
+        // (0.1 GiB); the newer clip's disk and DB agree at 0.6 GiB. Real total on disk = 1.2 GiB > cap.
+        // The seed (reachableClipBytes) and the loop decrement must BOTH use real disk size: only then
+        // is the budget seen as over cap and exactly the oldest evicted (0.6 GiB left, under cap). Seeded
+        // from the drifted DB size instead, total would read as 0.7 GiB and the sweep would under-evict.
+        settings.get().retentionCapGb = 1;
+        long gib = 1024L * 1024 * 1024;
+        long unit = 6 * gib / 10;
+
+        // Parent row only, no VOD file: keeps the budget entirely in the clip phase.
+        long match = matches.insert(new NewMatch(
+                null, "match", "enriched", "puck",
+                1, 2, 3, 400, 500, 10000, 120,
+                "win", 7, 22, null, null, 1800,
+                1_000L, null, null, null, false, 1_000L, null));
+
+        // Oldest: 0.6 GiB on disk but a stale 0.1 GiB recorded in the DB.
+        long stale = seedClip(match, "c-stale.mp4", "c-stale.jpg", unit, gib / 10, 100L, false);
+        // Newer: disk and DB agree at 0.6 GiB.
+        long accurate = seedClip(match, "c-ok.mp4", "c-ok.jpg", unit, unit, 200L, false);
+
+        RetentionSweeper.SweepResult result = sweeper.sweep(null);
+
+        // Exactly the oldest is evicted (file AND row), using real disk size on both sides.
+        assertThat(result.freedBytes()).isEqualTo(unit);
+        assertThat(Files.exists(videoDir.resolve("c-stale.mp4"))).isFalse();
+        assertThat(clips.findById(stale)).isEmpty();
+        // The newer clip survives: 0.6 GiB remaining is under the 1 GiB cap.
+        assertThat(Files.exists(videoDir.resolve("c-ok.mp4"))).isTrue();
+        assertThat(clips.findById(accurate)).isPresent();
+    }
+
+    @Test
+    void oneClipRowDeleteFailingDoesNotAbortTheSweepOrOrphanARow() throws Exception {
+        // Cap 1 GiB. Three non-starred clips over a parent match with no VOD file, 0.6 GiB each
+        // -> 1.8 GiB. The DB delete of the OLDEST clip throws (simulating a SQLITE_BUSY). That single
+        // failure must NOT abort the pass: the remaining clips still get evicted until under cap, and
+        // because the row is deleted BEFORE the file, the failed clip is not orphaned (row survives,
+        // file survives — a consistent pair the next sweep retries), not a row pointing at a deleted file.
+        settings.get().retentionCapGb = 1;
+        long gib = 1024L * 1024 * 1024;
+        long unit = 6 * gib / 10;
+
+        long match = matches.insert(new NewMatch(
+                null, "match", "enriched", "puck",
+                1, 2, 3, 400, 500, 10000, 120,
+                "win", 7, 22, null, null, 1800,
+                1_000L, null, null, null, false, 1_000L, null));
+
+        long boom = seedClip(match, "c-boom.mp4", "c-boom.jpg", unit, 100L, false);
+        long second = seedClip(match, "c-second.mp4", "c-second.jpg", unit, 200L, false);
+        long third = seedClip(match, "c-third.mp4", "c-third.jpg", unit, 300L, false);
+
+        // Spy the real repo so delete(boom) throws but everything else delegates to the real DB.
+        ClipRepository failingClips = spy(clips);
+        doThrow(new IllegalStateException("simulated SQLITE_BUSY"))
+                .when(failingClips).delete(boom);
+        RetentionSweeper resilient =
+                new RetentionSweeper(matches, failingClips, settings, events);
+
+        RetentionSweeper.SweepResult result = resilient.sweep(null);
+
+        // The failed clip is NOT orphaned: its delete threw before any file was touched, so BOTH its row
+        // and its file remain (a consistent pair), never a row pointing at a deleted file.
+        assertThat(clips.findById(boom)).isPresent();
+        assertThat(Files.exists(videoDir.resolve("c-boom.mp4"))).isTrue();
+        // The pass was not aborted: the next-oldest clip is evicted (file AND row gone), bringing total
+        // to 1.2 GiB then under would still need one more — the second AND third are evicted to reach cap.
+        assertThat(clips.findById(second)).isEmpty();
+        assertThat(Files.exists(videoDir.resolve("c-second.mp4"))).isFalse();
+        assertThat(clips.findById(third)).isEmpty();
+        assertThat(Files.exists(videoDir.resolve("c-third.mp4"))).isFalse();
+        // Two clips freed 1.2 GiB total (the failed one contributed nothing).
+        assertThat(result.freedBytes()).isEqualTo(2 * unit);
     }
 
     @Test
@@ -464,12 +545,21 @@ class RetentionSweeperTest {
     /** Seeds a ready clip of {@code parentMatchId} with on-disk video + thumb files; returns its id. */
     private long seedClip(long parentMatchId, String video, String thumb, long sizeBytes, long createdAt,
                           boolean starred) throws Exception {
+        return seedClip(parentMatchId, video, thumb, sizeBytes, sizeBytes, createdAt, starred);
+    }
+
+    /**
+     * Seeds a ready clip whose on-disk .mp4 is {@code diskSizeBytes} but whose recorded
+     * {@code file_size_bytes} is {@code dbSizeBytes} — lets a test drive the real-vs-DB size drift.
+     */
+    private long seedClip(long parentMatchId, String video, String thumb, long diskSizeBytes,
+                          long dbSizeBytes, long createdAt, boolean starred) throws Exception {
         Path videoPath = videoDir.resolve(video);
         Path thumbPath = videoDir.resolve(thumb);
-        createSparseFile(videoPath, sizeBytes);
+        createSparseFile(videoPath, diskSizeBytes);
         Files.createFile(thumbPath);
         long id = clips.insert(parentMatchId, "manual", null, 0.0, 10.0, null,
-                videoPath.toString(), thumbPath.toString(), sizeBytes, "ready", null, createdAt);
+                videoPath.toString(), thumbPath.toString(), dbSizeBytes, "ready", null, createdAt);
         if (starred) {
             clips.setStarred(id, true);
         }

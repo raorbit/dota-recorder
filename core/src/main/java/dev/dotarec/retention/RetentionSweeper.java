@@ -156,30 +156,38 @@ public class RetentionSweeper {
                     // so an offline archive can neither drive eviction nor be cannibalized.
                     continue;
                 }
-                long size = videoSizeBytes(m);
-                boolean videoGone = deleteFileQuietly(m.videoPath());
-                boolean thumbGone = deleteFileQuietly(m.thumbPath());
-                if (!videoGone) {
-                    log.warn("Retention sweep left match {} intact because video deletion failed", m.id());
-                    continue;
+                try {
+                    long size = videoSizeBytes(m);
+                    boolean videoGone = deleteFileQuietly(m.videoPath());
+                    boolean thumbGone = deleteFileQuietly(m.thumbPath());
+                    if (!videoGone) {
+                        log.warn("Retention sweep left match {} intact because video deletion failed", m.id());
+                        continue;
+                    }
+                    total -= size;
+                    if (!thumbGone) {
+                        log.warn(
+                                "Retention sweep could not delete thumbnail for match {}; pruning video row anyway",
+                                m.id());
+                    }
+                    // Prune the VOD row only (markers/stats survive with nulled paths). Its clips are NOT
+                    // cascade-deleted: clips are standalone files, kept and evicted LAST — after every
+                    // non-starred VOD — in the clip phase below.
+                    matches.nullVideoPath(m.id());
+                    deletedIds.add(m.id());
+                    freed += size;
+                } catch (RuntimeException e) {
+                    // One match failing (e.g. a SQLITE_BUSY on nullVideoPath) must not abort the whole
+                    // pass: log and keep evicting. The deleted file with a still-populated row is
+                    // idempotent — the next sweep's deleteFileQuietly treats the gone file as removed and
+                    // re-nulls the row.
+                    log.warn("Retention sweep could not evict match {}: {}", m.id(), e.toString());
                 }
-                total -= size;
-                if (!thumbGone) {
-                    log.warn(
-                            "Retention sweep could not delete thumbnail for match {}; pruning video row anyway",
-                            m.id());
-                }
-                // Prune the VOD row only (markers/stats survive with nulled paths). Its clips are NOT
-                // cascade-deleted: clips are standalone files, kept and evicted LAST — after every
-                // non-starred VOD — in the clip phase below.
-                matches.nullVideoPath(m.id());
-                deletedIds.add(m.id());
-                freed += size;
             }
 
             // Clips last: only after exhausting non-starred VODs, evict non-starred clips oldest-first
             // until under budget. Starred clips (their own flag) are never auto-deleted. A clip has no
-            // row worth keeping once its file is gone (unlike a match), so delete its file AND row.
+            // row worth keeping once its file is gone (unlike a match), so delete its row AND file.
             int clipsDeleted = 0;
             for (ClipRow clip : clips.findSweepCandidates()) {
                 if (total <= capBytes) {
@@ -191,17 +199,24 @@ public class RetentionSweeper {
                     // skipped-without-subtraction — symmetric with the offline-VOD handling above.
                     continue;
                 }
-                long clipSize = clipSizeBytes(clip);
-                boolean clipGone = deleteFileQuietly(clip.videoPath());
-                deleteFileQuietly(clip.thumbPath());
-                if (!clipGone) {
-                    log.warn("Retention sweep left clip {} intact because video deletion failed", clip.id());
-                    continue;
+                try {
+                    long clipSize = clipSizeBytes(clip);
+                    // Delete the ROW first (mirroring the match path's idempotency), THEN unlink the
+                    // files: a mid-delete SQLITE_BUSY throws before any file is touched, so the row can
+                    // never be orphaned pointing at a now-deleted file. Once the row is gone the files
+                    // are unreferenced, and a failed unlink is a harmless leftover the orphan scan
+                    // reclaims — so file deletion is not gated the way the VOD path gates on its video.
+                    clips.delete(clip.id());
+                    deleteFileQuietly(clip.videoPath());
+                    deleteFileQuietly(clip.thumbPath());
+                    total -= clipSize;
+                    freed += clipSize;
+                    clipsDeleted++;
+                } catch (RuntimeException e) {
+                    // One clip failing (e.g. a SQLITE_BUSY on delete) must not abort the whole pass:
+                    // log and keep evicting the remaining clips so the budget is still enforced.
+                    log.warn("Retention sweep could not evict clip {}: {}", clip.id(), e.toString());
                 }
-                clips.delete(clip.id());
-                total -= clipSize;
-                freed += clipSize;
-                clipsDeleted++;
             }
 
             if (!deletedIds.isEmpty() || clipsDeleted > 0) {
@@ -357,10 +372,13 @@ public class RetentionSweeper {
     }
 
     /**
-     * Sum of DB-recorded clip sizes whose drive is currently reachable. Uses the recorded sizes (cheap,
-     * no per-file stat) but filters by {@link #driveReachable}, so a clip on an unplugged drive — which
-     * the clip-eviction phase can't reclaim — never inflates the eviction budget. Mirrors how
-     * {@link #totalStoredVideoBytes()} excludes offline VODs.
+     * Sum of clip sizes whose drive is currently reachable, using the real on-disk size (with a DB
+     * fallback) via {@link #clipSizeBytes} — the SAME measure the clip-eviction loop decrements by, so
+     * the budget seed and the loop can't drift when a clip's file size differs from its recorded
+     * {@code file_size_bytes} (matching the VOD path, which uses real size on both sides). Filters by
+     * {@link #driveReachable}, so a clip on an unplugged drive — which the clip-eviction phase can't
+     * reclaim — never inflates the eviction budget. Mirrors how {@link #totalStoredVideoBytes()}
+     * excludes offline VODs.
      */
     private long reachableClipBytes() {
         long total = 0L;
@@ -371,7 +389,7 @@ public class RetentionSweeper {
             if (!driveReachable(clip.videoPath())) {
                 continue;
             }
-            total += clip.fileSizeBytes() != null ? clip.fileSizeBytes() : 0L;
+            total += clipSizeBytes(clip);
         }
         return total;
     }
