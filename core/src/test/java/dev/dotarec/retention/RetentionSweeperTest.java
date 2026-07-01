@@ -200,12 +200,14 @@ class RetentionSweeperTest {
     }
 
     @Test
-    void oneClipRowDeleteFailingDoesNotAbortTheSweepOrOrphanARow() throws Exception {
+    void oneClipRowDeleteFailingDoesNotAbortTheSweepAndLeavesNoFileLeak() throws Exception {
         // Cap 1 GiB. Three non-starred clips over a parent match with no VOD file, 0.6 GiB each
-        // -> 1.8 GiB. The DB delete of the OLDEST clip throws (simulating a SQLITE_BUSY). That single
-        // failure must NOT abort the pass: the remaining clips still get evicted until under cap, and
-        // because the row is deleted BEFORE the file, the failed clip is not orphaned (row survives,
-        // file survives — a consistent pair the next sweep retries), not a row pointing at a deleted file.
+        // -> 1.8 GiB. The DB delete of the OLDEST clip throws (simulating a SQLITE_BUSY) AFTER its .mp4
+        // was already unlinked (file-then-row order). That single failure must NOT abort the pass: the
+        // remaining clips still get evicted until under cap. Crucially the failed clip leaks NO FILE (the
+        // .mp4 is gone -- a leftover under clips/ could never be reclaimed by the non-recursive orphan
+        // scan); its ROW survives as a transient orphan that the next sweep re-deletes (deleteFileQuietly
+        // treats the now-gone file as removed). freed does not credit the failed clip.
         settings.get().retentionCapGb = 1;
         long gib = 1024L * 1024 * 1024;
         long unit = 6 * gib / 10;
@@ -229,18 +231,62 @@ class RetentionSweeperTest {
 
         RetentionSweeper.SweepResult result = resilient.sweep(null);
 
-        // The failed clip is NOT orphaned: its delete threw before any file was touched, so BOTH its row
-        // and its file remain (a consistent pair), never a row pointing at a deleted file.
+        // No permanent file leak: the failed clip's .mp4 was unlinked before the row delete threw.
+        assertThat(Files.exists(videoDir.resolve("c-boom.mp4"))).isFalse();
+        // Its row survives as a transient orphan (the row delete threw); the next sweep reclaims it.
         assertThat(clips.findById(boom)).isPresent();
-        assertThat(Files.exists(videoDir.resolve("c-boom.mp4"))).isTrue();
-        // The pass was not aborted: the next-oldest clip is evicted (file AND row gone), bringing total
-        // to 1.2 GiB then under would still need one more — the second AND third are evicted to reach cap.
+        // The pass was not aborted: the next clips are evicted (file AND row gone) to reach the cap.
         assertThat(clips.findById(second)).isEmpty();
         assertThat(Files.exists(videoDir.resolve("c-second.mp4"))).isFalse();
         assertThat(clips.findById(third)).isEmpty();
         assertThat(Files.exists(videoDir.resolve("c-third.mp4"))).isFalse();
-        // Two clips freed 1.2 GiB total (the failed one contributed nothing).
+        // Two clips freed 1.2 GiB total (the failed one contributed nothing to freed).
         assertThat(result.freedBytes()).isEqualTo(2 * unit);
+    }
+
+    @Test
+    void oneClipFileUndeletableKeepsRowAndCreditsNothingWhileOtherClipsAreEvicted() throws Exception {
+        // Cap 1 GiB. Three non-starred clips over a parent match with no VOD file. The OLDEST clip's .mp4
+        // is UNDELETABLE (its video_path is a non-empty directory, so deleteFileQuietly returns false) but
+        // its DB delete would succeed. The sweep must NOT credit freed/total for that clip and must KEEP
+        // its row (so the row still references the intact file, no permanent leak — CrashRecoveryRunner's
+        // non-recursive scan never reclaims a clips/ leftover). The failure must not abort the pass: the
+        // next real clip is still evicted until under cap. Against the buggy row-before-file code (row
+        // deleted first, unlink result ignored, accounting unconditional) the row would be gone and the
+        // file leaked — so this test fails there and passes after the fix.
+        settings.get().retentionCapGb = 1;
+        long gib = 1024L * 1024 * 1024;
+        long unit = 6 * gib / 10;
+
+        long match = matches.insert(new NewMatch(
+                null, "match", "enriched", "puck",
+                1, 2, 3, 400, 500, 10000, 120,
+                "win", 7, 22, null, null, 1800,
+                1_000L, null, null, null, false, 1_000L, null));
+
+        // Oldest clip: video_path points at a NON-EMPTY directory named like an .mp4, so its parent
+        // (videoDir) is reachable but Files.deleteIfExists throws DirectoryNotEmptyException — the exact
+        // "undeletable file on a present drive" the fix must survive without leaking or over-crediting.
+        long undeletable = seedClipWithUndeletableVideo(match, "c-undeletable.mp4", 100L);
+        // Two real, deletable clips, each 0.6 GiB.
+        long second = seedClip(match, "c-second.mp4", "c-second.jpg", unit, 200L, false);
+        long third = seedClip(match, "c-third.mp4", "c-third.jpg", unit, 300L, false);
+
+        RetentionSweeper.SweepResult result = sweeper.sweep(null);
+
+        // The undeletable clip's row is KEPT (its file is still referenced, not orphaned) and its
+        // undeletable .mp4 directory survives on disk.
+        assertThat(clips.findById(undeletable)).isPresent();
+        assertThat(Files.isDirectory(videoDir.resolve("c-undeletable.mp4"))).isTrue();
+        // The pass was not aborted: the next real clip is evicted (file AND row gone), bringing the 1.2 GiB
+        // budget under the 1 GiB cap. The undeletable clip contributed nothing to that budget (its dir
+        // reports size 0), so exactly this one real eviction is needed and the newest clip survives.
+        assertThat(clips.findById(second)).isEmpty();
+        assertThat(Files.exists(videoDir.resolve("c-second.mp4"))).isFalse();
+        assertThat(clips.findById(third)).isPresent();
+        assertThat(Files.exists(videoDir.resolve("c-third.mp4"))).isTrue();
+        // freed counts only the successfully-unlinked clip; the undeletable one is NOT credited.
+        assertThat(result.freedBytes()).isEqualTo(unit);
     }
 
     @Test
@@ -564,6 +610,25 @@ class RetentionSweeperTest {
             clips.setStarred(id, true);
         }
         return id;
+    }
+
+    /**
+     * Seeds a ready clip whose {@code video_path} is UNDELETABLE on a present drive: it points at a
+     * NON-EMPTY directory (named like an .mp4) under {@code videoDir}, so {@link
+     * java.nio.file.Files#deleteIfExists} throws {@code DirectoryNotEmptyException} and the sweeper's
+     * {@code deleteFileQuietly} returns false — while the parent (videoDir) stays reachable so the sweep
+     * reaches the file-op path rather than short-circuiting on {@code driveReachable}. The thumb is a
+     * normal deletable file, isolating the undeletable-video behavior. Returns the clip id.
+     */
+    private long seedClipWithUndeletableVideo(long parentMatchId, String video, long createdAt)
+            throws Exception {
+        Path videoPath = videoDir.resolve(video);
+        Files.createDirectories(videoPath);
+        Files.writeString(videoPath.resolve("inner"), "x"); // non-empty -> deletion fails
+        Path thumbPath = videoDir.resolve(video + ".jpg");
+        Files.createFile(thumbPath);
+        return clips.insert(parentMatchId, "manual", null, 0.0, 10.0, null,
+                videoPath.toString(), thumbPath.toString(), null, "ready", null, createdAt);
     }
 
     private static void createSparseFile(Path path, long sizeBytes) throws Exception {
