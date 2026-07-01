@@ -201,20 +201,36 @@ public class RetentionSweeper {
                 }
                 try {
                     long clipSize = clipSizeBytes(clip);
-                    // Delete the ROW first (mirroring the match path's idempotency), THEN unlink the
-                    // files: a mid-delete SQLITE_BUSY throws before any file is touched, so the row can
-                    // never be orphaned pointing at a now-deleted file. Once the row is gone the files
-                    // are unreferenced, and a failed unlink is a harmless leftover the orphan scan
-                    // reclaims — so file deletion is not gated the way the VOD path gates on its video.
+                    // File first, THEN row — mirroring the VOD path's discipline. A clip's row is deleted
+                    // outright (unlike a match, which keeps its row), so if we dropped the row first and the
+                    // unlink then failed (locked file, or a crash between the autocommitted delete and the
+                    // unlink) the .mp4 would leak permanently: no row references it, and CrashRecoveryRunner's
+                    // non-recursive active-drive scan never descends into videoDir/clips/ to reclaim it. Its
+                    // bytes would also drop out of the row-based reachableClipBytes budget, under-counting the
+                    // cap while `freed` over-reported. So unlink first and gate the row-delete + accounting on
+                    // the .mp4 actually being gone.
+                    boolean videoGone = deleteFileQuietly(clip.videoPath());
+                    boolean thumbGone = deleteFileQuietly(clip.thumbPath());
+                    if (!videoGone) {
+                        // Undeletable .mp4: keep the row (so it still references the file) and credit nothing.
+                        // The next sweep retries — no leak, no budget drift.
+                        log.warn("Retention sweep left clip {} intact because video deletion failed", clip.id());
+                        continue;
+                    }
+                    if (!thumbGone) {
+                        log.warn(
+                                "Retention sweep could not delete thumbnail for clip {}; deleting clip row anyway",
+                                clip.id());
+                    }
                     clips.delete(clip.id());
-                    deleteFileQuietly(clip.videoPath());
-                    deleteFileQuietly(clip.thumbPath());
                     total -= clipSize;
                     freed += clipSize;
                     clipsDeleted++;
                 } catch (RuntimeException e) {
                     // One clip failing (e.g. a SQLITE_BUSY on delete) must not abort the whole pass:
-                    // log and keep evicting the remaining clips so the budget is still enforced.
+                    // log and keep evicting the remaining clips so the budget is still enforced. The .mp4
+                    // is already gone at this point, so the still-present row is idempotent — the next
+                    // sweep's deleteFileQuietly treats the gone file as removed and re-deletes the row.
                     log.warn("Retention sweep could not evict clip {}: {}", clip.id(), e.toString());
                 }
             }
