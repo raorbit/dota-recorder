@@ -49,6 +49,19 @@ public class CrashRecoveryRunner implements ApplicationRunner {
     /** Slack on the recording-window bounds when linking a crashed recording's file by mtime. */
     private static final long LINK_WINDOW_GRACE_MS = 5L * 60_000L;
 
+    /**
+     * Quiescence window guarding orphan ADOPTION: a candidate whose last-modified time is within this
+     * of now is skipped rather than imported. Recovery runs at {@code @Order(1)} concurrently with
+     * Tomcat/GSI ingest and the OBS scheduler (both start at {@code finishRefresh()}), so a recording
+     * can arm mid-recovery. OBS reveals the path only on StopRecord, so that live {@code .mp4} has a
+     * null-path journal row and looks unreferenced — importing it would adopt the still-being-written
+     * file (later duplicated by finalize and exposed to a retention delete of the shared VOD). A file a
+     * live recorder is actively growing has a fresh mtime; a genuine crash orphan is stale, so skipping
+     * fresh-mtime files leaves the live one for {@code MatchFsm} to finalize while still reclaiming true
+     * orphans on the next boot. Self-contained (mtime only), resolution/OBS-state agnostic.
+     */
+    private static final long QUIESCENCE_MS = 2L * 60_000L;
+
     private final RecordingSessionRepository journal;
     private final MatchRepository matches;
     private final ClipRepository clips;
@@ -330,12 +343,26 @@ public class CrashRecoveryRunner implements ApplicationRunner {
                         matches.updateVideoPath(matchId, file.toString(), thumb);
                         log.warn("Re-linked stranded archive recording {} to match {} (interrupted move)",
                                 file, matchId);
-                    } else {
+                        return;
+                    }
+                    // The row is intact, so this id-prefixed file is only redundant if it is genuinely
+                    // this match's move residue — never delete a coincidental prefix collision (e.g. a
+                    // user-placed "12-grand-final.mp4" against match 12). Require it to match the
+                    // archiver's exact naming AND be attributable before reclaiming it; otherwise fall
+                    // through to import (mirrors the clip path's policy of never destroying an
+                    // unattributable file).
+                    if (isGenuineMoveResidue(file, matchId, row.get())) {
                         deleteQuietly(file);
                         log.warn("Removed redundant archive move-leftover {} (match {} already intact)",
                                 file, matchId);
+                        return;
                     }
-                    return;
+                    log.warn(
+                            "Archive file {} shares match {}'s id prefix but isn't attributable move"
+                                + " residue; importing rather than deleting",
+                            file,
+                            matchId);
+                    // fall through to importOrphanVod below
                 }
             }
             importOrphanVod(file);
@@ -343,6 +370,56 @@ public class CrashRecoveryRunner implements ApplicationRunner {
             // One bad leftover must not abort the rest of the scan.
             log.warn("Could not recover archive leftover {}: {}", file, e.toString());
         }
+    }
+
+    /**
+     * True when {@code file} on an archive drive is provably this intact match's move residue, so it is
+     * safe to delete. The archiver ({@link dev.dotarec.retention.RecordingArchiver}) names a relocated
+     * VOD {@code <matchId>-<original file name>} and, on the cross-store copy path, verifies the copy's
+     * byte count equals the source's. We mirror both:
+     *
+     * <ul>
+     *   <li><b>naming</b> — the remainder after the {@code <matchId>-} prefix must equal the intact
+     *       row's own video file name (the {@code src.getFileName()} the archiver prefixed);</li>
+     *   <li><b>attribution</b> — the leftover's on-disk size must equal the intact row's current file
+     *       size (an interrupted move leaves a full-size duplicate of the same bytes).</li>
+     * </ul>
+     *
+     * Both must hold. A coincidental id-prefix collision (a user-placed file whose name/size differs)
+     * fails one of these and is imported rather than destroyed.
+     */
+    private boolean isGenuineMoveResidue(Path file, long matchId, MatchSummary intactRow) {
+        String remainder = leftoverRemainder(file.getFileName().toString(), matchId);
+        Path rowVideo = safePath(intactRow.videoPath());
+        if (remainder == null || rowVideo == null) {
+            return false;
+        }
+        // Naming: the archiver prefixed the row's own basename; anything else isn't its residue.
+        if (!remainder.equals(rowVideo.getFileName().toString())) {
+            return false;
+        }
+        // Attribution: same bytes as the intact copy (the archiver verifies copy size == source size).
+        try {
+            return Files.size(file) == Files.size(rowVideo);
+        } catch (Exception e) {
+            // Can't confirm the sizes match -> don't destroy the file; let it be imported.
+            log.warn("Could not compare sizes for archive leftover {} vs match {}: {}",
+                    file, matchId, e.toString());
+            return false;
+        }
+    }
+
+    /**
+     * The part of {@code fileName} after the archiver's {@code <matchId>-} prefix, or null when the name
+     * doesn't carry exactly that prefix (a defensive re-check even though the caller already parsed the
+     * id — this ties the delete decision to the exact prefix string, not just a leading-digit match).
+     */
+    private static String leftoverRemainder(String fileName, long matchId) {
+        String prefix = matchId + "-";
+        if (!fileName.startsWith(prefix) || fileName.length() == prefix.length()) {
+            return null;
+        }
+        return fileName.substring(prefix.length());
     }
 
     /**
@@ -567,6 +644,18 @@ public class CrashRecoveryRunner implements ApplicationRunner {
                 return;
             }
             long playedAt = Files.getLastModifiedTime(path).toMillis();
+            // Quiescence guard: a recording that armed during recovery is a live .mp4 OBS is still
+            // writing (its journal row has a null path, so it looks unreferenced). Adopting it would
+            // steal the in-flight file from MatchFsm. A live file has a fresh mtime; skip it and let the
+            // next boot reclaim it if it truly turns out to be an orphan.
+            if (System.currentTimeMillis() - playedAt < QUIESCENCE_MS) {
+                log.warn(
+                        "Skipping orphan recording {} as too-recent (mtime within {}ms; may be a live"
+                            + " recording)",
+                        path,
+                        QUIESCENCE_MS);
+                return;
+            }
             long id =
                     matches.insert(
                             new NewMatch(
