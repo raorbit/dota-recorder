@@ -25,8 +25,27 @@ import java.util.Locale;
  * with a {@code Content-Range} (Chromium's seek path), an absent header yields 200 with
  * {@code Accept-Ranges: bytes} and the full body, and an unsatisfiable range yields 416. The body is
  * streamed in 64KB chunks via {@link StreamingResponseBody} (no whole-file buffering).
+ *
+ * <p><b>Per-response window.</b> A {@code <video>} seek sends an <em>open-ended</em>
+ * {@code Range: bytes=N-}. Answering that literally would stream from {@code N} to EOF — the entire
+ * multi-GB remainder of a VOD — in one response. Chromium reads only enough to fill its forward
+ * buffer, then stops reading while holding the connection open (HTTP flow control), so the writer
+ * thread blocks in {@code out.write()} with the socket send buffer full. Rapid seeks (arrow-key
+ * scrubbing) pile these stalled responses up against Chromium's ~6-connections-per-origin limit; the
+ * next seek can't get a connection and playback freezes until the stalled writes hit Tomcat's async
+ * timeout. So an open-ended (or oversized) range is clamped to {@link #MAX_STREAM_CHUNK} bytes: the
+ * response completes promptly (fits in socket buffers, frees the thread/connection), and the browser
+ * fetches the next window when its buffer drains. An explicit bounded range already within the window
+ * is served exactly (the clamp is a no-op).
  */
 final class VideoStreamSupport {
+
+    /**
+     * Maximum bytes served per 206 response. Bounds how long a writer thread is held (and thus how
+     * many connections a burst of seeks can tie up) while keeping the request count over the loopback
+     * bridge sane. Chromium re-requests the next window as its buffer drains.
+     */
+    static final long MAX_STREAM_CHUNK = 4L * 1024 * 1024;
 
     private VideoStreamSupport() {
     }
@@ -79,6 +98,15 @@ final class VideoStreamSupport {
      * controller, not here).
      */
     static ResponseEntity<StreamingResponseBody> stream(Path file, HttpHeaders headers) {
+        return stream(file, headers, MAX_STREAM_CHUNK);
+    }
+
+    /**
+     * Range streaming with an explicit per-response window (bytes). Exposed for tests to exercise the
+     * open-ended clamp without a multi-megabyte fixture; production callers use the {@code MAX_STREAM_CHUNK}
+     * default via {@link #stream(Path, HttpHeaders)}.
+     */
+    static ResponseEntity<StreamingResponseBody> stream(Path file, HttpHeaders headers, long maxChunk) {
         MediaType type = contentType(file);
         long length;
         try {
@@ -117,6 +145,12 @@ final class VideoStreamSupport {
                     .header(HttpHeaders.CONTENT_RANGE, "bytes */" + length)
                     .build();
         }
+        // Cap the served slice to one window so an open-ended seek range (bytes=N-, i.e. end=length-1)
+        // doesn't stream the whole multi-GB remainder in a single stalling response. A bounded range
+        // already inside the window is unaffected (min is a no-op); the browser re-requests the next
+        // window as its buffer drains. Content-Range still reports the ACTUAL served slice, so the
+        // client knows more remains and keeps seeking forward.
+        end = Math.min(end, start + maxChunk - 1);
         long regionLen = end - start + 1;
         return ResponseEntity.status(HttpStatus.PARTIAL_CONTENT)
                 .contentType(type)
