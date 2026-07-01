@@ -95,6 +95,12 @@ public class MatchFsm {
      * overridable so a test can pin the anchor to the same stamps its synthetic frames carry. */
     private final LongSupplier nanoClock;
 
+    /** Wall clock ({@code System::currentTimeMillis} in production) used for storage/display stamps
+     * only ({@code played_at}, {@code created_at}, journal, pause drain) -- NEVER for the finalize
+     * duration, which shares the monotonic {@link #nanoClock} with the marker offsets. Overridable so
+     * a test can step it backward and prove duration/offsets don't follow a wall-clock step. */
+    private final LongSupplier wallClock;
+
     private volatile MatchState state = MatchState.IDLE;
     private RecordingSession session;
 
@@ -120,10 +126,12 @@ public class MatchFsm {
             ClipService clipService,
             SettingsStore settings) {
         this(obs, thumbnails, tagger, matches, markers, pauses, journal, events, dataSource,
-                clipService, settings, System::nanoTime);
+                clipService, settings, System::nanoTime, System::currentTimeMillis);
     }
 
-    // Test seam: injects the monotonic clock used for the record-confirmed offset anchor.
+    // Test seam: injects the monotonic clock used for the record-confirmed offset anchor. Defaults the
+    // wall clock to the production source so existing callers that only override the nano clock are
+    // unaffected.
     MatchFsm(
             ObsRecorder obs,
             ThumbnailCapturer thumbnails,
@@ -137,6 +145,26 @@ public class MatchFsm {
             ClipService clipService,
             SettingsStore settings,
             LongSupplier nanoClock) {
+        this(obs, thumbnails, tagger, matches, markers, pauses, journal, events, dataSource,
+                clipService, settings, nanoClock, System::currentTimeMillis);
+    }
+
+    // Test seam: injects BOTH the monotonic offset-anchor clock and the wall clock, so a test can step
+    // the wall clock backward and prove the finalize duration/marker offsets follow the monotonic clock.
+    MatchFsm(
+            ObsRecorder obs,
+            ThumbnailCapturer thumbnails,
+            EventTagger tagger,
+            MatchRepository matches,
+            MarkerRepository markers,
+            PauseRepository pauses,
+            RecordingSessionRepository journal,
+            EventPublisher events,
+            DataSource dataSource,
+            ClipService clipService,
+            SettingsStore settings,
+            LongSupplier nanoClock,
+            LongSupplier wallClock) {
         this.obs = obs;
         this.thumbnails = thumbnails;
         this.tagger = tagger;
@@ -149,6 +177,7 @@ public class MatchFsm {
         this.clipService = clipService;
         this.settings = settings;
         this.nanoClock = nanoClock;
+        this.wallClock = wallClock;
     }
 
     public MatchState getState() {
@@ -308,8 +337,16 @@ public class MatchFsm {
             return;
         }
         GsiFrame last = s.getLastFrame();
+        // Pass the session's persistent tagger state so death detection survives a counter/alive desync
+        // across adjacent ticks and a single-frame player-block dropout on the death tick (the tagger is
+        // no longer a pure prev->curr diff for deaths -- see EventTagger).
         List<PendingMarker> detected =
-                tagger.diff(last, frame, s.getRecordConfirmedNanos(), LIVE_DURATION_CLAMP);
+                tagger.diff(
+                        last,
+                        frame,
+                        s.getTaggerState(),
+                        s.getRecordConfirmedNanos(),
+                        LIVE_DURATION_CLAMP);
         if (!detected.isEmpty()) {
             s.addMarkers(detected);
             for (PendingMarker marker : detected) {
@@ -371,10 +408,16 @@ public class MatchFsm {
                         e.toString());
             }
 
-            long now = System.currentTimeMillis();
-            long anchor = s.getRecordConfirmedWallMs();
-            // Duration from the confirmed start to stop; clamp to >= 0.
-            int durationS = (int) Math.max(0, (now - anchor) / 1000);
+            long now = wallClock.getAsLong();
+            // Finalize duration MUST come from the MONOTONIC clock, the same anchor the marker offsets
+            // are measured against ({@code getRecordConfirmedNanos} / VideoOffsetCalculator) -- NOT the
+            // wall clock. durationS is the clamp upper bound for every marker (persistFinalized +
+            // maybeAutoClipRampages) and the stored duration_s, so if it were wall-derived a backward
+            // NTP/clock step during the match would shrink it and clamp late markers to the wrong seek
+            // point while the offsets themselves stayed monotonic. The wall stamps below (played_at,
+            // recordStartedWallMs) are storage/display only.
+            int durationS =
+                    (int) Math.max(0, (nanoClock.getAsLong() - s.getRecordConfirmedNanos()) / 1_000_000_000L);
             Long fileSizeBytes = fileSizeOrNull(videoPath);
             updateJournalSnapshot(s, "stopping", videoPath, thumbPath);
 

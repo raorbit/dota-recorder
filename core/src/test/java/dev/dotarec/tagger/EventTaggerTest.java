@@ -3,7 +3,9 @@ package dev.dotarec.tagger;
 import static dev.dotarec.gsi.GsiFrames.frame;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import dev.dotarec.fsm.RecordingSession.TaggerState;
 import dev.dotarec.gsi.GsiFrame;
+import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 
@@ -152,5 +154,84 @@ class EventTaggerTest {
         GsiFrame before = frame().mono(ANCHOR - nanos(5_000L)).kills(1).build();
         assertThat(tagger.diff(prev, before, ANCHOR, DURATION).get(0).videoOffsetS())
                 .isZero();
+    }
+
+    // ---- Finding B: one death across a counter/alive straddle on ADJACENT ticks ----------------
+
+    @Test
+    void deathEdgeLeadsCounterOnAdjacentTick_emitsExactlyOneDeath() {
+        // The alive true->false edge lands one tick BEFORE the deaths counter catches up. A per-tick
+        // "same-tick only" suppression would let both paths fire and double-count; the episode dedupe
+        // must collapse them to a single death marker.
+        GsiFrame f0 = frame().wall(ANCHOR + 1_000L).deaths(1).alive(true).build();
+        GsiFrame f1 = frame().wall(ANCHOR + 1_100L).deaths(1).alive(false).build(); // edge, counter lags
+        GsiFrame f2 = frame().wall(ANCHOR + 1_200L).deaths(2).alive(false).build(); // counter catches up
+
+        List<PendingMarker> all = replay(f0, f1, f2);
+
+        assertThat(all).filteredOn(m -> m.type().equals("death"))
+                .as("edge-leads-counter across adjacent ticks is ONE death").hasSize(1);
+    }
+
+    @Test
+    void deathCounterLeadsEdgeOnAdjacentTick_emitsExactlyOneDeath() {
+        // Symmetric: the deaths counter increments while alive is STILL true, and the alive->dead flip
+        // arrives on the next tick. The counter emits the death; the later falling edge describes the
+        // SAME death and must be suppressed (the episode is still open -- no respawn in between).
+        GsiFrame f0 = frame().wall(ANCHOR + 2_000L).deaths(1).alive(true).build();
+        GsiFrame f1 = frame().wall(ANCHOR + 2_100L).deaths(2).alive(true).build();  // counter, alive lags
+        GsiFrame f2 = frame().wall(ANCHOR + 2_200L).deaths(2).alive(false).build(); // alive flips dead
+
+        List<PendingMarker> all = replay(f0, f1, f2);
+
+        assertThat(all).filteredOn(m -> m.type().equals("death"))
+                .as("counter-leads-edge across adjacent ticks is ONE death").hasSize(1);
+    }
+
+    @Test
+    void twoSeparateDeathsWithRespawnBetween_emitTwoDeaths() {
+        // A respawn (dead->alive rising edge) closes the episode so the SECOND death emits again --
+        // the dedupe latch must not permanently swallow later deaths.
+        GsiFrame f0 = frame().wall(ANCHOR + 3_000L).deaths(1).alive(true).build();
+        GsiFrame f1 = frame().wall(ANCHOR + 3_100L).deaths(2).alive(false).build(); // first death
+        GsiFrame f2 = frame().wall(ANCHOR + 3_200L).deaths(2).alive(true).build();  // respawn
+        GsiFrame f3 = frame().wall(ANCHOR + 3_300L).deaths(3).alive(false).build(); // second death
+
+        List<PendingMarker> all = replay(f0, f1, f2, f3);
+
+        assertThat(all).filteredOn(m -> m.type().equals("death")).hasSize(2);
+    }
+
+    // ---- Finding C: a death during a single-frame player-block dropout is not lost -------------
+
+    @Test
+    void deathDuringSingleFrameBlockDropout_isEmittedWhenBlockReturns() {
+        // The player+hero blocks drop on the EXACT death tick (a heartbeat/reconnect zeroes the
+        // counters). Diffing the returning frame against the raw absent prev would measure the death
+        // delta against a zeroed baseline and drop it. Diffing against the last-good present counters
+        // instead emits it when the block returns.
+        GsiFrame present1 =
+                frame().wall(ANCHOR + 4_000L).deaths(1).alive(true).heroPresent(true)
+                        .playerPresent(true).build();
+        GsiFrame heartbeat = frame().wall(ANCHOR + 4_100L).noHero().noPlayer().build();
+        GsiFrame present2 =
+                frame().wall(ANCHOR + 4_200L).deaths(2).alive(false).heroPresent(true)
+                        .playerPresent(true).build();
+
+        List<PendingMarker> all = replay(present1, heartbeat, present2);
+
+        assertThat(all).filteredOn(m -> m.type().equals("death"))
+                .as("a death on a block-dropout tick is still emitted when the block returns")
+                .hasSize(1);
+    }
+
+    /** Replays frames through ONE shared TaggerState (as the FSM does) and collects every marker. */
+    private List<PendingMarker> replay(GsiFrame... frames) {
+        TaggerState state = new TaggerState();
+        List<PendingMarker> all = new ArrayList<>();
+        for (int i = 1; i < frames.length; i++) {
+            all.addAll(tagger.diff(frames[i - 1], frames[i], state, ANCHOR, DURATION));
+        }
+        return all;
     }
 }

@@ -32,6 +32,14 @@ public class RecordingSession {
     /** The most recent frame the tagger diffs the next one against. */
     private GsiFrame lastFrame;
 
+    /**
+     * Small per-session working state the {@code EventTagger} carries across ticks so death detection
+     * survives a counter/alive desync across ADJACENT frames and a single-frame player-block dropout on
+     * the exact death tick. It is NOT a static: it lives here so the FSM's synchronized {@code onFrame}
+     * is the only writer and each recording gets a fresh copy. See {@code EventTagger} for the rules.
+     */
+    private final TaggerState taggerState = new TaggerState();
+
     /** Markers detected live, flushed to {@code markers} at finalize. */
     private final List<PendingMarker> markers = new ArrayList<>();
 
@@ -116,6 +124,11 @@ public class RecordingSession {
 
     public void setLastFrame(GsiFrame lastFrame) {
         this.lastFrame = lastFrame;
+    }
+
+    /** The tagger's cross-tick working state (last-good counters + death-episode dedupe). */
+    public TaggerState getTaggerState() {
+        return taggerState;
     }
 
     public List<PendingMarker> getMarkers() {
@@ -236,5 +249,74 @@ public class RecordingSession {
      * open mid-recording; {@link #drainPauses(long)} guarantees it is non-null before persistence.
      */
     public record PauseSpanBuffer(long startWall, Long endWall) {
+    }
+
+    /**
+     * Mutable per-session state the {@code EventTagger} threads across ticks to make death detection
+     * robust to two failure modes the stateless raw prev-&gt;curr diff misses:
+     *
+     * <ul>
+     *   <li><b>Last-good present counters</b> ({@link #lastGoodDeaths} etc.): the K/D/A from the last
+     *       frame that actually HAD the player block. A heartbeat/reconnect zeroes the block's counters
+     *       (GsiPayload.toFrame), so diffing a returning frame against the raw absent prev would either
+     *       misread the counters or, worse, drop a death that happened on the dropout tick. Diffing
+     *       against these last-good values instead emits that death when the block returns. Seeded to
+     *       {@code -1} = "no good frame seen yet" so the first real present frame doesn't diff against a
+     *       phantom 0/0/0 (which would burst-emit the full running totals as markers).</li>
+     *   <li><b>Death-episode dedupe</b> ({@link #deathEmittedThisEpisode}): the deaths counter and the
+     *       {@code alive} true-&gt;false edge describe the SAME death but can land on ADJACENT ticks; a
+     *       naive per-tick "same-tick only" suppression then double-counts. This latch records that a
+     *       death marker was already emitted for the current dead episode and is reset the next time the
+     *       hero is observed alive/spawns, so one death yields exactly one marker regardless of which
+     *       signal (counter or edge) arrives first or how far apart.</li>
+     * </ul>
+     */
+    public static final class TaggerState {
+        /** Sentinel: no player-present frame observed yet, so the first one must not diff against 0/0/0. */
+        static final int UNSEEN = -1;
+
+        private int lastGoodKills = UNSEEN;
+        private int lastGoodDeaths = UNSEEN;
+        private int lastGoodAssists = UNSEEN;
+
+        /** True once THIS dead episode has already produced a death marker; reset on the next alive. */
+        private boolean deathEmittedThisEpisode;
+
+        public int lastGoodKills() {
+            return lastGoodKills;
+        }
+
+        public int lastGoodDeaths() {
+            return lastGoodDeaths;
+        }
+
+        public int lastGoodAssists() {
+            return lastGoodAssists;
+        }
+
+        /** True when no player-present frame has been observed yet (counters are still the sentinel). */
+        public boolean hasNoGoodCounters() {
+            return lastGoodKills == UNSEEN;
+        }
+
+        /** Records the K/D/A from a frame that HAD the player block as the new last-good baseline. */
+        public void updateLastGoodCounters(int kills, int deaths, int assists) {
+            this.lastGoodKills = kills;
+            this.lastGoodDeaths = deaths;
+            this.lastGoodAssists = assists;
+        }
+
+        public boolean deathEmittedThisEpisode() {
+            return deathEmittedThisEpisode;
+        }
+
+        public void markDeathEmittedThisEpisode() {
+            this.deathEmittedThisEpisode = true;
+        }
+
+        /** Clears the dedupe latch so a NEW dead episode can emit again (called when the hero is alive). */
+        public void resetDeathEpisode() {
+            this.deathEmittedThisEpisode = false;
+        }
     }
 }
