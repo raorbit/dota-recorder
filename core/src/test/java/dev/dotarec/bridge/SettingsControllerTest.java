@@ -3,6 +3,7 @@ package dev.dotarec.bridge;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -35,6 +36,7 @@ class SettingsControllerTest {
     private final ObjectMapper mapper = new ObjectMapper();
 
     private SettingsStore store;
+    private ObsConfigWriter obsConfigWriter;
     private SettingsController controller;
 
     @BeforeEach
@@ -45,9 +47,9 @@ class SettingsControllerTest {
         // OBS not connected in unit tests: reconcileAudioOnDemand is a no-op, so the PUT never 500s.
         ObsController obsController = mock(ObsController.class);
         when(obsController.ensureConnected()).thenReturn(false);
-        // applyProfile() is a best-effort profile re-write after a PUT; mock it so the test never
-        // touches the OBS dir on disk and the swallowed try/catch is exercised cleanly.
-        ObsConfigWriter obsConfigWriter = mock(ObsConfigWriter.class);
+        // applyProfile() re-writes basic.ini after a PUT; mock it so the happy-path test never touches
+        // the OBS dir on disk. Individual tests can stub it to throw to exercise the failure surfacing.
+        obsConfigWriter = mock(ObsConfigWriter.class);
         controller = new SettingsController(store, obsController, obsConfigWriter);
     }
 
@@ -113,6 +115,30 @@ class SettingsControllerTest {
         assertThat(store.get().fps).isEqualTo(30);
         assertThat(store.get().quality).isEqualTo("Stream");
         assertThat(store.get().format).isEqualTo("mkv");
+    }
+
+    @Test
+    void putSettings_surfacesProfileWriteFailure() {
+        // A failed basic.ini re-write must NOT be swallowed at debug and return 200: that would leave a
+        // stale/broken OBS profile silently, so OBS never emits OUTPUT_STARTED for the rest of the
+        // session. Surface it as a 500 instead. The settings are still persisted (the write happened
+        // before applyProfile), so a retry or the next boot picks them up.
+        doThrow(new RuntimeException("disk full")).when(obsConfigWriter).applyProfile();
+
+        assertThatThrownBy(
+                        () ->
+                                controller.putSettings(
+                                        new SettingsPatch(
+                                                "1280x720", null, null, null, null, null, null, null,
+                                                null, null, null, null, null)))
+                .isInstanceOfSatisfying(
+                        ResponseStatusException.class,
+                        e ->
+                                assertThat(e.getStatusCode())
+                                        .isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR));
+
+        // The settings were persisted before the profile re-write was attempted.
+        assertThat(store.get().resolution).isEqualTo("1280x720");
     }
 
     @Test

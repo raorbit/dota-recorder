@@ -1,11 +1,13 @@
 package dev.dotarec.obs.setup;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.dotarec.config.AppPaths;
 import dev.dotarec.config.SettingsStore;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -240,6 +242,58 @@ class ObsConfigWriterTest {
         assertThat(layout.obs64()).doesNotExist();
         assertThat(layout.websocketConfig()).exists();
         assertThat(layout.profileIni()).exists();
+    }
+
+    @Test
+    void profileWriteFailureLeavesPreExistingIniIntact(@TempDir Path dir) throws Exception {
+        AppPaths paths = paths(dir);
+        SettingsStore settings = new SettingsStore(paths);
+        ObsConfigWriter writer = writer(paths, settings, "", "0");
+        // Seed a good basic.ini once.
+        writer.configure();
+        Path ini = new ObsLayout(paths.obsDir()).profileIni();
+        String original = Files.readString(ini);
+        assertThat(original).contains("Mode=Simple");
+
+        // Force the next atomic write to fail: occupy the sibling ".tmp" path with a DIRECTORY so the
+        // temp-file write throws before the target is ever touched. The pre-existing basic.ini must be
+        // left byte-for-byte intact (never truncated), and the failure must surface as an exception.
+        Path tmp = ini.resolveSibling(ini.getFileName() + ".tmp");
+        Files.createDirectory(tmp);
+        settings.update(
+                s -> {
+                    s.quality = "Lossless";
+                    return s;
+                });
+        assertThatThrownBy(writer::applyProfile).isInstanceOf(UncheckedIOException.class);
+
+        // Atomicity: the old complete file survives; the failed write did not truncate or partially
+        // apply the new "Lossless" quality.
+        assertThat(Files.readString(ini)).isEqualTo(original);
+    }
+
+    @Test
+    void videoDirContainingATokenIsWrittenVerbatimNotMangled(@TempDir Path dir) throws Exception {
+        AppPaths paths = paths(dir);
+        SettingsStore settings = new SettingsStore(paths);
+        // A videoDir that literally contains another template token (@FPS@). With an ordered chain of
+        // String.replace (@REC_PATH@ substituted first, @FPS@ after) the inserted "@FPS@" in the path
+        // would be re-scanned and corrupted into the fps value. The single-pass substitution must write
+        // the path verbatim.
+        settings.update(
+                s -> {
+                    s.videoDir = "D:\\clips\\@FPS@\\dota";
+                    s.fps = 30;
+                    return s;
+                });
+        writer(paths, settings, "", "0").configure();
+
+        Path ini = new ObsLayout(paths.obsDir()).profileIni();
+        String content = Files.readString(ini);
+        // The @FPS@ inside the path is preserved (forward-slashed like every FilePath), NOT rewritten
+        // to "30"; the real FPSCommon token still resolved to 30.
+        assertThat(content).contains("FilePath=D:/clips/@FPS@/dota");
+        assertThat(content).contains("FPSCommon=30");
     }
 
     @Test
