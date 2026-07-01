@@ -546,10 +546,11 @@ public class ObsController implements ObsRecorder {
      * source kind counts — a user who wires up only a mic or only application capture still passes
      * readiness — which is why this replaces the old GetSpecialInputs desktop1/desktop2 check.
      *
-     * <p>Called only from {@link #isReady()}, so it uses the short {@link #READINESS_TIMEOUT_MS} and
-     * probes AT MOST ONE app-owned input's mute state: caps the readiness wall time (a wedged OBS with
-     * many owned inputs otherwise multiplies that timeout) while still catching the "one source, muted"
-     * silent-VOD case that motivates the gate.
+     * <p>Called only from {@link #isReady()}: it scans ALL app-owned inputs and passes readiness as
+     * soon as ANY one of them is live (unmuted). This must be order-independent -- getInputList's order
+     * is unspecified, so probing only the first owned input would fail a valid default config (Dota
+     * unmuted, mic + desktop muted) whenever a muted input happened to be enumerated first. Each probe
+     * uses the short {@link #READINESS_TIMEOUT_MS}, so a typical few-input config stays well-bounded.
      */
     private boolean hasDesktopAudio(OBSRemoteController c) {
         GetInputListResponse inputs = c.getInputList(null, READINESS_TIMEOUT_MS);
@@ -558,10 +559,10 @@ public class ObsController implements ObsRecorder {
         }
         for (Input input : inputs.getInputs()) {
             String name = input.getInputName();
-            if (name != null && name.startsWith(ObsSceneConfigurer.OWNED_PREFIX)) {
-                // Probe only the first app-owned input, then decide: bounds isReady()'s total wall
-                // time to two short readiness probes (scene + one mute) regardless of input count.
-                return isAudioInputLive(c, name);
+            if (name != null
+                    && name.startsWith(ObsSceneConfigurer.OWNED_PREFIX)
+                    && isAudioInputLive(c, name)) {
+                return true;
             }
         }
         return false;

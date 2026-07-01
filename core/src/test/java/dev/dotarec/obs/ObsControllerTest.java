@@ -15,10 +15,12 @@ import dev.dotarec.config.SettingsStore;
 import dev.dotarec.config.SettingsStore.AudioSource;
 import io.obswebsocket.community.client.OBSRemoteController;
 import io.obswebsocket.community.client.message.response.inputs.GetInputListResponse;
+import io.obswebsocket.community.client.message.response.inputs.GetInputMuteResponse;
 import io.obswebsocket.community.client.message.response.record.GetRecordStatusResponse;
 import io.obswebsocket.community.client.message.response.record.StartRecordResponse;
 import io.obswebsocket.community.client.message.response.record.StopRecordResponse;
 import io.obswebsocket.community.client.message.response.scenes.GetCurrentProgramSceneResponse;
+import io.obswebsocket.community.client.model.Input;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import org.junit.jupiter.api.Test;
@@ -219,6 +221,60 @@ class ObsControllerTest {
         assertThat(controller.isReady())
                 .as("configured audio with no live input must NOT be ready")
                 .isFalse();
+    }
+
+    @Test
+    void isReady_withMutedOwnedInputBeforeLiveOwnedInput_isReadyRegardlessOfEnumerationOrder() {
+        // Regression guard (PR #47): hasDesktopAudio must scan ALL app-owned inputs and pass when ANY
+        // is live, not probe only the FIRST enumerated one. getInputList's order is unspecified, so on
+        // the default fresh-install config (Dota unmuted, mic + desktop MUTED) a first-only check would
+        // return false whenever a muted owned input sorted ahead of the unmuted one -> isReady() false
+        // -> MatchFsm never arms -> recording silently disabled on a valid config. Here the MUTED owned
+        // input is listed BEFORE the UNMUTED one; readiness must still be true.
+        ObsHealth health = new ObsHealth();
+        SettingsStore settings = mock(SettingsStore.class);
+        SettingsStore.Settings s = new SettingsStore.Settings();
+        s.audioSources = List.of(new AudioSource("a", "application", "::dota2.exe", "Dota", 100, false));
+        when(settings.get()).thenReturn(s);
+
+        ObsController controller =
+                new ObsController(settings, health, new ObsEvents(health), sceneConfigurer());
+        OBSRemoteController obs = mock(OBSRemoteController.class);
+        GetCurrentProgramSceneResponse scene = mock(GetCurrentProgramSceneResponse.class);
+        when(scene.isSuccessful()).thenReturn(true);
+        when(scene.getCurrentProgramSceneName()).thenReturn("Dota");
+        when(obs.getCurrentProgramScene(anyLong())).thenReturn(scene);
+
+        long readinessTimeoutMs =
+                (long) ReflectionTestUtils.getField(ObsController.class, "READINESS_TIMEOUT_MS");
+
+        // Two app-owned inputs: the muted one enumerated FIRST, the live (unmuted) one SECOND.
+        String mutedName = ObsSceneConfigurer.OWNED_PREFIX + "desktop";
+        String liveName = ObsSceneConfigurer.OWNED_PREFIX + "dota";
+        Input muted = mock(Input.class);
+        when(muted.getInputName()).thenReturn(mutedName);
+        Input live = mock(Input.class);
+        when(live.getInputName()).thenReturn(liveName);
+        GetInputListResponse inputs = mock(GetInputListResponse.class);
+        when(inputs.isSuccessful()).thenReturn(true);
+        when(inputs.getInputs()).thenReturn(List.of(muted, live));
+        when(obs.getInputList(nullable(String.class), anyLong())).thenReturn(inputs);
+
+        GetInputMuteResponse mutedResp = mock(GetInputMuteResponse.class);
+        when(mutedResp.isSuccessful()).thenReturn(true);
+        when(mutedResp.getInputMuted()).thenReturn(true);
+        when(obs.getInputMute(eq(mutedName), eq(readinessTimeoutMs))).thenReturn(mutedResp);
+        GetInputMuteResponse liveResp = mock(GetInputMuteResponse.class);
+        when(liveResp.isSuccessful()).thenReturn(true);
+        when(liveResp.getInputMuted()).thenReturn(false);
+        when(obs.getInputMute(eq(liveName), eq(readinessTimeoutMs))).thenReturn(liveResp);
+
+        ReflectionTestUtils.setField(controller, "controller", obs);
+        health.setConnected(true);
+
+        assertThat(controller.isReady())
+                .as("a live owned input enumerated after a muted one must still make isReady() true")
+                .isTrue();
     }
 
     @Test
