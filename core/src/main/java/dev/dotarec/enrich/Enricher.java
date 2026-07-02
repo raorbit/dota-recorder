@@ -5,9 +5,15 @@ import dev.dotarec.config.SettingsStore;
 import dev.dotarec.data.MatchRepository;
 import dev.dotarec.data.MatchRepository.EnrichmentUpdate;
 import dev.dotarec.data.MatchSummary;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.UncheckedIOException;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Properties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Async;
@@ -22,8 +28,10 @@ import org.springframework.stereotype.Service;
  * <p>Outcomes:
  * <ul>
  *   <li>{@link FetchResult.Ready} -> full enrich (win formula + our-player stats), state
- *       {@code enriched}, publish {@code match.enriched}. If OUR player isn't in the scoreboard the
- *       result can't be attributed -> permanent {@code failed} + {@code match.enrichFailed}.</li>
+ *       {@code enriched}, publish {@code match.enriched}. Our scoreboard row is found by account id,
+ *       falling back to the recorded hero when OpenDota omits {@code account_id} (the default-private
+ *       "Expose Public Match Data" case, which hides the user's OWN row from most matches). Only when
+ *       neither key can attribute a row -> permanent {@code failed} + {@code match.enrichFailed}.</li>
  *   <li>{@link FetchResult.NotReady} / {@link FetchResult.Missing} / {@link FetchResult.Transient}
  *       -> stay {@code pending}, bump attempts + backoff, publish nothing. On the attempt that
  *       crosses the cap -> {@code failed} + {@code match.enrichFailed} so it stops looping forever.
@@ -44,6 +52,11 @@ public class Enricher {
 
     private static final long BACKOFF_BASE_MS = 60_000L;
     private static final long BACKOFF_CAP_MS = 30L * 60_000L;
+
+    /** OpenDota hero_id -> Dota internal hero name, the fallback join key when account_id is absent. */
+    private static final Map<Integer, String> HERO_NAMES_BY_ID = loadHeroNamesById();
+
+    private static final String HERO_NAME_PREFIX = "npc_dota_hero_";
 
     private final MatchSource matchSource;
     private final MatchRepository matches;
@@ -98,7 +111,7 @@ public class Enricher {
             int attempts = matches.enrichAttempts(matchRowId);
 
             if (result instanceof FetchResult.Ready ready) {
-                fullEnrich(matchRowId, dotaMatchId, ready.match(), attempts);
+                fullEnrich(matchRowId, dotaMatchId, row, ready.match(), attempts);
             } else {
                 // NotReady / Missing / Transient all retry (state stays 'pending' with backoff),
                 // or fail permanently on the attempt that crosses the cap.
@@ -112,7 +125,8 @@ public class Enricher {
         }
     }
 
-    private void fullEnrich(long matchRowId, long dotaMatchId, OpenDotaMatch match, int attempts) {
+    private void fullEnrich(long matchRowId, long dotaMatchId, MatchSummary row, OpenDotaMatch match,
+                            int attempts) {
         Long accountId = settings.get().accountId;
         if (accountId == null) {
             // Defensive: enrich() already holds when accountId is unset, but it can be cleared
@@ -122,10 +136,14 @@ public class Enricher {
             return;
         }
 
-        OpenDotaMatch.Player me = ourPlayer(match, accountId);
+        OpenDotaMatch.Player me = ourPlayer(match, accountId, row.hero());
         if (me == null) {
-            // Our account isn't in the scoreboard (smurf/anonymized/id mismatch). The win/stats
-            // can't be attributed -> permanent fail, but the row stays visible in Unsorted.
+            // No scoreboard row matched by account id OR by the recorded hero -- attribution is
+            // impossible (hero unknown/absent from the response, or an id mismatch on a private
+            // account whose row we also can't pin by hero). Permanent fail, but the row stays
+            // visible in Unsorted.
+            log.info("Cannot attribute match row {} (dota {}): no player matched by account id {} "
+                    + "or recorded hero '{}'", matchRowId, dotaMatchId, accountId, row.hero());
             failPermanently(matchRowId);
             return;
         }
@@ -195,17 +213,48 @@ public class Enricher {
     }
 
     /**
-     * Our scoreboard row, matched by account id. Assumes exactly one row matches (always true for a
-     * real 10-player match); first match wins otherwise.
+     * Our scoreboard row, matched by account id, falling back to the recorded {@code hero} internal
+     * name when the account id match fails. OpenDota nulls {@code account_id} for default-private
+     * players (Dota's "Expose Public Match Data" is OFF by default), which hides the user's OWN row
+     * from most of their matches -- so the hero fallback is the common path, not the exception. The
+     * hero join is only trusted when it is UNAMBIGUOUS (exactly one row on the recorded hero):
+     * mirror-hero games exist (1v1 mid duels, duplicate-hero lobbies), and guessing a slot would
+     * silently persist the opponent's result/stats as ours. Returns null when neither key pins a
+     * single row (recorded hero unknown/absent/duplicated, or truly not in the response).
      */
-    private OpenDotaMatch.Player ourPlayer(OpenDotaMatch match, long accountId) {
+    private OpenDotaMatch.Player ourPlayer(OpenDotaMatch match, long accountId, String recordedHero) {
         if (match.players() == null) {
             return null;
         }
-        return match.players().stream()
+        OpenDotaMatch.Player byAccount = match.players().stream()
                 .filter(p -> p != null && Objects.equals(p.account_id(), accountId))
                 .findFirst()
                 .orElse(null);
+        if (byAccount != null) {
+            return byAccount;
+        }
+        String recordedSlug = heroSlug(recordedHero);
+        if (recordedSlug == null) {
+            return null;
+        }
+        List<OpenDotaMatch.Player> byHero = match.players().stream()
+                .filter(p -> p != null && recordedSlug.equals(heroSlug(HERO_NAMES_BY_ID.get(p.hero_id()))))
+                .toList();
+        return byHero.size() == 1 ? byHero.get(0) : null;
+    }
+
+    /**
+     * The bare hero slug (internal name minus the {@code npc_dota_hero_} prefix) for a robust join:
+     * the recorder stores the full GSI internal name, the id map yields the same, but a prefix-free
+     * form tolerates either side already being a slug.
+     */
+    private static String heroSlug(String heroName) {
+        if (heroName == null) {
+            return null;
+        }
+        return heroName.startsWith(HERO_NAME_PREFIX)
+                ? heroName.substring(HERO_NAME_PREFIX.length())
+                : heroName;
     }
 
     /** Radiant = player_slot 0-127, Dire = 128+. */
@@ -224,5 +273,23 @@ public class Enricher {
             delay = Math.min(delay * 2, BACKOFF_CAP_MS);
         }
         return System.currentTimeMillis() + Math.min(delay, BACKOFF_CAP_MS);
+    }
+
+    private static Map<Integer, String> loadHeroNamesById() {
+        String resource = "heroes/hero-ids.properties";
+        Properties props = new Properties();
+        try (InputStream in = Enricher.class.getClassLoader().getResourceAsStream(resource)) {
+            if (in == null) {
+                throw new IllegalStateException("Missing classpath resource: " + resource);
+            }
+            props.load(in);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to read hero id map " + resource, e);
+        }
+        Map<Integer, String> byId = new HashMap<>();
+        for (String key : props.stringPropertyNames()) {
+            byId.put(Integer.parseInt(key), props.getProperty(key));
+        }
+        return byId;
     }
 }
