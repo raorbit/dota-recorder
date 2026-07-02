@@ -2,7 +2,6 @@ package dev.dotarec.bridge;
 
 import dev.dotarec.clip.ClipService;
 import dev.dotarec.config.SettingsStore;
-import dev.dotarec.config.SettingsStore.StorageLocation;
 import dev.dotarec.data.ClipRepository;
 import dev.dotarec.data.ClipRow;
 import dev.dotarec.data.MatchRepository;
@@ -29,7 +28,6 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -269,27 +267,9 @@ public class ClipController {
         }
     }
 
-    /**
-     * The configured storage roots: the active {@code videoDir}, every archive drive's path, and every
-     * historical {@code videoDir} the user has since moved off. The historical dirs are READ+DELETE
-     * roots only (clips rendered before a videoDir change keep absolute paths under the old folder), so
-     * their .mp4/thumb stay streamable and a delete still unlinks them — retention/archiver ignore them.
-     */
+    /** The shared containment allow-list — single definition in {@link VideoStreamSupport}. */
     private List<String> storageRoots() {
-        SettingsStore.Settings s = settings.get();
-        List<String> roots = new ArrayList<>();
-        roots.add(s.videoDir);
-        if (s.storageLocations != null) {
-            for (StorageLocation loc : s.storageLocations) {
-                if (loc != null) {
-                    roots.add(loc.path());
-                }
-            }
-        }
-        if (s.previousVideoDirs != null) {
-            roots.addAll(s.previousVideoDirs);
-        }
-        return roots;
+        return VideoStreamSupport.storageRoots(settings.get());
     }
 
     private void requireMatch(long id) {
