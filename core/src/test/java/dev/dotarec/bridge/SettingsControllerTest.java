@@ -583,6 +583,81 @@ class SettingsControllerTest {
     }
 
     @Test
+    void putSettings_changingVideoDir_retainsTheOldDirAsHistorical() {
+        // Seed a non-default active dir, then move it. The outgoing dir must be retained so recordings
+        // written under it stay streamable/deletable (their rows keep absolute paths under the old dir).
+        controller.putSettings(
+                new SettingsPatch(
+                        null, null, null, "D:/clips-old", null, null, null, null, null, null, null,
+                        null, null));
+
+        controller.putSettings(
+                new SettingsPatch(
+                        null, null, null, "E:/clips-new", null, null, null, null, null, null, null,
+                        null, null));
+
+        assertThat(store.get().videoDir).isEqualTo("E:/clips-new");
+        assertThat(store.get().previousVideoDirs).contains("D:/clips-old");
+    }
+
+    @Test
+    void putSettings_videoDirUnchanged_doesNotRecordItAsHistorical() {
+        // Seed the active dir directly (not via a PUT, which would itself record the default as
+        // historical) so the list starts empty.
+        store.update(s -> { s.videoDir = "D:/clips"; return s; });
+
+        // Re-PUT the SAME videoDir: it is neither a move nor a leak, so nothing is retained.
+        controller.putSettings(
+                new SettingsPatch(
+                        null, null, null, "D:/clips", null, null, null, null, null, null, null,
+                        null, null));
+
+        assertThat(store.get().videoDir).isEqualTo("D:/clips");
+        assertThat(store.get().previousVideoDirs).isEmpty();
+    }
+
+    @Test
+    void putSettings_videoDirOnlyPatch_rejectedWhenItNestsInStoredArchive() {
+        // Seed a stored archive location, then a videoDir-only PUT that nests INSIDE it. The overlap
+        // rule must run against the ALREADY-STORED archive list even though this PUT omits it.
+        controller.putSettings(
+                new SettingsPatch(
+                        null, null, null, "D:/clips", null, null, null, null, null, null,
+                        List.of(new StorageLocation("a", "E:/archive", 500)), null, null));
+
+        assertThatThrownBy(
+                        () ->
+                                controller.putSettings(
+                                        new SettingsPatch(
+                                                null, null, null, "E:/archive/inner", null, null, null,
+                                                null, null, null, null, null, null)))
+                .isInstanceOfSatisfying(
+                        ResponseStatusException.class,
+                        e -> assertThat(e.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST));
+        // Rejected before persist: the active dir is unchanged.
+        assertThat(store.get().videoDir).isEqualTo("D:/clips");
+    }
+
+    @Test
+    void putSettings_videoDirOnlyPatch_acceptedWhenDistinctFromStoredArchive() {
+        // A stored archive on a different drive: a videoDir-only PUT that does NOT overlap it is fine.
+        controller.putSettings(
+                new SettingsPatch(
+                        null, null, null, "D:/clips", null, null, null, null, null, null,
+                        List.of(new StorageLocation("a", "E:/archive", 500)), null, null));
+
+        SettingsView updated =
+                controller.putSettings(
+                        new SettingsPatch(
+                                null, null, null, "F:/new-clips", null, null, null, null, null, null,
+                                null, null, null));
+
+        assertThat(updated.videoDir()).isEqualTo("F:/new-clips");
+        // The stored archive list is untouched by a videoDir-only PUT.
+        assertThat(store.get().storageLocations).hasSize(1);
+    }
+
+    @Test
     void putSettings_rejectsBlankVideoDir() {
         // A cleared Output folder field arrives as a blank string. Persisting it would leave OBS,
         // thumbnails, and the archiver disagreeing about where recordings live, so reject it (400)

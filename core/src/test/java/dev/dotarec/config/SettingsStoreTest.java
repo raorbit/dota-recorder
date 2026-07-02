@@ -273,6 +273,85 @@ class SettingsStoreTest {
     }
 
     @Test
+    void freshStore_hasEmptyPreviousVideoDirs(@TempDir Path dir) {
+        SettingsStore store = new SettingsStore(paths(dir));
+        assertThat(store.get().previousVideoDirs).isEmpty();
+    }
+
+    @Test
+    void previousVideoDirs_survivesUpdateAndReload(@TempDir Path dir) {
+        SettingsStore store = new SettingsStore(paths(dir));
+        store.update(
+                s -> {
+                    SettingsStore.recordPreviousVideoDir(s, "D:/old-clips");
+                    s.videoDir = "E:/new-clips";
+                    return s;
+                });
+
+        // copy() carries the list across a later unrelated update (the copy() trap).
+        store.update(
+                s -> {
+                    s.resolution = "1280x720";
+                    return s;
+                });
+        assertThat(store.get().previousVideoDirs).containsExactly("D:/old-clips");
+
+        // And it round-trips through settings.json.
+        SettingsStore reloaded = new SettingsStore(paths(dir));
+        assertThat(reloaded.get().previousVideoDirs).containsExactly("D:/old-clips");
+    }
+
+    @Test
+    void recordPreviousVideoDir_dedupesAndSkipsBlankAndCurrentDir(@TempDir Path dir) {
+        SettingsStore store = new SettingsStore(paths(dir));
+        store.update(
+                s -> {
+                    s.videoDir = "E:/new-clips";
+                    // A blank, the current dir, and a duplicate must all be no-ops; distinct old dirs grow.
+                    SettingsStore.recordPreviousVideoDir(s, "  ");
+                    SettingsStore.recordPreviousVideoDir(s, "E:/new-clips");
+                    SettingsStore.recordPreviousVideoDir(s, "D:/one");
+                    SettingsStore.recordPreviousVideoDir(s, "D:/one");
+                    SettingsStore.recordPreviousVideoDir(s, "D:/two");
+                    return s;
+                });
+
+        assertThat(store.get().previousVideoDirs).containsExactly("D:/one", "D:/two");
+    }
+
+    @Test
+    void recordPreviousVideoDir_movingBackDropsTheNowCurrentDir(@TempDir Path dir) {
+        SettingsStore store = new SettingsStore(paths(dir));
+        store.update(
+                s -> {
+                    s.videoDir = "E:/new-clips";
+                    SettingsStore.recordPreviousVideoDir(s, "D:/old-clips");
+                    return s;
+                });
+        // Moving back: the once-old dir is the current root again, so it leaves the list and the
+        // dir being vacated takes its place.
+        store.update(
+                s -> {
+                    s.videoDir = "D:/old-clips";
+                    SettingsStore.recordPreviousVideoDir(s, "E:/new-clips");
+                    return s;
+                });
+
+        assertThat(store.get().previousVideoDirs).containsExactly("E:/new-clips");
+    }
+
+    @Test
+    void load_backfillsEmptyPreviousVideoDirsFromLegacyJson(@TempDir Path dir) throws Exception {
+        // A settings.json predating previousVideoDirs deserializes it to null; load() backfills empty so
+        // the storage-roots build never NPEs on a null list.
+        Files.createDirectories(dir);
+        Files.writeString(dir.resolve("settings.json"), "{\"videoDir\":\"D:/clips\"}");
+
+        SettingsStore store = new SettingsStore(paths(dir));
+        assertThat(store.get().previousVideoDirs).isEmpty();
+    }
+
+    @Test
     void clearedAppSources_stayCleared_butBuiltinRowsAreGuaranteed(@TempDir Path dir) {
         SettingsStore store = new SettingsStore(paths(dir));
         // Fresh install: Dota app capture + the two built-in rows.

@@ -130,6 +130,11 @@ public class SettingsController {
         }
         if (patch.storageLocations() != null) {
             validateStorageLocations(patch.storageLocations(), patch.videoDir());
+        } else if (patch.videoDir() != null) {
+            // A videoDir-only PUT doesn't carry storageLocations, but the new dir must still not
+            // overlap/nest the ALREADY-STORED archive locations (else it double-counts usage and
+            // degenerates the archiver). Re-run the same rule against the effective stored list.
+            validateStorageLocations(store.get().storageLocations, patch.videoDir());
         }
         // Atomic read-copy-mutate: only the user-facing fields are overlaid (non-null), so the
         // app-managed OBS fields (host/port/password) carry forward untouched rather than being
@@ -154,8 +159,14 @@ public class SettingsController {
                     if (patch.retentionCapGb() != null) {
                         current.retentionCapGb = patch.retentionCapGb();
                     }
-                    if (patch.videoDir() != null) {
+                    if (patch.videoDir() != null && !patch.videoDir().equals(current.videoDir)) {
+                        // Retain the outgoing dir so recordings written under it stay streamable +
+                        // deletable after the move (their rows keep absolute paths under the old folder).
+                        // Assign the new dir FIRST so recordPreviousVideoDir's "skip the current dir"
+                        // guard compares the old dir against the NEW videoDir, not against itself.
+                        String outgoing = current.videoDir;
                         current.videoDir = patch.videoDir();
+                        SettingsStore.recordPreviousVideoDir(current, outgoing);
                     }
                     // accountId also uses null = "leave unchanged", so clearing it needs an explicit
                     // flag (a blanked Account ID field in the UI sends clearAccountId=true).
