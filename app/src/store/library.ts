@@ -26,6 +26,7 @@ import {
   type StatusSnapshot,
 } from '../api/client';
 import type { Bucket } from './buckets';
+import { mergeLibraryLoad } from '../lib/library-load';
 export type { Bucket } from './buckets';
 
 export type ResultFilter = 'all' | 'wins' | 'losses';
@@ -239,36 +240,10 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
     // frames each fire load()); drop the stale result so it can't clobber fresher data.
     if (token !== loadToken) return;
 
-    const matches = matchesRes.status === 'fulfilled' ? matchesRes.value : [];
-    const counts = countsRes.status === 'fulfilled' ? countsRes.value : EMPTY_COUNTS;
-    const clips = clipsRes.status === 'fulfilled' ? clipsRes.value : [];
-
-    // If ALL calls failed the core is unreachable; surface an error state.
-    // If only some failed we still render with what we have.
-    const errored =
-      matchesRes.status === 'rejected' &&
-      countsRes.status === 'rejected' &&
-      clipsRes.status === 'rejected';
-
-    // Drop a stale selection if neither the selected match nor (for a clip selection)
-    // the selected clip survives the refresh.
-    const { selectedMatchId, selectedClipId } = get();
-    const matchPresent =
-      selectedMatchId !== null && matches.some((m) => m.id === selectedMatchId);
-    const clipPresent =
-      selectedClipId !== null && clips.some((c) => c.id === selectedClipId);
-    // A clip selection points selectedMatchId at the clip's parent (which is in the
-    // matches list), so a surviving match OR clip keeps the selection alive.
-    const stillPresent = matchPresent || clipPresent;
-
-    set({
-      matches,
-      clips,
-      counts,
-      loadState: errored ? 'error' : 'ready',
-      selectedMatchId: stillPresent ? selectedMatchId : null,
-      selectedClipId: clipPresent ? selectedClipId : null,
-    });
+    // A rejected individual fetch keeps the PREVIOUS slice (not empty) so one failing endpoint —
+    // likeliest right after a match records — can't blank the table and tear down the open video;
+    // selection survival is judged only against a fetch that actually succeeded. See mergeLibraryLoad.
+    set(mergeLibraryLoad(matchesRes, countsRes, clipsRes, get()));
   },
   };
 });
