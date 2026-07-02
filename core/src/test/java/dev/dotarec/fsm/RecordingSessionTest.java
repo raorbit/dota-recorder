@@ -16,28 +16,39 @@ class RecordingSessionTest {
     @Test
     void taggerState_startsUnseeded() {
         TaggerState state = new TaggerState();
-        assertThat(state.deathsSeeded())
+        assertThat(state.deaths().seeded())
                 .as("no player-present frame seen yet -> deaths baseline not seeded")
                 .isFalse();
         assertThat(state.deathEmittedThisEpisode()).isFalse();
     }
 
     @Test
-    void seedDeaths_marksSeeded_andHoldsTheBaseline() {
+    void seedIfUnseeded_marksSeeded_andHoldsTheBaseline() {
         TaggerState state = new TaggerState();
-        state.seedDeaths(5);
+        state.deaths().seedIfUnseeded(5);
 
-        assertThat(state.deathsSeeded()).isTrue();
-        assertThat(state.emittedDeaths()).isEqualTo(5);
+        assertThat(state.deaths().seeded()).isTrue();
+        assertThat(state.deaths().value()).isEqualTo(5);
     }
 
     @Test
-    void setEmittedDeaths_advancesTheHighWaterMark() {
+    void seedIfUnseeded_neverReseedsAnAlreadySeededMark() {
         TaggerState state = new TaggerState();
-        state.seedDeaths(1);
-        state.setEmittedDeaths(3);
+        state.deaths().seedIfUnseeded(1);
+        state.deaths().seedIfUnseeded(7);
 
-        assertThat(state.emittedDeaths()).isEqualTo(3);
+        assertThat(state.deaths().value())
+                .as("only the FIRST player-present frame seeds the baseline")
+                .isEqualTo(1);
+    }
+
+    @Test
+    void set_advancesTheHighWaterMark() {
+        TaggerState state = new TaggerState();
+        state.deaths().seedIfUnseeded(1);
+        state.deaths().set(3);
+
+        assertThat(state.deaths().value()).isEqualTo(3);
     }
 
     @Test
@@ -58,11 +69,11 @@ class RecordingSessionTest {
         RecordingSession b = new RecordingSession();
 
         a.getTaggerState().markDeathEmittedThisEpisode();
-        a.getTaggerState().seedDeaths(1);
+        a.getTaggerState().deaths().seedIfUnseeded(1);
 
         assertThat(b.getTaggerState().deathEmittedThisEpisode())
                 .as("state is per-session, not a shared static").isFalse();
-        assertThat(b.getTaggerState().deathsSeeded()).isFalse();
+        assertThat(b.getTaggerState().deaths().seeded()).isFalse();
     }
 
     @Test

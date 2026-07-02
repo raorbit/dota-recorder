@@ -90,15 +90,9 @@ public class EventTagger {
         // burst-emits the pre-existing counts as markers. Seeded from prev so the very first prev->curr
         // delta (a single-pair diff, or the FSM's first tag) is still captured.
         if (prev.playerPresent()) {
-            if (!state.deathsSeeded()) {
-                state.seedDeaths(prev.deaths());
-            }
-            if (!state.killsSeeded()) {
-                state.seedKills(prev.kills());
-            }
-            if (!state.assistsSeeded()) {
-                state.seedAssists(prev.assists());
-            }
+            state.deaths().seedIfUnseeded(prev.deaths());
+            state.kills().seedIfUnseeded(prev.kills());
+            state.assists().seedIfUnseeded(prev.assists());
         }
 
         // Respawn resets the dead-episode dedupe latch so the NEXT death's falling edge can emit again. A
@@ -112,24 +106,11 @@ public class EventTagger {
             state.resetDeathEpisode();
         }
 
-        // Kill/assist counters: emit every increment BEYOND the high-water mark of kills/assists already
-        // tagged, gated on the player block being present on curr (the marks are only seeded from a
-        // player-present frame, so an unseeded mark also suppresses the returning-from-dropout burst). The
-        // monotonic counters reveal a kill/assist that landed on a single-frame block-dropout tick once the
-        // block returns, just as the deaths path does -- a raw prev->curr diff dropped it (Finding F4).
-        if (curr.playerPresent() && state.killsSeeded()) {
-            int newKills = curr.kills() - state.emittedKills();
-            if (newKills > 0) {
-                emitIncrements(markers, "kill", newKills, offset, gameClock);
-                state.setEmittedKills(curr.kills());
-            }
-        }
-        if (curr.playerPresent() && state.assistsSeeded()) {
-            int newAssists = curr.assists() - state.emittedAssists();
-            if (newAssists > 0) {
-                emitIncrements(markers, "assist", newAssists, offset, gameClock);
-                state.setEmittedAssists(curr.assists());
-            }
+        // Kill/assist counters share one emit-beyond-the-mark rule (deaths extends it below with the
+        // falling-edge fallback and the episode latch).
+        if (curr.playerPresent()) {
+            emitBeyondMark(markers, "kill", state.kills(), curr.kills(), offset, gameClock);
+            emitBeyondMark(markers, "assist", state.assists(), curr.assists(), offset, gameClock);
         }
 
         // Death counter path (primary, authoritative). The running deaths counter is monotonic, so emit
@@ -139,11 +120,11 @@ public class EventTagger {
         // counter reveals it once the player block returns (Finding C). The high-water mark also means the
         // counter never re-emits a death the falling edge already tagged (it cannot re-cross that value).
         boolean deathCounterFired = false;
-        if (curr.playerPresent() && state.deathsSeeded()) {
-            int newDeaths = curr.deaths() - state.emittedDeaths();
+        if (curr.playerPresent() && state.deaths().seeded()) {
+            int newDeaths = curr.deaths() - state.deaths().value();
             if (newDeaths > 0) {
                 emitIncrements(markers, "death", newDeaths, offset, gameClock);
-                state.setEmittedDeaths(curr.deaths());
+                state.deaths().set(curr.deaths());
                 state.markDeathEmittedThisEpisode();
                 deathCounterFired = true;
             }
@@ -157,13 +138,13 @@ public class EventTagger {
         // counter-leads and the counter-lags-past-respawn cases).
         if (!deathCounterFired
                 && !state.deathEmittedThisEpisode()
-                && state.deathsSeeded()
+                && state.deaths().seeded()
                 && prev.heroPresent()
                 && curr.heroPresent()
                 && prev.alive()
                 && !curr.alive()) {
             markers.add(PendingMarker.gsi("death", offset, gameClock));
-            state.setEmittedDeaths(state.emittedDeaths() + 1);
+            state.deaths().set(state.deaths().value() + 1);
             state.markDeathEmittedThisEpisode();
         }
 
@@ -178,6 +159,25 @@ public class EventTagger {
     public List<PendingMarker> diff(
             GsiFrame prev, GsiFrame curr, long recordConfirmedNanos, double durationS) {
         return diff(prev, curr, new TaggerState(), recordConfirmedNanos, durationS);
+    }
+
+    /**
+     * Emits one marker per increment of a monotonic counter BEYOND its high-water mark, then advances
+     * the mark. Callers gate on the player block being present on {@code curr}; an unseeded mark also
+     * suppresses the returning-from-dropout burst (marks are only seeded from a player-present frame).
+     * The monotonic counter reveals a kill/assist that landed on a single-frame block-dropout tick once
+     * the block returns -- a raw prev-&gt;curr diff dropped it (Finding F4).
+     */
+    private void emitBeyondMark(List<PendingMarker> markers, String type,
+            TaggerState.HighWaterCounter mark, int total, double offset, Integer gameClock) {
+        if (!mark.seeded()) {
+            return;
+        }
+        int fresh = total - mark.value();
+        if (fresh > 0) {
+            emitIncrements(markers, type, fresh, offset, gameClock);
+            mark.set(total);
+        }
     }
 
     private void emitIncrements(
