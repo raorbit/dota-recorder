@@ -382,24 +382,35 @@ class ClipServiceTest {
     // ---- boot-time orphan reconcile ----------------------------------------------------------
 
     @Test
-    void reconcileOrphans_rependsPriorRunOrphan_butLeavesLiveClaimAlone() throws Exception {
+    void reconcileOrphans_rependsPriorRunOrphans_butLeavesLiveClaimAlone() throws Exception {
         long parent = seedMatchWithVideo(1800);
-        // A prior-run orphan: stuck in 'generating' with no claim stamp (or, equivalently, one long
-        // past the stale cutoff) — no live worker can look like this, since claimForGeneration always
-        // stamps.
-        long orphanId = clips.insert(parent, "manual", null, 30.0, 45.0, null,
+        // A prior-run orphan with no claim stamp at all (legacy rows / crash between insert and claim).
+        long nullStampOrphanId = clips.insert(parent, "manual", null, 30.0, 45.0, null,
                 null, null, null, "generating", null, System.currentTimeMillis());
-        // A LIVE claim: Tomcat + the scheduler start before ApplicationReadyEvent, so a worker can
-        // already hold a fresh claim when the boot reconcile fires. Resetting it would re-enable the
-        // double-cut.
+        // A prior-run orphan whose worker died mid-cut with a RECENT stamp (crash + quick relaunch).
+        // The boot cutoff is process start, not the stale window, so this must be re-pended instantly
+        // rather than left spinning for the rest of the 60-min stale cutoff.
+        long recentStampOrphanId = clips.insert(parent, "manual", null, 30.0, 45.0, null,
+                null, null, null, "pending", null, System.currentTimeMillis());
+        assertThat(clips.claimForGeneration(recentStampOrphanId,
+                System.currentTimeMillis() - 2 * 60_000L)).isTrue();
+
+        // The queue's construction captures the boot cutoff: prior-run stamps are older, and any
+        // this-process claim (Tomcat + the scheduler only start after construction) is newer.
+        ClipQueue queue = new ClipQueue(clips, service);
+
+        // A LIVE claim stamped after construction, with an honest wall-clock stamp (a future-dated
+        // one would also pass under a broken cutoff computed at reconcile time): a worker can
+        // already hold it when the boot reconcile fires (ApplicationReadyEvent). Resetting it would
+        // re-enable the double-cut.
         long liveId = clips.insert(parent, "manual", null, 30.0, 45.0, null,
                 null, null, null, "pending", null, System.currentTimeMillis());
         assertThat(clips.claimForGeneration(liveId, System.currentTimeMillis())).isTrue();
 
-        ClipQueue queue = new ClipQueue(clips, service);
         queue.reconcileOrphans();
 
-        assertThat(clips.findById(orphanId).orElseThrow().status()).isEqualTo("pending");
+        assertThat(clips.findById(nullStampOrphanId).orElseThrow().status()).isEqualTo("pending");
+        assertThat(clips.findById(recentStampOrphanId).orElseThrow().status()).isEqualTo("pending");
         assertThat(clips.findById(liveId).orElseThrow().status()).isEqualTo("generating");
         verify(clipper, never()).clip(any(), anyDouble(), anyDouble(), any());
     }
