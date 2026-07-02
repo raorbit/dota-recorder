@@ -26,8 +26,9 @@ import dev.dotarec.data.TestDb;
 /**
  * Exercises the enricher's state machine over a real SQLite repo with a fake {@link MatchSource}:
  * the win formula (radiant + dire), full field mapping, idempotent re-enrich, the
- * NotReady/Missing -> stays-pending path, the null-{@code dota_match_id} skip, and the
- * our-player-absent permanent fail. No network, no Spring context.
+ * NotReady/Missing -> stays-pending path, the null-{@code dota_match_id} skip, the hero fallback
+ * attribution when OpenDota nulls our {@code account_id}, and the truly-unattributable permanent
+ * fail. No network, no Spring context.
  */
 class EnricherTest {
 
@@ -126,12 +127,84 @@ class EnricherTest {
     }
 
     @Test
-    void ourPlayerAbsentIsPermanentFail() throws Exception {
+    void ourPlayerUnattributableByAccountOrHeroIsPermanentFail() throws Exception {
         long id = insertPending(905L);
-        // Scoreboard without our account id -> can't attribute -> failed.
+        // Neither our account id nor our recorded hero ("rubick", id 86) is on the scoreboard: the
+        // stranger row carries a different account and hero_id 1 (antimage) -> can't attribute -> failed.
         OpenDotaMatch match = new OpenDotaMatch(905L, true, 1800, 1000L, 7, 22,
                 List.of(player(55555555L, 0)));
         enricher(FetchResult.ready(match)).enrich(id, 905L);
+
+        assertThat(repo.findById(id).orElseThrow().enrichmentState()).isEqualTo("failed");
+        assertThat(events.types()).containsExactly("match.enrichFailed");
+    }
+
+    @Test
+    void nullAccountRowAttributedByHeroSucceeds() throws Exception {
+        // OpenDota nulls account_id for default-private players, hiding our OWN row. The row is still
+        // attributable by the recorded hero ("rubick", hero_id 86) -> full enrich, not a fail.
+        long id = insertPending(913L);
+        OpenDotaMatch.Player privateMe = new OpenDotaMatch.Player(
+                null, 0, 86, 5, 5, 5, 300, 400, 12000, 100, 60);
+        OpenDotaMatch match = new OpenDotaMatch(913L, true, 1800, 1000L, 7, 22,
+                List.of(privateMe, player(55555555L, 128)));
+        enricher(FetchResult.ready(match)).enrich(id, 913L);
+
+        MatchSummary row = repo.findById(id).orElseThrow();
+        assertThat(row.enrichmentState()).isEqualTo("enriched");
+        assertThat(row.result()).isEqualTo("win"); // slot 0 (Radiant), radiant_win=true
+        assertThat(row.gpm()).isEqualTo(300);
+        assertThat(events.types()).containsExactly("match.enriched");
+    }
+
+    @Test
+    void ambiguousHeroFallbackIsPermanentFailNotAGuess() throws Exception {
+        // Mirror-hero game (1v1 duel / duplicate-hero lobby): BOTH rows carry our recorded hero
+        // (86/rubick) with account_id nulled. Picking either slot could persist the opponent's
+        // result/stats as ours -> the hero join must refuse and fall to the permanent fail.
+        long id = insertPending(915L);
+        OpenDotaMatch.Player anonRadiant = new OpenDotaMatch.Player(
+                null, 0, 86, 5, 5, 5, 300, 400, 12000, 100, 60);
+        OpenDotaMatch.Player anonDire = new OpenDotaMatch.Player(
+                null, 128, 86, 5, 5, 5, 500, 600, 20000, 200, 60);
+        OpenDotaMatch match = new OpenDotaMatch(915L, true, 1800, 1000L, 7, 22,
+                List.of(anonRadiant, anonDire));
+        enricher(FetchResult.ready(match)).enrich(id, 915L);
+
+        assertThat(repo.findById(id).orElseThrow().enrichmentState()).isEqualTo("failed");
+        assertThat(events.types()).containsExactly("match.enrichFailed");
+    }
+
+    @Test
+    void accountIdMatchStillWinsInMirrorHeroGame() throws Exception {
+        // Mirror-hero game but OUR row carries our account id: the account join is exact, so the
+        // hero ambiguity never comes into play -> full enrich with our (Dire) side's result.
+        long id = insertPending(916L);
+        OpenDotaMatch.Player anonRadiant = new OpenDotaMatch.Player(
+                null, 0, 86, 5, 5, 5, 300, 400, 12000, 100, 60);
+        OpenDotaMatch.Player me = new OpenDotaMatch.Player(
+                96828122L, 128, 86, 5, 5, 5, 500, 600, 20000, 200, 60);
+        OpenDotaMatch match = new OpenDotaMatch(916L, true, 1800, 1000L, 7, 22,
+                List.of(anonRadiant, me));
+        enricher(FetchResult.ready(match)).enrich(id, 916L);
+
+        MatchSummary row = repo.findById(id).orElseThrow();
+        assertThat(row.enrichmentState()).isEqualTo("enriched");
+        assertThat(row.result()).isEqualTo("loss"); // slot 128 (Dire), radiant_win=true
+        assertThat(row.gpm()).isEqualTo(500);
+        assertThat(events.types()).containsExactly("match.enriched");
+    }
+
+    @Test
+    void heroAbsentFromResponseIsPermanentFail() throws Exception {
+        // account_id null AND no scoreboard row carries our recorded hero (86/rubick): the only rows
+        // are on other heroes -> hero attribution impossible -> permanent fail.
+        long id = insertPending(914L);
+        OpenDotaMatch.Player anon = new OpenDotaMatch.Player(
+                null, 0, 1, 5, 5, 5, 300, 400, 12000, 100, 60);
+        OpenDotaMatch match = new OpenDotaMatch(914L, true, 1800, 1000L, 7, 22,
+                List.of(anon, player(55555555L, 128)));
+        enricher(FetchResult.ready(match)).enrich(id, 914L);
 
         assertThat(repo.findById(id).orElseThrow().enrichmentState()).isEqualTo("failed");
         assertThat(events.types()).containsExactly("match.enrichFailed");
