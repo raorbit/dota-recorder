@@ -48,6 +48,18 @@ public class ClipQueue {
     private final ClipRepository clips;
     private final ClipService clipService;
 
+    /**
+     * Construction time, the boot cutoff for {@link #reconcileOrphans()}. Singletons construct during
+     * context refresh, BEFORE Tomcat serves bridge requests and before the {@code @Scheduled} clock
+     * starts (both begin at finishRefresh), so every claim stamped by THIS process is {@code >=} this
+     * value — and any older stamp is provably a prior-run orphan. A backward wall-clock step across a
+     * restart can only make an orphan look live, which safely degrades to {@link #sweep()}'s stale
+     * self-heal. The inverse (a backward step INSIDE the seconds between construction and
+     * {@code ApplicationReadyEvent} making a live claim look prior-run) is accepted: it needs an NTP
+     * step to land in that window at the same moment a pre-ready worker claims a clip.
+     */
+    private final long bootEpochMs = System.currentTimeMillis();
+
     public ClipQueue(ClipRepository clips, ClipService clipService) {
         this.clips = clips;
         this.clipService = clipService;
@@ -60,16 +72,15 @@ public class ClipQueue {
      * recording journal's crash reconciliation. NOT unconditional: Tomcat serves bridge requests (and
      * the {@code @Scheduled} clock starts) at context refresh, before {@code ApplicationReadyEvent}
      * fires, so a worker can already hold a LIVE claim here (a manual clip POST, or the first sweep
-     * when earlier runners take &gt;60s) — resetting it would re-enable the double-cut. Only rows whose
-     * claim stamp is missing or already past the stale cutoff are reset; a recent claim is left for its
-     * worker (or, if that worker truly died with the app still up, for {@link #sweep()}'s stale
-     * self-heal).
+     * when earlier runners take &gt;60s) — resetting it would re-enable the double-cut. The boot cutoff
+     * is {@link #bootEpochMs}, not the stale window: a claim stamped before this process existed has no
+     * worker by definition (even a seconds-old one from a crash-and-quick-relaunch is re-pended
+     * instantly), while any this-process claim is left for its worker.
      */
     @EventListener(ApplicationReadyEvent.class)
     public void reconcileOrphans() {
-        long staleBefore = System.currentTimeMillis() - STALE_GENERATING_MS;
         for (ClipRow clip : clips.findByStatus("generating")) {
-            if (clips.rependIfOrphaned(clip.id(), staleBefore)) {
+            if (clips.rependIfOrphaned(clip.id(), bootEpochMs)) {
                 log.info("Re-pending clip {} orphaned in 'generating' by a prior run", clip.id());
             }
         }
