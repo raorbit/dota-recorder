@@ -269,7 +269,12 @@ public class ClipController {
         }
     }
 
-    /** The configured storage roots: the active {@code videoDir} plus every archive drive's path. */
+    /**
+     * The configured storage roots: the active {@code videoDir}, every archive drive's path, and every
+     * historical {@code videoDir} the user has since moved off. The historical dirs are READ+DELETE
+     * roots only (clips rendered before a videoDir change keep absolute paths under the old folder), so
+     * their .mp4/thumb stay streamable and a delete still unlinks them — retention/archiver ignore them.
+     */
     private List<String> storageRoots() {
         SettingsStore.Settings s = settings.get();
         List<String> roots = new ArrayList<>();
@@ -280,6 +285,9 @@ public class ClipController {
                     roots.add(loc.path());
                 }
             }
+        }
+        if (s.previousVideoDirs != null) {
+            roots.addAll(s.previousVideoDirs);
         }
         return roots;
     }

@@ -38,6 +38,7 @@ class MatchControllerStreamTest {
     @TempDir Path dir;
 
     private MatchRepository repo;
+    private SettingsStore settings;
     private MatchController controller;
 
     @BeforeEach
@@ -46,7 +47,7 @@ class MatchControllerStreamTest {
         repo = new MatchRepository(ds);
         // The served VODs are written directly under the TempDir, so point the storage root there:
         // the controller's containment guard requires a streamed file to live under a configured root.
-        SettingsStore settings = new SettingsStore(
+        settings = new SettingsStore(
                 new AppPaths(dir.resolve("data").toString(), dir.resolve("obs").toString()));
         settings.get().videoDir = dir.toString();
         controller = new MatchController(repo, new MarkerRepository(ds), new PauseRepository(ds),
@@ -124,6 +125,28 @@ class MatchControllerStreamTest {
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(resp.getHeaders().getFirst(HttpHeaders.ACCEPT_RANGES)).isEqualTo("bytes");
         assertThat(resp.getHeaders().getContentLength()).isEqualTo(1000);
+        assertThat(readBody(resp)).isEqualTo(data);
+    }
+
+    @Test
+    void servesVodUnderAPreviousVideoDir_afterTheActiveDirMoved() throws Exception {
+        // A recording cut before the user changed videoDir keeps an absolute path under the OLD folder.
+        // With videoDir now pointing elsewhere, the historical dir must still count as a read root so
+        // the stream returns the bytes rather than a "outside the configured storage roots" 404.
+        Path oldDir = dir.resolve("old-clips");
+        Files.createDirectories(oldDir);
+        byte[] data = bytes(300);
+        Path vod = oldDir.resolve("legacy.mp4");
+        Files.write(vod, data);
+        long id = insertWithVideo(vod.toString());
+
+        // The active dir moved off oldDir; oldDir is retained as a historical read root.
+        settings.get().videoDir = dir.resolve("new-clips").toString();
+        settings.get().previousVideoDirs.add(oldDir.toString());
+
+        ResponseEntity<StreamingResponseBody> resp = controller.videoStream(id, new HttpHeaders());
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(readBody(resp)).isEqualTo(data);
     }
 

@@ -77,6 +77,16 @@ public class SettingsStore {
         /** Video output directory; null/blank means use the default video dir. */
         public String videoDir = "";
         /**
+         * Video dirs {@link #videoDir} has pointed at in the past. Recordings write absolute paths, so
+         * a row cut before a videoDir change still lives under the OLD folder; its bytes must stay
+         * reachable for the video/thumb stream endpoints AND for a match/clip delete's on-disk unlink.
+         * These are READ+DELETE roots only, never a recording target — retention/archiver ignore them.
+         * Deduped and never holds a blank or the current {@link #videoDir} — moving back to a tracked
+         * dir drops it until {@code videoDir} moves off it again (see {@link #recordPreviousVideoDir}).
+         * Defaults to {@code null} (backfilled to empty by {@link #load}).
+         */
+        public List<String> previousVideoDirs;
+        /**
          * Dota 2 32-bit account id (the OpenDota {@code account_id}). Used by the enricher to find
          * OUR player in the 10-player scoreboard so result/stats can be attributed. Null until the
          * user configures it; a null id holds matches in {@code pending} rather than failing them.
@@ -142,6 +152,8 @@ public class SettingsStore {
             c.obsPassword = obsPassword;
             c.videoDir = videoDir;
             c.accountId = accountId;
+            // Deep-copy so a copy-on-write update() never shares (and can safely append to) the list.
+            c.previousVideoDirs = previousVideoDirs == null ? null : new ArrayList<>(previousVideoDirs);
             c.opendotaApiKey = opendotaApiKey;
             c.gsiAuthToken = gsiAuthToken;
             c.autoClipOnRampage = autoClipOnRampage;
@@ -277,6 +289,10 @@ public class SettingsStore {
         if (loaded.storageLocations == null) {
             loaded.storageLocations = new ArrayList<>();
         }
+        // Backfill an empty historical-dir list on a fresh/legacy field.
+        if (loaded.previousVideoDirs == null) {
+            loaded.previousVideoDirs = new ArrayList<>();
+        }
         return loaded;
     }
 
@@ -295,6 +311,28 @@ public class SettingsStore {
             }
         }
         sources.add(new AudioSource(id, kind, "default", label, 100, true));
+    }
+
+    /**
+     * Records {@code oldDir} as a historical video dir on {@code s} so recordings written under it stay
+     * reachable for streaming + delete after {@link Settings#videoDir} moves. No-op for a blank {@code
+     * oldDir}, one already tracked, or one equal to the CURRENT {@code s.videoDir} (a dir the streams
+     * already reach). Call inside an {@link #update} mutator AFTER assigning the new {@code videoDir} —
+     * the guards compare against the current value, so calling before the assignment is a guaranteed
+     * no-op. Moving BACK to a tracked dir drops it from the list (it is the current root again); it is
+     * re-recorded if {@code videoDir} later moves off it.
+     */
+    public static void recordPreviousVideoDir(Settings s, String oldDir) {
+        if (oldDir == null || oldDir.isBlank() || oldDir.equals(s.videoDir)) {
+            return;
+        }
+        if (s.previousVideoDirs == null) {
+            s.previousVideoDirs = new ArrayList<>();
+        }
+        s.previousVideoDirs.remove(s.videoDir);
+        if (!s.previousVideoDirs.contains(oldDir)) {
+            s.previousVideoDirs.add(oldDir);
+        }
     }
 
     /** Reads and parses a settings file, or {@code null} when it is absent, unreadable, or corrupt. */
