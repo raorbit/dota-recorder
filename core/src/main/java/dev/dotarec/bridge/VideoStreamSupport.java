@@ -1,5 +1,6 @@
 package dev.dotarec.bridge;
 
+import dev.dotarec.config.SettingsStore;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpRange;
 import org.springframework.http.HttpStatus;
@@ -14,6 +15,7 @@ import java.io.OutputStream;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
@@ -90,6 +92,30 @@ final class VideoStreamSupport {
             }
         }
         return false;
+    }
+
+    /**
+     * The configured storage roots for {@link #isUnderAnyRoot}: the active {@code videoDir}, every
+     * archive drive's path, and every historical {@code videoDir} the user has since moved off. The
+     * historical dirs are READ+DELETE roots only (rows recorded before a videoDir change keep absolute
+     * paths under the old folder), so their files stay streamable and a delete still unlinks them —
+     * retention/archiver ignore them. This is the containment guard's trust boundary, defined ONCE so
+     * the match and clip controllers can never enforce divergent allow-lists.
+     */
+    static List<String> storageRoots(SettingsStore.Settings s) {
+        List<String> roots = new ArrayList<>();
+        roots.add(s.videoDir);
+        if (s.storageLocations != null) {
+            for (SettingsStore.StorageLocation loc : s.storageLocations) {
+                if (loc != null) {
+                    roots.add(loc.path());
+                }
+            }
+        }
+        if (s.previousVideoDirs != null) {
+            roots.addAll(s.previousVideoDirs);
+        }
+        return roots;
     }
 
     /**
