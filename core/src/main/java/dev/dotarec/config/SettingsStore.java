@@ -326,9 +326,8 @@ public class SettingsStore {
         if (oldDir == null || oldDir.isBlank() || oldDir.equals(s.videoDir)) {
             return;
         }
-        if (s.previousVideoDirs == null) {
-            s.previousVideoDirs = new ArrayList<>();
-        }
+        // previousVideoDirs is never null here: load() backfills it and copy() preserves it, and
+        // every caller mutates a loaded copy inside update().
         s.previousVideoDirs.remove(s.videoDir);
         if (!s.previousVideoDirs.contains(oldDir)) {
             s.previousVideoDirs.add(oldDir);
