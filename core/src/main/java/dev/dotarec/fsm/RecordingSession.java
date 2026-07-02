@@ -257,7 +257,8 @@ public class RecordingSession {
      * exact rules):
      *
      * <ul>
-     *   <li><b>{@link #emittedDeaths}/{@link #emittedKills}/{@link #emittedAssists} high-water marks</b>:
+     *   <li><b>{@link TaggerState#deaths()}/{@link TaggerState#kills()}/{@link TaggerState#assists()}
+     *       {@link TaggerState.HighWaterCounter high-water marks}</b>:
      *       the number of deaths/kills/assists already tagged as markers. Each counter path emits only
      *       increments beyond its mark -- so a kill/assist landing on a single-frame block-dropout tick
      *       is still tagged once the monotonic counter passes the mark when the block returns, exactly as
@@ -275,73 +276,58 @@ public class RecordingSession {
         /** Sentinel: no player-present frame observed yet, so the first one seeds the baseline. */
         static final int UNSEEN = -1;
 
-        /** High-water mark of deaths already tagged; UNSEEN until the first player-present frame. */
-        private int emittedDeaths = UNSEEN;
+        /**
+         * A seeded high-water mark over one monotonic GSI counter: {@link #UNSEEN} until the first
+         * player-present frame seeds the baseline, then advanced to the running total already tagged
+         * as markers. One shared shape for deaths/kills/assists so the three signals' seeding and
+         * emit-beyond-the-mark semantics can never drift apart.
+         */
+        public static final class HighWaterCounter {
+            private int value = UNSEEN;
 
-        /** High-water mark of kills already tagged; UNSEEN until the first player-present frame. */
-        private int emittedKills = UNSEEN;
+            /** True once the baseline has been seeded from a player-present frame. */
+            public boolean seeded() {
+                return value != UNSEEN;
+            }
 
-        /** High-water mark of assists already tagged; UNSEEN until the first player-present frame. */
-        private int emittedAssists = UNSEEN;
+            /** Seeds the mark to {@code total} unless a player-present frame already seeded it. */
+            public void seedIfUnseeded(int total) {
+                if (value == UNSEEN) {
+                    value = total;
+                }
+            }
+
+            /** The running total already tagged as markers. */
+            public int value() {
+                return value;
+            }
+
+            /** Advances the mark to {@code n} (the count already tagged). */
+            public void set(int n) {
+                this.value = n;
+            }
+        }
+
+        private final HighWaterCounter deaths = new HighWaterCounter();
+        private final HighWaterCounter kills = new HighWaterCounter();
+        private final HighWaterCounter assists = new HighWaterCounter();
 
         /** True once THIS dead episode has already produced a death marker; reset on the next alive. */
         private boolean deathEmittedThisEpisode;
 
-        /** True once the deaths baseline has been seeded from a player-present frame. */
-        public boolean deathsSeeded() {
-            return emittedDeaths != UNSEEN;
+        /** High-water mark of deaths already tagged. */
+        public HighWaterCounter deaths() {
+            return deaths;
         }
 
-        /** Seeds the high-water mark to the running death total of the first player-present frame. */
-        public void seedDeaths(int deaths) {
-            this.emittedDeaths = deaths;
+        /** High-water mark of kills already tagged. */
+        public HighWaterCounter kills() {
+            return kills;
         }
 
-        public int emittedDeaths() {
-            return emittedDeaths;
-        }
-
-        /** Advances the high-water mark to {@code n} (the count of deaths tagged so far). */
-        public void setEmittedDeaths(int n) {
-            this.emittedDeaths = n;
-        }
-
-        /** True once the kills baseline has been seeded from a player-present frame. */
-        public boolean killsSeeded() {
-            return emittedKills != UNSEEN;
-        }
-
-        /** Seeds the high-water mark to the running kill total of the first player-present frame. */
-        public void seedKills(int kills) {
-            this.emittedKills = kills;
-        }
-
-        public int emittedKills() {
-            return emittedKills;
-        }
-
-        /** Advances the high-water mark to {@code n} (the count of kills tagged so far). */
-        public void setEmittedKills(int n) {
-            this.emittedKills = n;
-        }
-
-        /** True once the assists baseline has been seeded from a player-present frame. */
-        public boolean assistsSeeded() {
-            return emittedAssists != UNSEEN;
-        }
-
-        /** Seeds the high-water mark to the running assist total of the first player-present frame. */
-        public void seedAssists(int assists) {
-            this.emittedAssists = assists;
-        }
-
-        public int emittedAssists() {
-            return emittedAssists;
-        }
-
-        /** Advances the high-water mark to {@code n} (the count of assists tagged so far). */
-        public void setEmittedAssists(int n) {
-            this.emittedAssists = n;
+        /** High-water mark of assists already tagged. */
+        public HighWaterCounter assists() {
+            return assists;
         }
 
         public boolean deathEmittedThisEpisode() {
