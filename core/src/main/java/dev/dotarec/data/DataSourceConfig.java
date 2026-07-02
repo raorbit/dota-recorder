@@ -59,6 +59,16 @@ public class DataSourceConfig {
         config.setJournalMode(SQLiteConfig.JournalMode.WAL);
         config.setSynchronous(SQLiteConfig.SynchronousMode.NORMAL);
         config.enforceForeignKeys(true);
+        // Explicit transactions BEGIN IMMEDIATE, not the driver-default DEFERRED. Every
+        // setAutoCommit(false) transaction in this app is read-then-write (MatchFsm.persistFinalized,
+        // CrashRecoveryRunner.recover, the enrichment claim), and under WAL a DEFERRED read->write
+        // upgrade fails INSTANTLY with SQLITE_BUSY_SNAPSHOT when any commit landed in between —
+        // SQLite deliberately skips the busy handler there, so the 5000ms busy_timeout never engages
+        // and the whole transaction (e.g. an entire finalize) rolls back. IMMEDIATE takes the write
+        // lock at BEGIN, where busy_timeout DOES apply. Autocommit reads issue no BEGIN and are
+        // unaffected; no long read-only setAutoCommit(false) transaction exists to suffer the
+        // up-front write lock.
+        config.setTransactionMode(SQLiteConfig.TransactionMode.IMMEDIATE);
 
         SQLiteDataSource sqlite = new SQLiteDataSource(config);
         sqlite.setUrl("jdbc:sqlite:" + dbPath.toAbsolutePath());
