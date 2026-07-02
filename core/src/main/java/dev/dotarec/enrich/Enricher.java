@@ -14,6 +14,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Properties;
+import java.util.Set;
+import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Async;
@@ -30,8 +32,11 @@ import org.springframework.stereotype.Service;
  *   <li>{@link FetchResult.Ready} -> full enrich (win formula + our-player stats), state
  *       {@code enriched}, publish {@code match.enriched}. Our scoreboard row is found by account id,
  *       falling back to the recorded hero when OpenDota omits {@code account_id} (the default-private
- *       "Expose Public Match Data" case, which hides the user's OWN row from most matches). Only when
- *       neither key can attribute a row -> permanent {@code failed} + {@code match.enrichFailed}.</li>
+ *       "Expose Public Match Data" case, which hides the user's OWN row from most matches). When
+ *       neither key attributes a row and the RECORDED hero is one the bundled map cannot name (a hero
+ *       newer than the map — the only failure a map refresh can heal), the row is HELD pending at the
+ *       capped backoff without consuming attempts. Any other attribution failure -> permanent
+ *       {@code failed} + {@code match.enrichFailed}.</li>
  *   <li>{@link FetchResult.NotReady} / {@link FetchResult.Missing} / {@link FetchResult.Transient}
  *       -> stay {@code pending}, bump attempts + backoff, publish nothing. On the attempt that
  *       crosses the cap -> {@code failed} + {@code match.enrichFailed} so it stops looping forever.
@@ -57,6 +62,11 @@ public class Enricher {
     private static final Map<Integer, String> HERO_NAMES_BY_ID = loadHeroNamesById();
 
     private static final String HERO_NAME_PREFIX = "npc_dota_hero_";
+
+    /** Bare slugs the bundled map can name; a recorded hero outside this set is newer than the map. */
+    private static final Set<String> KNOWN_HERO_SLUGS = HERO_NAMES_BY_ID.values().stream()
+            .map(Enricher::heroSlug)
+            .collect(Collectors.toUnmodifiableSet());
 
     private final MatchSource matchSource;
     private final MatchRepository matches;
@@ -138,6 +148,20 @@ public class Enricher {
 
         OpenDotaMatch.Player me = ourPlayer(match, accountId, row.hero());
         if (me == null) {
+            String recordedSlug = heroSlug(row.hero());
+            if (recordedSlug != null && !KNOWN_HERO_SLUGS.contains(recordedSlug)) {
+                // OUR recorded hero is newer than the bundled map, so its OpenDota row carries an
+                // id the hero join can't name yet -- a data gap on our side, not proof the row is
+                // unattributable. Hold at the capped backoff without consuming attempts; an app
+                // update with a refreshed map self-heals it, where a permanent fail never would.
+                // (Any other attribution failure is terminal: hero ids map 1:1 to names, so a
+                // refresh can never change the join result for a hero the map already knows.)
+                log.info("Match row {} (dota {}) was recorded on hero '{}', which the bundled hero "
+                        + "map cannot name yet; holding enrichment until the map is refreshed",
+                        matchRowId, dotaMatchId, row.hero());
+                matches.applyRetry(matchRowId, "pending", 0, backoffNextAfterMs(MAX_ATTEMPTS));
+                return;
+            }
             // No scoreboard row matched by account id OR by the recorded hero -- attribution is
             // impossible (hero unknown/absent from the response, or an id mismatch on a private
             // account whose row we also can't pin by hero). Permanent fail, but the row stays
