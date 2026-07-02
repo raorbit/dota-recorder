@@ -118,4 +118,26 @@ class SteamPathDiscoveryTest {
                         "\"AppState\"\n{\n\t\"installdir\"\t\"dota 2 beta\"\n}\n");
         assertThat(dir).contains("dota 2 beta");
     }
+
+    @Test
+    void parseRegSzValue_preservesAnAsciiPath() {
+        String output =
+                "\nHKEY_CURRENT_USER\\Software\\Valve\\Steam\n"
+                        + "    SteamPath    REG_SZ    C:\\Program Files (x86)\\Steam\n";
+        assertThat(SteamPathDiscovery.parseRegSzValue(output, "SteamPath"))
+                .isEqualTo("C:\\Program Files (x86)\\Steam");
+    }
+
+    @Test
+    void parseRegSzValue_preservesANonAsciiPathDecodedAsUtf8() {
+        // reg.exe is forced to emit UTF-8 (chcp 65001), so a Cyrillic SteamPath survives the decode:
+        // feed the UTF-8 bytes of the reg-query line through the same UTF-8 -> parse seam.
+        String path = "Д:\\Игры\\Steam"; // Д:\Игры\Steam
+        byte[] utf8 =
+                ("\nHKEY_CURRENT_USER\\Software\\Valve\\Steam\n"
+                                + "    SteamPath    REG_SZ    " + path + "\n")
+                        .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        String output = new String(utf8, java.nio.charset.StandardCharsets.UTF_8);
+        assertThat(SteamPathDiscovery.parseRegSzValue(output, "SteamPath")).isEqualTo(path);
+    }
 }

@@ -171,8 +171,14 @@ public class SteamPathDiscovery {
             return Optional.empty();
         }
         try {
+            // reg.exe writes its stdout in the console output code page (OEM: CP437/850/866/... by
+            // locale), so decoding as UTF-8 mangles a non-ASCII SteamPath. Force UTF-8 first via chcp
+            // (the windowless child still has a hidden console, so chcp takes effect) and read UTF-8.
             Process proc =
-                    new ProcessBuilder("reg", "query", key, "/v", valueName)
+                    new ProcessBuilder(
+                                    "cmd",
+                                    "/c",
+                                    "chcp 65001>nul && reg query \"" + key + "\" /v " + valueName)
                             .redirectErrorStream(true)
                             .start();
             // Drain stdout on a daemon thread so the waitFor timeout is authoritative even if a hung
@@ -219,7 +225,7 @@ public class SteamPathDiscovery {
     }
 
     /** Pulls the {@code REG_SZ} payload for {@code valueName} out of captured {@code reg query} output. */
-    private static String parseRegSzValue(String output, String valueName) {
+    static String parseRegSzValue(String output, String valueName) {
         for (String line : output.split("\n")) {
             if (line.contains(valueName) && line.contains("REG_SZ")) {
                 Matcher m = REG_SZ_VALUE.matcher(line);
