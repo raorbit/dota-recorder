@@ -12,13 +12,15 @@ import org.springframework.stereotype.Service;
  * <p>Detection rules (from the plan + the real GSI shape):
  * <ul>
  *   <li>{@code kills}/{@code deaths}/{@code assists} are running TOTALS. Each counter is diffed
- *       INDEPENDENTLY and a marker is emitted per increment, because a single ~10Hz tick can carry
- *       several at once (e.g. you trade a kill, an assist, and your own death in the same frame).
- *       A positive delta of N emits N markers of that type (rare, but a dropped frame can batch
- *       two kills into one tick). The kill/assist counter diff is gated on the PLAYER block being
- *       present on BOTH frames: a heartbeat / reconnect drops the player block (counters default to
- *       0), so a [player absent: 0/0/0] -&gt; [player back: non-zero KDA] pair would otherwise emit a
- *       burst of phantom kill/assist markers -- the gate suppresses that.</li>
+ *       INDEPENDENTLY against its own HIGH-WATER MARK and a marker is emitted per increment, because a
+ *       single ~10Hz tick can carry several at once (e.g. you trade a kill, an assist, and your own
+ *       death in the same frame). A positive delta of N emits N markers of that type (rare, but a
+ *       dropped frame can batch two kills into one tick). Each counter path is gated on the player block
+ *       being present on {@code curr}; the mark is only seeded from a player-present frame, so a
+ *       heartbeat / reconnect that drops the player block (counters default to 0) never burst-emits the
+ *       returning [player absent: 0/0/0] -&gt; [player back: non-zero KDA] pair as phantom markers, and a
+ *       kill/assist that landed on a single-frame block-dropout tick is still tagged once the monotonic
+ *       counter passes the mark when the block returns.</li>
  *   <li>A death is detected from the {@code deaths} counter delta (primary) OR the {@code hero.alive}
  *       true-&gt;false FALLING EDGE (fallback when the counter lagged), but a single death emits a
  *       single marker even when those two signals straddle ADJACENT ticks. The falling edge is gated
@@ -27,11 +29,11 @@ import org.springframework.stereotype.Service;
  *       read as a phantom death.</li>
  * </ul>
  *
- * <p>Death detection is NOT a pure per-tick prev-&gt;curr diff: it carries a small {@link TaggerState}
+ * <p>Detection is NOT a pure per-tick prev-&gt;curr diff: it carries a small {@link TaggerState}
  * across ticks (owned by the {@code RecordingSession}, written only under the FSM's synchronized
- * {@code onFrame}). It keeps {@code emittedDeaths} -- a HIGH-WATER MARK of deaths already tagged,
- * seeded to the running total on the first player-present frame -- plus a per-dead-episode dedupe
- * latch, so it survives desync modes the raw diff misses:
+ * {@code onFrame}). It keeps a HIGH-WATER MARK of already-tagged kills/deaths/assists, each seeded to
+ * the running total on the first player-present frame, plus a per-dead-episode dedupe latch, so death
+ * detection survives desync modes the raw diff misses:
  * <ul>
  *   <li><b>Counter/alive straddle (Finding B):</b> the deaths increment and the alive true-&gt;false
  *       edge describe one death but can land on adjacent ticks. The counter path emits deaths beyond
@@ -83,12 +85,20 @@ public class EventTagger {
                         curr.monotonicNanos(), recordConfirmedNanos, durationS);
         Integer gameClock = curr.gameClock();
 
-        // Seed the deaths high-water mark from the first player-present frame's running total, so joining
-        // a match already in progress (or a recording that arms mid-life) never burst-emits the
-        // pre-existing death count as markers. Seeded from prev so the very first prev->curr delta (a
-        // single-pair diff, or the FSM's first tag) is still captured.
-        if (!state.deathsSeeded() && prev.playerPresent()) {
-            state.seedDeaths(prev.deaths());
+        // Seed the deaths/kills/assists high-water marks from the first player-present frame's running
+        // totals, so joining a match already in progress (or a recording that arms mid-life) never
+        // burst-emits the pre-existing counts as markers. Seeded from prev so the very first prev->curr
+        // delta (a single-pair diff, or the FSM's first tag) is still captured.
+        if (prev.playerPresent()) {
+            if (!state.deathsSeeded()) {
+                state.seedDeaths(prev.deaths());
+            }
+            if (!state.killsSeeded()) {
+                state.seedKills(prev.kills());
+            }
+            if (!state.assistsSeeded()) {
+                state.seedAssists(prev.assists());
+            }
         }
 
         // Respawn resets the dead-episode dedupe latch so the NEXT death's falling edge can emit again. A
@@ -102,11 +112,24 @@ public class EventTagger {
             state.resetDeathEpisode();
         }
 
-        // Kill/assist counters: raw prev->curr diff, gated on the player block being present on BOTH frames
-        // (a dropout zeroes the counters, so a returning frame would otherwise burst-emit phantom markers).
-        if (prev.playerPresent() && curr.playerPresent()) {
-            emitIncrements(markers, "kill", curr.kills() - prev.kills(), offset, gameClock);
-            emitIncrements(markers, "assist", curr.assists() - prev.assists(), offset, gameClock);
+        // Kill/assist counters: emit every increment BEYOND the high-water mark of kills/assists already
+        // tagged, gated on the player block being present on curr (the marks are only seeded from a
+        // player-present frame, so an unseeded mark also suppresses the returning-from-dropout burst). The
+        // monotonic counters reveal a kill/assist that landed on a single-frame block-dropout tick once the
+        // block returns, just as the deaths path does -- a raw prev->curr diff dropped it (Finding F4).
+        if (curr.playerPresent() && state.killsSeeded()) {
+            int newKills = curr.kills() - state.emittedKills();
+            if (newKills > 0) {
+                emitIncrements(markers, "kill", newKills, offset, gameClock);
+                state.setEmittedKills(curr.kills());
+            }
+        }
+        if (curr.playerPresent() && state.assistsSeeded()) {
+            int newAssists = curr.assists() - state.emittedAssists();
+            if (newAssists > 0) {
+                emitIncrements(markers, "assist", newAssists, offset, gameClock);
+                state.setEmittedAssists(curr.assists());
+            }
         }
 
         // Death counter path (primary, authoritative). The running deaths counter is monotonic, so emit

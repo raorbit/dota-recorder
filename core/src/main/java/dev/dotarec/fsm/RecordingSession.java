@@ -257,13 +257,14 @@ public class RecordingSession {
      * exact rules):
      *
      * <ul>
-     *   <li><b>{@link #emittedDeaths} high-water mark</b>: the number of deaths already tagged as
-     *       markers. The counter path emits only deaths beyond it, and the falling edge advances it by
-     *       one, so one death yields exactly one marker whichever signal (counter or edge) arrives first
-     *       or how far apart -- and a death revealed only after a block dropout / unobserved respawn is
-     *       still tagged once the monotonic counter passes the mark. Seeded to {@link #UNSEEN} until the
-     *       first player-present frame sets it to that frame's running death total, so a recording that
-     *       joins a match in progress does not burst-emit the pre-existing deaths.</li>
+     *   <li><b>{@link #emittedDeaths}/{@link #emittedKills}/{@link #emittedAssists} high-water marks</b>:
+     *       the number of deaths/kills/assists already tagged as markers. Each counter path emits only
+     *       increments beyond its mark -- so a kill/assist landing on a single-frame block-dropout tick
+     *       is still tagged once the monotonic counter passes the mark when the block returns, exactly as
+     *       for deaths -- and the deaths falling edge advances that mark by one so one death yields exactly
+     *       one marker whichever signal (counter or edge) arrives first or how far apart. Each is seeded to
+     *       {@link #UNSEEN} until the first player-present frame sets it to that frame's running total, so a
+     *       recording that joins a match in progress does not burst-emit the pre-existing counts.</li>
      *   <li><b>{@link #deathEmittedThisEpisode} latch</b>: records that a death was already tagged for
      *       the current dead episode so the falling-edge fallback fires at most once per episode; reset
      *       the next time the hero is observed alive (a respawn rising edge). It gates ONLY the edge, not
@@ -276,6 +277,12 @@ public class RecordingSession {
 
         /** High-water mark of deaths already tagged; UNSEEN until the first player-present frame. */
         private int emittedDeaths = UNSEEN;
+
+        /** High-water mark of kills already tagged; UNSEEN until the first player-present frame. */
+        private int emittedKills = UNSEEN;
+
+        /** High-water mark of assists already tagged; UNSEEN until the first player-present frame. */
+        private int emittedAssists = UNSEEN;
 
         /** True once THIS dead episode has already produced a death marker; reset on the next alive. */
         private boolean deathEmittedThisEpisode;
@@ -297,6 +304,44 @@ public class RecordingSession {
         /** Advances the high-water mark to {@code n} (the count of deaths tagged so far). */
         public void setEmittedDeaths(int n) {
             this.emittedDeaths = n;
+        }
+
+        /** True once the kills baseline has been seeded from a player-present frame. */
+        public boolean killsSeeded() {
+            return emittedKills != UNSEEN;
+        }
+
+        /** Seeds the high-water mark to the running kill total of the first player-present frame. */
+        public void seedKills(int kills) {
+            this.emittedKills = kills;
+        }
+
+        public int emittedKills() {
+            return emittedKills;
+        }
+
+        /** Advances the high-water mark to {@code n} (the count of kills tagged so far). */
+        public void setEmittedKills(int n) {
+            this.emittedKills = n;
+        }
+
+        /** True once the assists baseline has been seeded from a player-present frame. */
+        public boolean assistsSeeded() {
+            return emittedAssists != UNSEEN;
+        }
+
+        /** Seeds the high-water mark to the running assist total of the first player-present frame. */
+        public void seedAssists(int assists) {
+            this.emittedAssists = assists;
+        }
+
+        public int emittedAssists() {
+            return emittedAssists;
+        }
+
+        /** Advances the high-water mark to {@code n} (the count of assists tagged so far). */
+        public void setEmittedAssists(int n) {
+            this.emittedAssists = n;
         }
 
         public boolean deathEmittedThisEpisode() {
