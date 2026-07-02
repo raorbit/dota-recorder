@@ -250,11 +250,10 @@ public class ClipRepository {
      * Compare-and-set variant of {@link #updateStatus} for the generator's TERMINAL writes: flips a
      * clip to {@code ready}/{@code failed} (and its outputs) ONLY if the row is still
      * {@code generating} ({@code WHERE id=? AND status='generating'}), mirroring
-     * {@link #rependIfStale}'s guard. This closes a double-cut race: if the periodic self-heal already
-     * re-pended a slow render and a SECOND worker re-claimed it, the ORIGINAL worker's terminal write
-     * must not resurrect/overwrite the row and point it at a file the second worker is still rewriting.
-     * The plain {@link #updateStatus} (unconditional {@code WHERE id=?}) is retained for the boot-time
-     * orphan reconcile, which legitimately flips {@code generating} → {@code pending}.
+     * {@link #rependIfOrphaned}'s guard. This closes a double-cut race: if the periodic self-heal
+     * already re-pended a slow render and a SECOND worker re-claimed it, the ORIGINAL worker's terminal
+     * write must not resurrect/overwrite the row and point it at a file the second worker is still
+     * rewriting.
      *
      * @return the number of rows updated — 0 means the row is no longer {@code generating} (re-pended,
      *     re-claimed, or deleted), so the caller must clean up the orphaned output it just wrote.
@@ -304,26 +303,58 @@ public class ClipRepository {
     }
 
     /**
-     * Re-pends a wedged {@code generating} row, but ONLY if it is still {@code generating} — a
-     * compare-and-set ({@code WHERE id=? AND status='generating'}) so a worker that flipped the row to
-     * {@code ready}/{@code failed} between the sweep's stale query and this write is not clobbered back
-     * to {@code pending} (which would re-cut a finished clip). Clears the prior generator outputs.
+     * Re-stamps {@code generation_started_at} on a claim the calling worker already holds — invoked
+     * after the {@code StorageMaintenanceLock} wait, immediately before the cut, so the
+     * {@link #findStaleGenerating} cutoff measures CUTTING time only, never lock-wait time (an archive
+     * pass can hold the lock far longer than the stale window). Fenced on the caller's own claim stamp
+     * ({@code WHERE status='generating' AND generation_started_at = expectedStartedAt}): if the sweep
+     * re-pended the row mid-wait and a second worker re-claimed it (writing a NEW stamp), the fence
+     * fails and the caller must NOT cut — two workers on the same output path would let the loser's
+     * cleanup delete the winner's finished clip.
+     *
+     * @return true only if the caller still owns the claim and the stamp was refreshed
+     */
+    public boolean touchGenerationStarted(long id, long expectedStartedAt, long startedAt) {
+        String sql = "UPDATE clips SET generation_started_at = ? "
+                + "WHERE id = ? AND status = 'generating' AND generation_started_at = ?";
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, startedAt);
+            ps.setLong(2, id);
+            ps.setLong(3, expectedStartedAt);
+            return ps.executeUpdate() == 1;
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to re-stamp generation start for clip " + id, e);
+        }
+    }
+
+    /**
+     * Re-pends a wedged {@code generating} row, but ONLY while it is still {@code generating} AND its
+     * claim stamp is absent or older than {@code staleBefore}. Both guards live in the WHERE so the
+     * check and the flip are one atomic statement, not a read-then-write: a worker that flipped the
+     * row to {@code ready}/{@code failed} is not clobbered back to {@code pending} (which would re-cut
+     * a finished clip), and a LIVE claim is never reset — the boot reconcile can see one (Tomcat
+     * serves bridge requests, and the {@code @Scheduled} clock starts, at context refresh, before
+     * {@code ApplicationReadyEvent}), and the periodic sweep can race a worker whose fenced re-stamp
+     * lands between the stale query and this flip. Clears the prior generator outputs.
      *
      * @return true only if THIS call re-pended the row.
      */
-    public boolean rependIfStale(long id) {
+    public boolean rependIfOrphaned(long id, long staleBefore) {
         String sql = """
                 UPDATE clips
                 SET status = 'pending', video_path = NULL, file_size_bytes = NULL,
                     thumb_path = NULL, error = NULL, generation_started_at = NULL
                 WHERE id = ? AND status = 'generating'
+                  AND (generation_started_at IS NULL OR generation_started_at < ?)
                 """;
         try (Connection conn = dataSource.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setLong(1, id);
+            ps.setLong(2, staleBefore);
             return ps.executeUpdate() == 1;
         } catch (SQLException e) {
-            throw new IllegalStateException("Failed to re-pend stale clip " + id, e);
+            throw new IllegalStateException("Failed to re-pend orphaned clip " + id, e);
         }
     }
 

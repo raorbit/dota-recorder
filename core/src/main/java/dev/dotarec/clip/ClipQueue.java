@@ -54,18 +54,24 @@ public class ClipQueue {
     }
 
     /**
-     * At startup, reset any clip stuck in {@code generating} back to {@code pending}. Such a row is an
+     * At startup, reset clips stuck in {@code generating} back to {@code pending}. Such a row is an
      * orphan from a prior run that crashed mid-cut — the periodic {@link #sweep()} only re-dispatches
      * {@code pending}, so without this it would spin forever (a perpetual UI spinner). Mirrors the
-     * recording journal's crash reconciliation. Safe ONLY at boot, before any worker is active: a live
-     * {@code generating} row must never be reset, or it would be double-cut.
+     * recording journal's crash reconciliation. NOT unconditional: Tomcat serves bridge requests (and
+     * the {@code @Scheduled} clock starts) at context refresh, before {@code ApplicationReadyEvent}
+     * fires, so a worker can already hold a LIVE claim here (a manual clip POST, or the first sweep
+     * when earlier runners take &gt;60s) — resetting it would re-enable the double-cut. Only rows whose
+     * claim stamp is missing or already past the stale cutoff are reset; a recent claim is left for its
+     * worker (or, if that worker truly died with the app still up, for {@link #sweep()}'s stale
+     * self-heal).
      */
     @EventListener(ApplicationReadyEvent.class)
     public void reconcileOrphans() {
-        List<ClipRow> stuck = clips.findByStatus("generating");
-        for (ClipRow clip : stuck) {
-            log.info("Re-pending clip {} orphaned in 'generating' by a prior run", clip.id());
-            clips.updateStatus(clip.id(), "pending", null, null, null, null);
+        long staleBefore = System.currentTimeMillis() - STALE_GENERATING_MS;
+        for (ClipRow clip : clips.findByStatus("generating")) {
+            if (clips.rependIfOrphaned(clip.id(), staleBefore)) {
+                log.info("Re-pending clip {} orphaned in 'generating' by a prior run", clip.id());
+            }
         }
     }
 
@@ -80,10 +86,12 @@ public class ClipQueue {
         // Self-heal rows wedged in 'generating' past the stale cutoff. Unlike reconcileOrphans (boot
         // only), this runs every interval, so a row stranded mid-flight by a finalize-time DB failure
         // (the @Async exception escaped before it could be marked failed) recovers without a reboot.
-        // rependIfStale is a compare-and-set on status='generating', so a worker that just finished is
-        // not clobbered back to pending. Re-pended rows are picked up by the pending dispatch below.
-        for (ClipRow stuck : clips.findStaleGenerating(System.currentTimeMillis() - STALE_GENERATING_MS)) {
-            if (clips.rependIfStale(stuck.id())) {
+        // rependIfOrphaned re-checks both status AND the claim stamp in the WHERE, so a worker that
+        // just finished — or whose fenced re-stamp landed after the stale query above — is not
+        // clobbered back to pending. Re-pended rows are picked up by the pending dispatch below.
+        long staleBefore = System.currentTimeMillis() - STALE_GENERATING_MS;
+        for (ClipRow stuck : clips.findStaleGenerating(staleBefore)) {
+            if (clips.rependIfOrphaned(stuck.id(), staleBefore)) {
                 log.info("Re-pending clip {} wedged in 'generating' since {} (stale > {}ms)",
                         stuck.id(), stuck.createdAt(), STALE_GENERATING_MS);
             }
