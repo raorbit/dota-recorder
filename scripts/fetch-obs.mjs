@@ -73,8 +73,12 @@ async function main() {
   rmSync(portableDir, { recursive: true, force: true });
   mkdirSync(portableDir, { recursive: true });
   // Windows-only target: use PowerShell Expand-Archive (no extra npm dependency).
+  // Pass the paths via env vars and read them back with $env: inside the command — never
+  // interpolate them into the PowerShell string, so paths containing apostrophes, spaces
+  // or other special characters can't produce an unbalanced/invalid command.
   execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command',
-    `Expand-Archive -Path '${zipPath}' -DestinationPath '${portableDir}' -Force`], { stdio: 'inherit' });
+    'Expand-Archive -LiteralPath $env:DOTAREC_OBS_ZIP -DestinationPath $env:DOTAREC_OBS_DEST -Force'],
+    { stdio: 'inherit', env: { ...process.env, DOTAREC_OBS_ZIP: zipPath, DOTAREC_OBS_DEST: portableDir } });
   if (!existsSync(obs64)) {
     throw new Error(`Extraction did not produce ${obs64} — the OBS zip layout may have changed.`);
   }
