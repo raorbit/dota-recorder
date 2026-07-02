@@ -276,6 +276,57 @@ class EventTaggerTest {
                 .hasSize(1);
     }
 
+    // ---- Finding F4: a kill/assist during a single-frame player-block dropout is not lost ------
+
+    @Test
+    void killDuringSingleFrameBlockDropout_isEmittedWhenBlockReturns() {
+        // The player block drops on the EXACT kill tick (a heartbeat/reconnect zeroes the counters).
+        // A raw prev->curr diff gated on presence on BOTH frames would compare the returning frame
+        // against the zeroed absent prev and drop the kill; the kills high-water mark reveals it
+        // against the last-good total once the block returns.
+        GsiFrame present1 =
+                frame().wall(ANCHOR + 8_000L).kills(2).playerPresent(true).build();
+        GsiFrame heartbeat = frame().wall(ANCHOR + 8_100L).noPlayer().build();
+        GsiFrame present2 =
+                frame().wall(ANCHOR + 8_200L).kills(3).playerPresent(true).build();
+
+        assertThat(replay(present1, heartbeat, present2)).filteredOn(m -> m.type().equals("kill"))
+                .as("a kill on a block-dropout tick is still emitted when the block returns")
+                .hasSize(1);
+    }
+
+    @Test
+    void assistDuringSingleFrameBlockDropout_isEmittedWhenBlockReturns() {
+        // Symmetric to the kill case: an assist landing on a player-block dropout tick is revealed by
+        // the assists high-water mark once the block returns, not dropped by the raw diff.
+        GsiFrame present1 =
+                frame().wall(ANCHOR + 9_000L).assists(4).playerPresent(true).build();
+        GsiFrame heartbeat = frame().wall(ANCHOR + 9_100L).noPlayer().build();
+        GsiFrame present2 =
+                frame().wall(ANCHOR + 9_200L).assists(5).playerPresent(true).build();
+
+        assertThat(replay(present1, heartbeat, present2)).filteredOn(m -> m.type().equals("assist"))
+                .as("an assist on a block-dropout tick is still emitted when the block returns")
+                .hasSize(1);
+    }
+
+    @Test
+    void playerBlockDropoutThenReturnsUnchanged_isNotPhantomKillsOrAssists() {
+        // No-phantom regression for the dropout-reseed path: the player block drops and returns with the
+        // SAME kill/assist totals (nothing happened during the gap). The high-water mark must recognise
+        // the returning totals as already-tagged and emit nothing -- the dropout frame's zeroed counters
+        // must not reseed the mark low and burst-emit the pre-existing counts.
+        GsiFrame present1 =
+                frame().wall(ANCHOR + 11_000L).kills(6).assists(2).playerPresent(true).build();
+        GsiFrame heartbeat = frame().wall(ANCHOR + 11_100L).noPlayer().build();
+        GsiFrame present2 =
+                frame().wall(ANCHOR + 11_200L).kills(6).assists(2).playerPresent(true).build();
+
+        assertThat(replay(present1, heartbeat, present2))
+                .as("an unchanged player-block dropout emits no phantom kill/assist markers")
+                .isEmpty();
+    }
+
     /** Replays frames through ONE shared TaggerState (as the FSM does) and collects every marker. */
     private List<PendingMarker> replay(GsiFrame... frames) {
         TaggerState state = new TaggerState();
