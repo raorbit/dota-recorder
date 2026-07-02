@@ -324,6 +324,9 @@ export function VideoPlayer({
       ) {
         return;
       }
+      // Stand down while a menu/dialog overlay owns focus (e.g. the table's row-actions PopupMenu,
+      // whose roving focus ignores horizontal arrows) so it can't scrub the background video.
+      if (t?.closest?.('[role="menu"],[role="menuitem"],[role="dialog"],[role="alertdialog"]')) return;
       const v = videoRef.current;
       if (!v || !v.currentSrc) return; // no video loaded — let the key behave normally
       e.preventDefault();
