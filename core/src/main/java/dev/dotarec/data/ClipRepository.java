@@ -292,14 +292,7 @@ public class ClipRepository {
     public boolean claimForGeneration(long id, long startedAt) {
         String sql = "UPDATE clips SET status = 'generating', generation_started_at = ? "
                 + "WHERE id = ? AND status = 'pending'";
-        try (Connection conn = dataSource.getConnection();
-             PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setLong(1, startedAt);
-            ps.setLong(2, id);
-            return ps.executeUpdate() == 1;
-        } catch (SQLException e) {
-            throw new IllegalStateException("Failed to claim clip " + id + " for generation", e);
-        }
+        return fencedUpdate(sql, "Failed to claim clip " + id + " for generation", startedAt, id);
     }
 
     /**
@@ -317,15 +310,8 @@ public class ClipRepository {
     public boolean touchGenerationStarted(long id, long expectedStartedAt, long startedAt) {
         String sql = "UPDATE clips SET generation_started_at = ? "
                 + "WHERE id = ? AND status = 'generating' AND generation_started_at = ?";
-        try (Connection conn = dataSource.getConnection();
-             PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setLong(1, startedAt);
-            ps.setLong(2, id);
-            ps.setLong(3, expectedStartedAt);
-            return ps.executeUpdate() == 1;
-        } catch (SQLException e) {
-            throw new IllegalStateException("Failed to re-stamp generation start for clip " + id, e);
-        }
+        return fencedUpdate(sql, "Failed to re-stamp generation start for clip " + id,
+                startedAt, id, expectedStartedAt);
     }
 
     /**
@@ -348,13 +334,23 @@ public class ClipRepository {
                 WHERE id = ? AND status = 'generating'
                   AND (generation_started_at IS NULL OR generation_started_at < ?)
                 """;
+        return fencedUpdate(sql, "Failed to re-pend orphaned clip " + id, id, staleBefore);
+    }
+
+    /**
+     * Runs one guarded single-row UPDATE (a compare-and-set: the guard lives in the WHERE), true only
+     * when exactly this call changed the row. Shared by the claim / re-stamp / re-pend CAS trio so
+     * their connection handling and success test can never drift apart.
+     */
+    private boolean fencedUpdate(String sql, String errContext, long... params) {
         try (Connection conn = dataSource.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setLong(1, id);
-            ps.setLong(2, staleBefore);
+            for (int i = 0; i < params.length; i++) {
+                ps.setLong(i + 1, params[i]);
+            }
             return ps.executeUpdate() == 1;
         } catch (SQLException e) {
-            throw new IllegalStateException("Failed to re-pend orphaned clip " + id, e);
+            throw new IllegalStateException(errContext, e);
         }
     }
 
