@@ -17,6 +17,7 @@ import dev.dotarec.data.RecordingSessionRepository;
 import dev.dotarec.data.RecordingSessionRepository.RecordingEvent;
 import dev.dotarec.data.RecordingSessionRepository.RecordingSessionRow;
 import dev.dotarec.data.TestDb;
+import dev.dotarec.retention.StorageMaintenanceLock;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -37,6 +38,7 @@ class CrashRecoveryRunnerTest {
     private Path dir;
     private Path videoDir;
     private SettingsStore settings;
+    private StorageMaintenanceLock maintenanceLock;
 
     @BeforeEach
     void setUp(@TempDir Path tmp) throws Exception {
@@ -56,9 +58,11 @@ class CrashRecoveryRunnerTest {
                     s.videoDir = videoDir.toString();
                     return s;
                 });
+        maintenanceLock = new StorageMaintenanceLock();
         runner =
                 new CrashRecoveryRunner(
-                        journal, matches, clips, markers, pauses, ds, new ObjectMapper(), settings);
+                        journal, matches, clips, markers, pauses, ds, new ObjectMapper(), settings,
+                        maintenanceLock);
     }
 
     @Test
@@ -606,6 +610,34 @@ class CrashRecoveryRunnerTest {
                 .filteredOn(row -> orphan.toString().equals(row.videoPath()))
                 .singleElement()
                 .satisfies(row -> assertThat(row.enrichmentState()).isEqualTo("gsi_only"));
+    }
+
+    @Test
+    void reconciliationWaitsForTheStorageMaintenanceLock() throws Exception {
+        // The archiver/sweeper @Scheduled clocks start at context refresh while this runner executes
+        // after it, so a locked maintenance pass can overlap recovery. Mid-move, the archiver's fresh
+        // cross-store copy is referenced by no row yet, so an UNLOCKED scan would delete it as move
+        // residue right before the repoint lands. The runner must block on the shared lock instead of
+        // scanning past an in-flight pass.
+        Path orphan = videoDir.resolve("orphan.mp4");
+        Files.writeString(orphan, "orphan bytes");
+        makeStale(orphan);
+
+        maintenanceLock.lock(); // an archive/sweep pass is in flight
+        Thread recovery = new Thread(() -> runner.run(null));
+        try {
+            recovery.start();
+            recovery.join(500);
+            // Still blocked behind the pass: nothing has been reconciled yet.
+            assertThat(matches.findAll()).isEmpty();
+        } finally {
+            maintenanceLock.unlock();
+        }
+        recovery.join(10_000);
+        assertThat(recovery.isAlive()).isFalse();
+        assertThat(matches.findAll())
+                .filteredOn(row -> orphan.toString().equals(row.videoPath()))
+                .hasSize(1);
     }
 
     /**

@@ -13,6 +13,7 @@ import dev.dotarec.data.PauseRepository;
 import dev.dotarec.data.RecordingSessionRepository;
 import dev.dotarec.data.RecordingSessionRepository.RecordingEventRow;
 import dev.dotarec.data.RecordingSessionRepository.RecordingSessionRow;
+import dev.dotarec.retention.StorageMaintenanceLock;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
@@ -70,6 +71,7 @@ public class CrashRecoveryRunner implements ApplicationRunner {
     private final DataSource dataSource;
     private final ObjectMapper mapper;
     private final SettingsStore settings;
+    private final StorageMaintenanceLock maintenanceLock;
 
     public CrashRecoveryRunner(
             RecordingSessionRepository journal,
@@ -79,7 +81,8 @@ public class CrashRecoveryRunner implements ApplicationRunner {
             PauseRepository pauses,
             DataSource dataSource,
             ObjectMapper mapper,
-            SettingsStore settings) {
+            SettingsStore settings,
+            StorageMaintenanceLock maintenanceLock) {
         this.journal = journal;
         this.matches = matches;
         this.clips = clips;
@@ -88,24 +91,37 @@ public class CrashRecoveryRunner implements ApplicationRunner {
         this.dataSource = dataSource;
         this.mapper = mapper;
         this.settings = settings;
+        this.maintenanceLock = maintenanceLock;
     }
 
     @Override
     public void run(ApplicationArguments args) {
-        List<RecordingSessionRow> unfinished = journal.findUnfinished();
-        if (unfinished.isEmpty()) {
-            reconcileOrphanVods();
-            return;
-        }
-        log.warn("Recovering {} unfinished recording session(s)", unfinished.size());
-        for (RecordingSessionRow session : unfinished) {
-            try {
-                recover(session);
-            } catch (RuntimeException e) {
-                log.error("Failed to recover recording session {}: {}", session.sessionId(), e.toString(), e);
+        // The archiver/sweeper @Scheduled clocks start at context refresh, but runners execute AFTER
+        // refresh — a slow migration + recovery overlaps their first passes. Mid-move, the archiver's
+        // fresh cross-store copy is not yet in any row, so an unlocked scan would read it as
+        // unreferenced move residue and delete it just before the row is repointed at it (losing BOTH
+        // copies once the archiver unlinks the source). Hold the maintenance lock across the whole
+        // reconciliation, so every referenced-path snapshot below (recover's link scan and the orphan
+        // scan) is taken with no move/sweep in flight and cannot go stale mid-decision.
+        maintenanceLock.lock();
+        try {
+            List<RecordingSessionRow> unfinished = journal.findUnfinished();
+            if (unfinished.isEmpty()) {
+                reconcileOrphanVods();
+                return;
             }
+            log.warn("Recovering {} unfinished recording session(s)", unfinished.size());
+            for (RecordingSessionRow session : unfinished) {
+                try {
+                    recover(session);
+                } catch (RuntimeException e) {
+                    log.error("Failed to recover recording session {}: {}", session.sessionId(), e.toString(), e);
+                }
+            }
+            reconcileOrphanVods();
+        } finally {
+            maintenanceLock.unlock();
         }
-        reconcileOrphanVods();
     }
 
     private void recover(RecordingSessionRow session) {
