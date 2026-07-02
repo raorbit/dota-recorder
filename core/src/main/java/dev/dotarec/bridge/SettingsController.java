@@ -128,19 +128,24 @@ public class SettingsController {
             throw new ResponseStatusException(
                     HttpStatus.BAD_REQUEST, "video directory must not be blank");
         }
-        if (patch.storageLocations() != null) {
-            validateStorageLocations(patch.storageLocations(), patch.videoDir());
-        } else if (patch.videoDir() != null) {
-            // A videoDir-only PUT doesn't carry storageLocations, but the new dir must still not
-            // overlap/nest the ALREADY-STORED archive locations (else it double-counts usage and
-            // degenerates the archiver). Re-run the same rule against the effective stored list.
-            validateStorageLocations(store.get().storageLocations, patch.videoDir());
-        }
         // Atomic read-copy-mutate: only the user-facing fields are overlaid (non-null), so the
         // app-managed OBS fields (host/port/password) carry forward untouched rather than being
         // reset to defaults.
         store.update(
                 current -> {
+                    // The storage-overlap rule runs INSIDE the store's synchronized update, against
+                    // the authoritative copy, so a concurrent PUT can't slip a nested videoDir /
+                    // archive pair between the check and the mutation. A thrown 400 aborts before
+                    // anything is persisted.
+                    if (patch.storageLocations() != null) {
+                        validateStorageLocations(patch.storageLocations(),
+                                patch.videoDir() != null ? patch.videoDir() : current.videoDir);
+                    } else if (patch.videoDir() != null) {
+                        // A videoDir-only PUT doesn't carry storageLocations, but the new dir must
+                        // still not overlap/nest the ALREADY-STORED archive locations (else it
+                        // double-counts usage and degenerates the archiver).
+                        validateStorageLocations(current.storageLocations, patch.videoDir());
+                    }
                     if (patch.resolution() != null) {
                         current.resolution = patch.resolution();
                     }
@@ -226,8 +231,9 @@ public class SettingsController {
     /**
      * Validates a full-list-replace of {@code storageLocations}: each path non-blank, each
      * {@code capGb > 0}, and every path distinct from AND not nested within the others or the active
-     * recording directory ({@code patchVideoDir} when the same PUT also changes it, else the stored
-     * one).
+     * recording directory ({@code activeDir}: the incoming videoDir when the same PUT changes it, else
+     * the stored one — resolved by the caller inside the store's update so the check is atomic with
+     * the mutation).
      *
      * <p>Both exact duplicates and parent/child containment are rejected. An archive drive pointed at
      * the active dir would make the archiver move a file onto itself; a nested pair (one path a prefix
@@ -241,8 +247,7 @@ public class SettingsController {
      * <p>A cap that exceeds the drive's physical capacity is intentionally NOT rejected here: it's
      * warn-only in the UI, matching the "free-space check warns, never blocks" posture.
      */
-    private void validateStorageLocations(List<StorageLocation> locations, String patchVideoDir) {
-        String activeDir = patchVideoDir != null ? patchVideoDir : store.get().videoDir;
+    private void validateStorageLocations(List<StorageLocation> locations, String activeDir) {
         // Accumulate the canonical form of every path accepted so far (the active recording dir plus
         // each validated archive path) and test every new path against all of them for either-direction
         // containment. A plain Set would catch only exact duplicates, not nesting.
