@@ -211,6 +211,59 @@ class EnricherTest {
     }
 
     @Test
+    void recordedHeroNewerThanBundledMapHoldsInsteadOfPermanentFail() throws Exception {
+        // We RECORDED a hero the bundled map cannot name (shipped after heroes/hero-ids.properties
+        // was last refreshed), so our own anonymized row is hiding behind an unmappable hero id —
+        // held pending without consuming attempts rather than failed forever; a refreshed map on a
+        // later app update self-heals it.
+        long id = insertPendingWithHero(917L, "npc_dota_hero_brand_new_hero");
+        OpenDotaMatch.Player onNewHero = new OpenDotaMatch.Player(
+                null, 0, 999, 5, 5, 5, 300, 400, 12000, 100, 60);
+        OpenDotaMatch match = new OpenDotaMatch(917L, true, 1800, 1000L, 7, 22,
+                List.of(onNewHero, player(55555555L, 128)));
+        enricher(FetchResult.ready(match)).enrich(id, 917L);
+
+        assertThat(repo.findById(id).orElseThrow().enrichmentState()).isEqualTo("pending");
+        assertThat(repo.enrichAttempts(id)).isEqualTo(0);
+        assertThat(events.types()).isEmpty();
+    }
+
+    @Test
+    void unknownHeroIdOnAnotherRowDoesNotHoldWhenOurHeroIsMapped() throws Exception {
+        // Our recorded hero ("rubick") IS in the bundled map, so a map refresh can never change the
+        // hero join's result — an unknown hero id on some OTHER player's row must not convert this
+        // ordinary attribution failure into an indefinite hold.
+        long id = insertPending(918L);
+        OpenDotaMatch.Player strangerOnNewHero = new OpenDotaMatch.Player(
+                null, 0, 999, 5, 5, 5, 300, 400, 12000, 100, 60);
+        OpenDotaMatch match = new OpenDotaMatch(918L, true, 1800, 1000L, 7, 22,
+                List.of(strangerOnNewHero, player(55555555L, 128)));
+        enricher(FetchResult.ready(match)).enrich(id, 918L);
+
+        assertThat(repo.findById(id).orElseThrow().enrichmentState()).isEqualTo("failed");
+        assertThat(events.types()).containsExactly("match.enrichFailed");
+    }
+
+    @Test
+    void accountAttributionStillEnrichesDespiteUnknownHeroIdElsewhere() throws Exception {
+        // The hold is only consulted AFTER attribution fails: our account-id match is exact, so an
+        // unknown hero id on another row never delays a perfectly attributable match.
+        long id = insertPending(919L);
+        OpenDotaMatch.Player strangerOnNewHero = new OpenDotaMatch.Player(
+                null, 0, 999, 5, 5, 5, 300, 400, 12000, 100, 60);
+        OpenDotaMatch.Player me = new OpenDotaMatch.Player(
+                96828122L, 128, 86, 5, 5, 5, 500, 600, 20000, 200, 60);
+        OpenDotaMatch match = new OpenDotaMatch(919L, true, 1800, 1000L, 7, 22,
+                List.of(strangerOnNewHero, me));
+        enricher(FetchResult.ready(match)).enrich(id, 919L);
+
+        MatchSummary row = repo.findById(id).orElseThrow();
+        assertThat(row.enrichmentState()).isEqualTo("enriched");
+        assertThat(row.result()).isEqualTo("loss"); // slot 128 (Dire), radiant_win=true
+        assertThat(events.types()).containsExactly("match.enriched");
+    }
+
+    @Test
     void reEnrichOfEnrichedRowIsIdempotentNoOp() throws Exception {
         long id = insertPending(7654321098L);
         Enricher enricher = enricher(FetchResult.ready(parse("opendota/match_response.json")));
@@ -352,6 +405,15 @@ class EnricherTest {
 
     private long insertPending(long dotaMatchId) {
         return insertPendingWithAttempts(dotaMatchId, 0);
+    }
+
+    /** Seeds a pending row recorded on {@code hero} (GSI internal name) instead of the default rubick. */
+    private long insertPendingWithHero(long dotaMatchId, String hero) {
+        return repo.insert(new NewMatch(
+                dotaMatchId, "match", "pending", hero,
+                null, null, null, null, null, null, null,
+                null, null, null, null, null, null,
+                null, null, null, null, false, 1_000L, null));
     }
 
     /** Seeds a pending row carrying recorder-owned duration_s + played_at, as the recorder writes them. */
