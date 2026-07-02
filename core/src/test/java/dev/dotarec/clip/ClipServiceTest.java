@@ -347,6 +347,64 @@ class ClipServiceTest {
     }
 
     @Test
+    void generateAsync_claimLostDuringLockWait_skipsCutWithoutTouchingRow() throws Exception {
+        // Simulates a maintenance-lock wait outlasting ClipQueue's stale cutoff: while this worker is
+        // blocked, the sweep re-pends the row and a SECOND worker re-claims it (writing a NEW stamp).
+        // The first worker's fenced re-stamp must fail after the lock, and it must exit without
+        // cutting — a cut here would race the new owner on the same output path, and the loser's
+        // cleanup would delete the winner's finished clip.
+        long parent = seedMatchWithVideo(1800);
+        long clipId = clips.insert(parent, "manual", null, 30.0, 45.0, null,
+                null, null, null, "pending", null, System.currentTimeMillis());
+
+        // The overridden lock() is the wait window: the re-pend + re-claim land while "blocked".
+        StorageMaintenanceLock racingLock = new StorageMaintenanceLock() {
+            @Override
+            public void lock() {
+                super.lock();
+                clips.rependIfOrphaned(clipId, System.currentTimeMillis() + 1);
+                // The second worker's claim stamp is strictly newer than the first's, as in production
+                // (a re-pend only fires once the first stamp is an hour stale).
+                clips.claimForGeneration(clipId, System.currentTimeMillis() + 3_600_000L);
+            }
+        };
+        ClipService svc = new ClipService(clips, matches, clipper, events, settings, paths,
+                racingLock, null);
+        setSelf(svc, svc);
+
+        svc.generateAsync(clipId);
+
+        // No cut, and the row is left exactly as the second worker claimed it.
+        verify(clipper, never()).clip(any(), anyDouble(), anyDouble(), any());
+        assertThat(clips.findById(clipId).orElseThrow().status()).isEqualTo("generating");
+    }
+
+    // ---- boot-time orphan reconcile ----------------------------------------------------------
+
+    @Test
+    void reconcileOrphans_rependsPriorRunOrphan_butLeavesLiveClaimAlone() throws Exception {
+        long parent = seedMatchWithVideo(1800);
+        // A prior-run orphan: stuck in 'generating' with no claim stamp (or, equivalently, one long
+        // past the stale cutoff) — no live worker can look like this, since claimForGeneration always
+        // stamps.
+        long orphanId = clips.insert(parent, "manual", null, 30.0, 45.0, null,
+                null, null, null, "generating", null, System.currentTimeMillis());
+        // A LIVE claim: Tomcat + the scheduler start before ApplicationReadyEvent, so a worker can
+        // already hold a fresh claim when the boot reconcile fires. Resetting it would re-enable the
+        // double-cut.
+        long liveId = clips.insert(parent, "manual", null, 30.0, 45.0, null,
+                null, null, null, "pending", null, System.currentTimeMillis());
+        assertThat(clips.claimForGeneration(liveId, System.currentTimeMillis())).isTrue();
+
+        ClipQueue queue = new ClipQueue(clips, service);
+        queue.reconcileOrphans();
+
+        assertThat(clips.findById(orphanId).orElseThrow().status()).isEqualTo("pending");
+        assertThat(clips.findById(liveId).orElseThrow().status()).isEqualTo("generating");
+        verify(clipper, never()).clip(any(), anyDouble(), anyDouble(), any());
+    }
+
+    @Test
     void failClip_statusWriteFailure_doesNotEscapeGenerateAsync() throws Exception {
         // A failClip whose updateStatus throws (double DB failure at finalize) must not let the
         // exception escape the @Async method — otherwise the row stays wedged in 'generating'. Here the
@@ -358,6 +416,7 @@ class ClipServiceTest {
         ClipRow row = clips.findById(clipId).orElseThrow();
         when(throwingClips.findById(clipId)).thenReturn(Optional.of(row));
         when(throwingClips.claimForGeneration(eq(clipId), anyLong())).thenReturn(true);
+        when(throwingClips.touchGenerationStarted(eq(clipId), anyLong(), anyLong())).thenReturn(true);
         when(throwingClips.updateStatusIfGenerating(eq(clipId), eq("failed"), any(), any(), any(), any()))
                 .thenThrow(new IllegalStateException("SQLITE_BUSY"));
         when(clipper.clip(any(), anyDouble(), anyDouble(), any()))

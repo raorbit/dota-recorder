@@ -169,7 +169,8 @@ public class ClipService {
         // ClipQueue stale-row self-heal anchors its cutoff on when this render began, not on insert time.
         // If we don't win, another dispatch already took it (the create dispatch racing the ClipQueue
         // retry sweep) or it's already done/deleted — skip, so a completed clip is never re-cut.
-        if (!clips.claimForGeneration(clipId, System.currentTimeMillis())) {
+        long claimedAt = System.currentTimeMillis();
+        if (!clips.claimForGeneration(clipId, claimedAt)) {
             log.debug("Clip {} not claimable (already generating/ready/failed or removed); skipping", clipId);
             return;
         }
@@ -193,6 +194,18 @@ public class ClipService {
         Path out = null;
         maintenanceLock.lock();
         try {
+            // The wait above is unbounded (an archive pass can hold the lock far past ClipQueue's stale
+            // cutoff, which was sized for cutting time only), so the sweep may have re-pended this row —
+            // and a second worker re-claimed it — while we were blocked. Re-stamp the start time fenced
+            // on OUR claim stamp: success proves the claim is still ours and restarts the stale clock at
+            // the cut itself (lock-wait time never counts toward staleness); failure means another
+            // worker owns the row now, and cutting anyway would race it on the same output path (the
+            // loser's cleanup would delete the winner's finished clip).
+            if (!clips.touchGenerationStarted(clipId, claimedAt, System.currentTimeMillis())) {
+                log.info("Clip {} (match {}) claim lost while awaiting the maintenance lock; skipping cut",
+                        clipId, parentMatchId);
+                return;
+            }
             // Re-read the parent's current path under the lock: the sweeper/archiver may have moved or
             // pruned the VOD since the row was inserted.
             Optional<MatchSummary> match = matches.findById(parentMatchId);

@@ -81,6 +81,83 @@ class ClipRepositoryTest {
         assertThat(row.error()).isEqualTo("ffmpeg blew up");
     }
 
+    @Test
+    void touchGenerationStarted_withOwnClaimStamp_refreshesTheStaleCutoffAnchor() {
+        // Claimed two hours ago (a long maintenance-lock wait): the row reads as stale.
+        long now = System.currentTimeMillis();
+        long claimedAt = now - 2 * 60 * 60_000L;
+        long clipId = insertClip("pending");
+        assertThat(clips.claimForGeneration(clipId, claimedAt)).isTrue();
+        assertThat(clips.findStaleGenerating(now - 60 * 60_000L))
+                .extracting(ClipRow::id).contains(clipId);
+
+        // The owner re-stamps right before the cut: the fence matches its own claim stamp.
+        assertThat(clips.touchGenerationStarted(clipId, claimedAt, now)).isTrue();
+
+        // Staleness now anchors on the cut start, so the row no longer reads as stale.
+        assertThat(clips.findStaleGenerating(now - 60 * 60_000L))
+                .extracting(ClipRow::id).doesNotContain(clipId);
+    }
+
+    @Test
+    void touchGenerationStarted_afterRependAndReclaim_failsTheFence() {
+        // The original worker claimed, then was re-pended mid-wait and a second worker re-claimed with
+        // a NEW stamp. The original's fenced re-stamp must fail so it never cuts against the new owner.
+        long clipId = insertClip("pending");
+        long firstClaim = System.currentTimeMillis() - 2 * 60 * 60_000L;
+        assertThat(clips.claimForGeneration(clipId, firstClaim)).isTrue();
+        assertThat(clips.rependIfOrphaned(clipId, System.currentTimeMillis())).isTrue();
+        long secondClaim = System.currentTimeMillis();
+        assertThat(clips.claimForGeneration(clipId, secondClaim)).isTrue();
+
+        assertThat(clips.touchGenerationStarted(clipId, firstClaim, System.currentTimeMillis()))
+                .isFalse();
+        // The new owner's own fence still holds.
+        assertThat(clips.touchGenerationStarted(clipId, secondClaim, System.currentTimeMillis()))
+                .isTrue();
+    }
+
+    @Test
+    void touchGenerationStarted_onNonGeneratingRow_fails() {
+        long now = System.currentTimeMillis();
+        long clipId = insertClip("pending");
+
+        assertThat(clips.touchGenerationStarted(clipId, now, now)).isFalse();
+        assertThat(clips.findById(clipId).orElseThrow().status()).isEqualTo("pending");
+    }
+
+    @Test
+    void rependIfOrphaned_flipsGeneratingRowWithNoClaimStamp() {
+        // A prior-run orphan: 'generating' with a NULL stamp. No live worker looks like this —
+        // claimForGeneration always stamps — so the boot reconcile may safely reset it.
+        long clipId = insertClip("generating");
+
+        assertThat(clips.rependIfOrphaned(clipId, System.currentTimeMillis() - 60 * 60_000L)).isTrue();
+        assertThat(clips.findById(clipId).orElseThrow().status()).isEqualTo("pending");
+    }
+
+    @Test
+    void rependIfOrphaned_flipsGeneratingRowWithStaleClaimStamp() {
+        long now = System.currentTimeMillis();
+        long clipId = insertClip("pending");
+        assertThat(clips.claimForGeneration(clipId, now - 2 * 60 * 60_000L)).isTrue();
+
+        assertThat(clips.rependIfOrphaned(clipId, now - 60 * 60_000L)).isTrue();
+        assertThat(clips.findById(clipId).orElseThrow().status()).isEqualTo("pending");
+    }
+
+    @Test
+    void rependIfOrphaned_leavesLiveRecentClaimAlone() {
+        // A claim younger than the stale cutoff is a LIVE worker (dispatched between context refresh
+        // and ApplicationReadyEvent); resetting it would re-enable the double-cut.
+        long now = System.currentTimeMillis();
+        long clipId = insertClip("pending");
+        assertThat(clips.claimForGeneration(clipId, now)).isTrue();
+
+        assertThat(clips.rependIfOrphaned(clipId, now - 60 * 60_000L)).isFalse();
+        assertThat(clips.findById(clipId).orElseThrow().status()).isEqualTo("generating");
+    }
+
     private long insertClip(String status) {
         return clips.insert(parentMatchId, "manual", null, 30.0, 45.0, null,
                 null, null, null, status, null, System.currentTimeMillis());
