@@ -8,15 +8,16 @@ import java.nio.file.Path;
 
 /**
  * Builds a real, file-backed SQLite {@link DataSource} (mirroring production pragmas) over a path in
- * the caller's {@code @TempDir}, then applies the V1 schema via the production {@link MigrationRunner}
- * so tests exercise the exact migration path -- no mocks, no in-memory schema drift.
+ * the caller's {@code @TempDir}, then runs the full forward-only migration chain up to
+ * {@link MigrationRunner#LATEST_VERSION} via the production {@link MigrationRunner} so tests exercise
+ * the exact migration path -- no mocks, no in-memory schema drift.
  */
 public final class TestDb {
 
     private TestDb() {
     }
 
-    /** Creates a temp-file SQLite data source with the V1 schema applied. */
+    /** Creates a temp-file SQLite data source migrated to {@link MigrationRunner#LATEST_VERSION}. */
     public static DataSource migrated(Path dir) throws Exception {
         Path dbFile = dir.resolve("test.sqlite");
 
