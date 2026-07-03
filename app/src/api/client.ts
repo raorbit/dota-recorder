@@ -660,6 +660,49 @@ function clipEventMatchId(evt: ClipEvent): number {
   return evt.payload.parentMatchId;
 }
 
+// --- /ws wire validation ----------------------------------------------------
+//
+// The frames below arrive from JSON.parse() as `unknown`. These hand-rolled guards
+// narrow just enough to route safely: the envelope shape, the fields toStatus()
+// dereferences, and the one field clip routing reads. Deliberately NOT zod — the
+// renderer's prod dependency set is four packages and we add no runtime dep for this.
+// A later OpenAPI/ts-rest generated contract would supersede these hand-kept wire types
+// and their guards; wiring that codegen is an explicit non-goal for now.
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null;
+}
+
+// Validate a `status` frame's payload against the exact fields toStatus() reads: gsi.connected,
+// obs.{connected,sceneActive,recording}, fsm.state, fsm.activeMatchId. Returns the payload as a
+// StatusSnapshot on success, else null (a malformed frame is dropped, not force-cast into a crash).
+function parseStatusSnapshot(payload: unknown): StatusSnapshot | null {
+  if (!isRecord(payload)) return null;
+  const { gsi, obs, fsm } = payload;
+  if (!isRecord(gsi) || !isRecord(obs) || !isRecord(fsm)) return null;
+  if (typeof gsi.connected !== 'boolean') return null;
+  if (
+    typeof obs.connected !== 'boolean' ||
+    typeof obs.sceneActive !== 'boolean' ||
+    typeof obs.recording !== 'boolean'
+  ) {
+    return null;
+  }
+  if (typeof fsm.state !== 'string') return null;
+  if (fsm.activeMatchId !== null && typeof fsm.activeMatchId !== 'number') return null;
+  return payload as unknown as StatusSnapshot;
+}
+
+// Validate a clip.* frame just enough to route it: every clip payload carries a numeric
+// parentMatchId (emitClipEvent scopes on it). The remaining Clip fields are NOT validated here
+// — the renderer re-fetches the clip list on these events rather than trusting the payload, so a
+// deep check of all 14 fields would be dead work. `type` is trusted from the already-narrowed
+// envelope. Returns null when parentMatchId is missing/non-numeric so the frame is dropped.
+function parseClipEvent(type: ClipEventType, payload: unknown): ClipEvent | null {
+  if (!isRecord(payload) || typeof payload.parentMatchId !== 'number') return null;
+  return { type, payload } as ClipEvent;
+}
+
 /**
  * WebSocket client to the core's /ws endpoint with exponential-backoff reconnect.
  * Step 0: connects and forwards parsed JSON frames; full status schema is wired
@@ -744,34 +787,46 @@ export class StatusSocket {
     };
 
     ws.onmessage = (event: MessageEvent<string>) => {
-      let envelope: WsEnvelope;
+      let parsed: unknown;
       try {
-        envelope = JSON.parse(event.data) as WsEnvelope;
+        parsed = JSON.parse(event.data);
       } catch {
         return; // ignore malformed (non-JSON) frames
       }
+      // Envelope guard: every /ws frame is { type: string, payload }. A frame missing a
+      // string `type` is dropped silently — same tolerance the router already applies to
+      // unknown types, so a shape drift degrades to "ignored" rather than a runtime throw.
+      if (!isRecord(parsed) || typeof parsed.type !== 'string') return;
+      const envelope: WsEnvelope = { type: parsed.type, payload: parsed.payload };
+
       // Route by type; unknown types are intentionally ignored so the client
       // tolerates server event kinds added in later steps.
-      if (envelope?.type === 'status') {
-        const status = toStatus(envelope.payload as StatusSnapshot);
+      if (envelope.type === 'status') {
+        // Validate before dereferencing; drop a malformed snapshot silently (matches the
+        // unknown-type tolerance) rather than feeding toStatus() an undefined field.
+        const snapshot = parseStatusSnapshot(envelope.payload);
+        if (snapshot === null) return;
+        const status = toStatus(snapshot);
         for (const listener of this.statusListeners) listener(status);
       } else if (
-        envelope?.type === 'match.enriched' ||
-        envelope?.type === 'match.enrichFailed' ||
-        envelope?.type === 'match.recorded'
+        envelope.type === 'match.enriched' ||
+        envelope.type === 'match.enrichFailed' ||
+        envelope.type === 'match.recorded'
       ) {
-        // Library-mutating events: fan out to onEvent() subscribers, which
-        // re-fetch the list + counts. Unknown types still fall through ignored.
+        // Library-mutating events: fan out to onEvent() subscribers, which re-fetch the
+        // list + counts. Listeners never dereference the payload (they re-fetch), so a
+        // shallow envelope guard is all that's warranted — no payload validation here.
         for (const listener of this.matchEventListeners) listener(envelope);
       } else if (
-        envelope?.type === 'clip.created' ||
-        envelope?.type === 'clip.progress' ||
-        envelope?.type === 'clip.ready'
+        envelope.type === 'clip.created' ||
+        envelope.type === 'clip.progress' ||
+        envelope.type === 'clip.ready'
       ) {
-        // Clip lifecycle events: fan out to onClipEvent() subscribers scoped by the
-        // payload's parentMatchId. The envelope's payload shape is known per type
-        // (see ClipEvent), so the cast is safe.
-        this.emitClipEvent(envelope as ClipEvent);
+        // Clip lifecycle events: validate the payload carries a numeric parentMatchId (the
+        // one field routing reads), then fan out to onClipEvent() subscribers scoped by it.
+        // A payload without it is dropped silently.
+        const evt = parseClipEvent(envelope.type, envelope.payload);
+        if (evt !== null) this.emitClipEvent(evt);
       }
     };
 
