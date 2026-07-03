@@ -41,7 +41,8 @@ public class GsiPayload {
      *
      * <p>Dota reports {@code "0"} in Hero Demo / bot games; that (and any negative or >2^32-1 value)
      * is not a real account id, so it maps to null rather than being latched by auto-capture. The
-     * valid range (1..2^32-1) mirrors {@code SettingsController}'s user-supplied accountId check.
+     * valid range is enforced by {@link #isValidAccountId(long)}, shared with {@code
+     * SettingsController}'s user-supplied accountId check.
      */
     public Long parseAccountId() {
         if (player == null || player.accountid == null || player.accountid.isBlank()) {
@@ -49,10 +50,21 @@ public class GsiPayload {
         }
         try {
             long v = Long.parseLong(player.accountid.trim());
-            return (v > 0 && v <= 0xFFFFFFFFL) ? v : null;
+            return isValidAccountId(v) ? v : null;
         } catch (NumberFormatException e) {
             return null;
         }
+    }
+
+    /**
+     * Whether {@code v} is a real 32-bit Dota account id — the low half of a SteamID, valid range
+     * 1..2^32-1. {@code 0} (Hero Demo / bot games), negatives, and anything above 2^32-1 (e.g. a
+     * pasted 64-bit SteamID) are rejected. The single range check shared by GSI auto-capture
+     * ({@link #parseAccountId()}) and {@code SettingsController}'s user-supplied accountId validation,
+     * so the two can't disagree on what a valid id is.
+     */
+    public static boolean isValidAccountId(long v) {
+        return v > 0 && v <= 0xFFFFFFFFL;
     }
 
     /**
