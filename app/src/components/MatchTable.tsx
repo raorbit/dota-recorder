@@ -22,6 +22,7 @@ import {
   type ColumnMeta,
   type SortState,
 } from '../lib/match-columns';
+import { clipLabel } from '../lib/clip-format';
 import './match-table.css';
 
 function matchesResultFilter(match: MatchSummary, filter: ResultFilter): boolean {
@@ -274,17 +275,6 @@ function PopupMenu({
     </div>,
     document.body,
   );
-}
-
-// A clip's display label: its explicit `label`, else a kind-derived fallback
-// ("Rampage" for an auto/triggered clip, "Manual" otherwise). Mirrors the
-// VideoPlayer's clipLabel so the bucket list and the player strip read the same.
-function clipLabel(clip: Clip): string {
-  if (clip.label != null && clip.label.trim() !== '') return clip.label;
-  if (clip.kind === 'auto') {
-    return clip.triggerReason === 'rampage' ? 'Rampage' : (clip.triggerReason ?? 'Auto');
-  }
-  return 'Manual';
 }
 
 function clipMatchesSearch(clip: Clip, query: string): boolean {
