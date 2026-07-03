@@ -243,6 +243,9 @@ async function startObsSupervisor(): Promise<void> {
     // bootstrap; GET /obs/launch-args returns 409 until that completes, so poll.
     const launchArgs = await pollLaunchArgs();
     if (shuttingDown) return;
+    // The core mints this password, so a core stack trace or settings dump could echo it into
+    // electron.log; scrub it from the core's log stream too (OBS already scrubs its own copy).
+    supervisor.addScrubSecret(launchArgs.password);
     obsSupervisor = new ObsSupervisor({
       obsDir: launchArgs.obsDir,
       port: launchArgs.port,
