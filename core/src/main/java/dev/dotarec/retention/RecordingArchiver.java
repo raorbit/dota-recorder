@@ -2,6 +2,7 @@ package dev.dotarec.retention;
 
 import dev.dotarec.config.SettingsStore;
 import dev.dotarec.config.SettingsStore.StorageLocation;
+import dev.dotarec.config.StorageRoots;
 import dev.dotarec.data.ClipRepository;
 import dev.dotarec.data.ClipRow;
 import dev.dotarec.data.MatchRepository;
@@ -386,19 +387,14 @@ public class RecordingArchiver {
 
     /** The configured location a stored video path lives under, or null if none. */
     private Location locationOf(String videoPath, List<Location> locations) {
-        Path file;
+        String fileStr;
         try {
-            file = Path.of(videoPath).toAbsolutePath().normalize();
+            fileStr = StorageRoots.normalize(videoPath);
         } catch (RuntimeException e) {
             return null;
         }
-        String fileStr = file.toString().toLowerCase();
         for (Location loc : locations) {
-            String dirStr = loc.dir().toAbsolutePath().normalize().toString().toLowerCase();
-            // Prefix on the normalized path string (Windows paths are case-insensitive). Append a
-            // separator so "C:\\vid" doesn't match a sibling "C:\\video2\\..." path.
-            String dirPrefix = dirStr.endsWith(java.io.File.separator) ? dirStr : dirStr + java.io.File.separator;
-            if (fileStr.startsWith(dirPrefix)) {
+            if (fileStr.startsWith(StorageRoots.prefix(StorageRoots.normalize(loc.dir())))) {
                 return loc;
             }
         }

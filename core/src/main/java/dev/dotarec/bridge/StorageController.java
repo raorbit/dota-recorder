@@ -3,11 +3,11 @@ package dev.dotarec.bridge;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import dev.dotarec.config.SettingsStore;
 import dev.dotarec.config.SettingsStore.StorageLocation;
+import dev.dotarec.config.StorageRoots;
 import dev.dotarec.data.ClipRepository;
 import dev.dotarec.data.ClipRow;
 import dev.dotarec.data.MatchRepository;
 import dev.dotarec.data.MatchSummary;
-import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -121,15 +121,16 @@ public class StorageController {
     }
 
     private static String prefix(String dir) {
-        String n = normalize(dir);
-        return n.endsWith(File.separator) ? n : n + File.separator;
+        return StorageRoots.prefix(normalize(dir));
     }
 
+    /** Delegates to {@link StorageRoots#normalize}, keeping a lowercased-as-is fallback for an
+     * unparseable path so a bad row is simply excluded from every drive's total (never counted twice). */
     private static String normalize(String path) {
         try {
-            return Path.of(path).toAbsolutePath().normalize().toString().toLowerCase();
+            return StorageRoots.normalize(path);
         } catch (RuntimeException e) {
-            return path.toLowerCase();
+            return path.toLowerCase(java.util.Locale.ROOT);
         }
     }
 
