@@ -1,23 +1,33 @@
 import { useEffect, useState } from 'react';
 import {
-  fetchAudioInputs,
-  fetchScenePreview,
   fetchSettings,
-  fetchStorageUsage,
   updateSettings,
   BUILTIN_DESKTOP_ID,
   BUILTIN_MICROPHONE_ID,
-  type AudioInputOption,
   type AudioSource,
   type AudioSourceKind,
-  type DriveUsage,
-  type ScenePreview,
   type Settings,
   type SettingsPatch,
   type StorageLocation,
-  type StorageUsage,
 } from '../../api/client';
 import type { StatusSnapshot } from '../../api/client';
+import {
+  CAP_MIN_GB,
+  ENCODER_LABELS,
+  FORMAT_PRESETS,
+  FPS_PRESETS,
+  PADDING_MAX_S,
+  PADDING_MIN_S,
+  QUALITY_PRESETS,
+  RES_PRESETS,
+  capExceedsDrive,
+  clampCapGb,
+  clampPadding,
+  fmtSize,
+} from './recording/settings-helpers';
+import { useAudioInputs } from './recording/useAudioInputs';
+import { useScenePreview } from './recording/useScenePreview';
+import { useStorageUsage } from './recording/useStorageUsage';
 import './recording-settings.css';
 
 type LoadState = 'loading' | 'ready' | 'error';
@@ -30,99 +40,10 @@ interface RecordingSettingsProps {
   readonly obs: StatusSnapshot['obs'] | null;
 }
 
-// Resolution presets offered in the dropdown. A stored value outside this list
-// (e.g. an ultrawide) is preserved and shown as an extra leading option.
-const RES_PRESETS: ReadonlyArray<{ readonly value: string; readonly label: string }> = [
-  { value: '1280x720', label: '1280 × 720 (720p)' },
-  { value: '1920x1080', label: '1920 × 1080 (1080p)' },
-  { value: '2560x1440', label: '2560 × 1440 (1440p)' },
-  { value: '3840x2160', label: '3840 × 2160 (4K)' },
-];
-
-// The core auto-probes a hardware encoder and writes back a short OBS token; map
-// it to a human label. Unknown tokens fall through to the raw value.
-const ENCODER_LABELS: Record<string, string> = {
-  nvenc: 'NVIDIA NVENC (H.264)',
-  amd: 'AMD AMF (H.264)',
-  qsv: 'Intel QuickSync (H.264)',
-  x264: 'x264 (software)',
-};
-
 // The encoder-override picker offers `auto` (the blank sentinel — re-arms the GPU
 // probe at boot) plus the four EncoderProbe tokens. Any other string silently falls
 // back to x264 in OBS, so only these are offered.
 const ENCODER_OVERRIDE_TOKENS: ReadonlyArray<string> = ['x264', 'nvenc', 'qsv', 'amd'];
-
-// The fps/quality/format value sets below mirror the server-side allow-lists in
-// SettingsController.ALLOWED_* — keep them in sync (the core 400s a value outside its set).
-//
-// Frame-rate presets. OBS "Common FPS" integers only (FPSType stays 0); 120/144 would
-// need FPSType=1 and fractional rates (29.97) need a String, so the int field is
-// restricted to 30/60.
-const FPS_PRESETS: ReadonlyArray<{ readonly value: number; readonly label: string }> = [
-  { value: 30, label: '30 fps' },
-  { value: 60, label: '60 fps' },
-];
-
-// OBS RecQuality tokens (case-sensitive). "Small" is tolerated if already stored but
-// omitted from the picker. A stored value outside this list is preserved as a leading option.
-const QUALITY_PRESETS: ReadonlyArray<{ readonly value: string; readonly label: string }> = [
-  { value: 'Stream', label: 'Stream (smaller files)' },
-  { value: 'HQ', label: 'High quality' },
-  { value: 'Lossless', label: 'Lossless (huge files)' },
-];
-
-// OBS RecFormat2 containers. Restricted to the MP4 variants the in-app Chromium <video> can decode
-// for jump-to-moment playback: mkv/mov record fine but won't preview in-app (no Matroska demuxer,
-// flaky MOV), which silently breaks the headline feature. Both options here are crash-safe; plain
-// `mp4` is omitted (unfinalized-file corruption risk on crash). Out-of-list stored value preserved.
-const FORMAT_PRESETS: ReadonlyArray<{ readonly value: string; readonly label: string }> = [
-  { value: 'hybrid_mp4', label: 'MP4 (hybrid)' },
-  { value: 'fragmented_mp4', label: 'MP4 (fragmented)' },
-];
-
-// Floor for any drive cap (GB). There is no ceiling anymore — caps are free-form numbers,
-// bounded only by the drive's real capacity (which the UI surfaces as a warning).
-const CAP_MIN_GB = 10;
-
-// Coerce a cap field's raw value into the positive integer the backend accepts. The core
-// now rejects <=0 (a cleared field yields Number('')===0), so we never send a non-positive
-// or fractional cap: blank/NaN/<=0 snaps up to CAP_MIN_GB and any fraction is rounded. Used
-// both to reflect a sane value back into the field (onBlur) and to sanitize what we PUT.
-function clampCapGb(value: number): number {
-  if (!Number.isFinite(value) || value < CAP_MIN_GB) return CAP_MIN_GB;
-  return Math.round(value);
-}
-
-// Bounds for the auto-clip padding (seconds). The core CLAMPS values outside this range
-// to [1,60] (it does not 400); we also clamp client-side on blur/save so the field shows
-// the value that will actually take effect (a cleared field reads as 0).
-const PADDING_MIN_S = 1;
-const PADDING_MAX_S = 60;
-
-// Coerce the padding field's raw value into the bounded integer the backend accepts:
-// blank/NaN/<1 snaps up to PADDING_MIN_S, anything past PADDING_MAX_S clamps down, and
-// fractions are rounded. Used to reflect a sane value back (onBlur) and sanitize the PUT.
-function clampPadding(value: number): number {
-  if (!Number.isFinite(value) || value < PADDING_MIN_S) return PADDING_MIN_S;
-  return Math.min(Math.round(value), PADDING_MAX_S);
-}
-
-// Human-readable size from a byte count (null -> em dash). TB once past 1024 GB.
-function fmtSize(bytes: number | null | undefined): string {
-  if (bytes === null || bytes === undefined) return '—';
-  const gb = bytes / 1024 ** 3;
-  return gb >= 1024 ? `${(gb / 1024).toFixed(1)} TB` : `${Math.round(gb)} GB`;
-}
-
-// True when a configured cap can't be reached because the drive is too small: the cap
-// exceeds what's physically attainable for our VODs (bytes we already store there + free
-// space). Only meaningful once the drive has been saved and stat'd (freeBytes known).
-function capExceedsDrive(capGb: number, usage: DriveUsage | undefined): boolean {
-  if (!usage || usage.freeBytes === null) return false;
-  const reachableBytes = usage.usedBytes + usage.freeBytes;
-  return capGb * 1024 ** 3 > reachableBytes;
-}
 
 // Single-glyph icon per WASAPI kind, shown in each mixer row's chip (also keyed via [data-kind]).
 const AUDIO_KIND_ICON: Record<AudioSourceKind, string> = {
@@ -190,10 +111,9 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
   const [retentionGb, setRetentionGb] = useState(50);
   const [accountId, setAccountId] = useState('');
 
-  // Archive drives (tiered storage) and the live per-drive disk usage that backs the
-  // free/total readout + the cap-exceeds-drive warning. usage is keyed by path at render.
+  // Archive drives (tiered storage). The live per-drive disk usage that backs the
+  // free/total readout + the cap-exceeds-drive warning lives in useStorageUsage.
   const [storageLocations, setStorageLocations] = useState<StorageLocation[]>([]);
-  const [usage, setUsage] = useState<StorageUsage | null>(null);
 
   // Video controls (mirror `resolution`: saved now, applied on the next OBS launch).
   // encoderChoice maps 'auto' <-> '' (blank sentinel re-arms the GPU probe at boot).
@@ -207,18 +127,15 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
   const [autoClipOnRampage, setAutoClipOnRampage] = useState(false);
   const [clipPaddingSeconds, setClipPaddingSeconds] = useState(8);
 
-  // Latest polled OBS scene-preview frame (null = no frame / OBS down → placeholder).
-  const [preview, setPreview] = useState<ScenePreview | null>(null);
-
-  // The editable audio-source list and a per-kind cache of picker options. The core
-  // seeds the list (we never synthesize a default here); the options cache is filled
-  // lazily by loadInputs() and degrades to [] when OBS is down.
+  // The editable audio-source list. The core seeds it (we never synthesize a default
+  // here); the per-kind picker-options cache lives in useAudioInputs.
   const [audioSources, setAudioSources] = useState<AudioSource[]>([]);
-  const [inputsByKind, setInputsByKind] = useState<Record<AudioSourceKind, AudioInputOption[]>>({
-    application: [],
-    output: [],
-    input: [],
-  });
+
+  // Polling/derived state lifted into hooks. The scene preview polls on its own; usage
+  // and audio-input options are primed after the settings load resolves below.
+  const preview = useScenePreview();
+  const { usage, refreshUsage } = useStorageUsage();
+  const { inputsByKind, refreshInputs, primeAll } = useAudioInputs();
 
   const [saveState, setSaveState] = useState<SaveState>('idle');
   const [error, setError] = useState<string | null>(null);
@@ -229,19 +146,6 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
 
   useEffect(() => {
     let cancelled = false;
-
-    // Fetch and cache the picker options for one kind, ignoring failures (the core
-    // already returns [] when OBS is down). Guards against the unmount flag so a
-    // late resolve doesn't write into a torn-down component.
-    const loadInputs = async (kind: AudioSourceKind): Promise<void> => {
-      try {
-        const opts = await fetchAudioInputs(kind);
-        if (cancelled) return;
-        setInputsByKind((prev) => ({ ...prev, [kind]: opts }));
-      } catch {
-        /* leave the cache as [] — the picker still shows the stored target */
-      }
-    };
 
     void (async (): Promise<void> => {
       try {
@@ -261,10 +165,8 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
         setAutoClipOnRampage(s.autoClipOnRampage);
         setClipPaddingSeconds(s.clipPaddingSeconds);
         setLoadState('ready');
-        // Prime each kind's options once the form is up.
-        void loadInputs('application');
-        void loadInputs('output');
-        void loadInputs('input');
+        // Ordering matters: settings load first, THEN prime the audio-input kinds.
+        primeAll();
       } catch {
         if (cancelled) return;
         setLoadState('error');
@@ -273,66 +175,8 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  // Live scene preview. Polls GET /obs/preview every ~1s while this tab is mounted
-  // (the parent unmounts on navigation away, so the interval cleanup stops polling).
-  // Each tick degrades to {dataUri:null} on failure → the UI shows the placeholder.
-  useEffect(() => {
-    let cancelled = false;
-    // Skip a tick while the previous fetch is still in flight, so a slow/contended OBS screenshot
-    // (up to the 5s fetch timeout) can't stack overlapping requests on the fixed 1s interval.
-    let inFlight = false;
-
-    const tick = async (): Promise<void> => {
-      if (inFlight) return;
-      inFlight = true;
-      try {
-        const next = await fetchScenePreview();
-        if (!cancelled) setPreview(next);
-      } catch {
-        if (!cancelled) setPreview({ dataUri: null });
-      } finally {
-        inFlight = false;
-      }
-    };
-
-    void tick();
-    const id = window.setInterval(() => void tick(), 1000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(id);
-    };
-  }, []);
-
-  // Per-drive disk usage backs the free/total readout and the cap-exceeds-drive warning.
-  // Fetched on mount and re-fetched after a save (so a newly added drive gets stat'd).
-  const refreshUsage = (): void => {
-    void (async (): Promise<void> => {
-      try {
-        setUsage(await fetchStorageUsage());
-      } catch {
-        /* leave the prior usage; the readout degrades to em dashes */
-      }
-    })();
-  };
-
-  useEffect(() => {
-    refreshUsage();
-  }, []);
-
-  // Refetch one kind's picker options on demand (e.g. when adding an application
-  // source, whose process list is volatile). Best-effort; failures keep the cache.
-  const refreshInputs = (kind: AudioSourceKind): void => {
-    void (async (): Promise<void> => {
-      try {
-        const opts = await fetchAudioInputs(kind);
-        setInputsByKind((prev) => ({ ...prev, [kind]: opts }));
-      } catch {
-        /* keep prior options */
-      }
-    })();
-  };
 
   // A changed field marks the form dirty so Save is only offered when it matters.
   const dirty =
