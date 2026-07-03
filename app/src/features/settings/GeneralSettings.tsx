@@ -47,8 +47,8 @@ export function GeneralSettings(): React.JSX.Element {
         <div className="gen-row-text">
           <div className="gen-row-title">Launch at login</div>
           <p className="gen-row-desc">
-            Start Dota 2 Recorder automatically when you sign in to Windows, hidden in the
-            system tray so it's ready to record without opening a window.
+            Start Dota 2 Recorder automatically when you sign in to Windows, hidden in the system
+            tray so it's ready to record without opening a window.
           </p>
         </div>
         <button

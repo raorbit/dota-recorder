@@ -41,9 +41,7 @@ const SECONDARY_BUCKETS: readonly BucketDef[] = [
 // Optional buckets shown only once the backend reports a non-zero count (so an empty
 // library doesn't advertise empty sections, mirroring the Unsorted bucket). Manual has
 // no creation UI yet, so it stays gated until a manual recording exists.
-const OPTIONAL_BUCKETS: readonly BucketDef[] = [
-  { key: 'manual', label: 'Manual', badge: 'plain' },
-];
+const OPTIONAL_BUCKETS: readonly BucketDef[] = [{ key: 'manual', label: 'Manual', badge: 'plain' }];
 
 function countFor(counts: BucketCounts, key: Bucket): number {
   return counts[key];
@@ -158,9 +156,7 @@ export function Sidebar({
       <div className="sb-status" data-state={card.state}>
         <div className="sb-status-row">
           <span className="sb-status-title">{card.title}</span>
-          {card.state === 'recording' && (
-            <span className="sb-recpulse" aria-hidden="true" />
-          )}
+          {card.state === 'recording' && <span className="sb-recpulse" aria-hidden="true" />}
         </div>
         <div className="sb-status-text" data-state={card.state}>
           {card.text}
@@ -177,11 +173,7 @@ export function Sidebar({
               {stopping ? 'Stopping…' : confirming ? 'Confirm stop?' : 'Stop recording'}
             </button>
             {confirming && !stopping && (
-              <button
-                type="button"
-                className="sb-stop-cancel"
-                onClick={() => setConfirming(false)}
-              >
+              <button type="button" className="sb-stop-cancel" onClick={() => setConfirming(false)}>
                 Cancel
               </button>
             )}
@@ -198,8 +190,7 @@ export function Sidebar({
 
       <div className="sb-primary">
         {PRIMARY_BUCKETS.map(renderBucket)}
-        {showUnsorted &&
-          renderBucket({ key: 'unsorted', label: 'Unsorted', badge: 'plain' })}
+        {showUnsorted && renderBucket({ key: 'unsorted', label: 'Unsorted', badge: 'plain' })}
       </div>
 
       <div className="sb-secondary">

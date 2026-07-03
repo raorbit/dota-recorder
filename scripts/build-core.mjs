@@ -13,9 +13,10 @@ const coreDir = path.join(repoRoot, 'core');
 
 function runGradle(args) {
   const command = process.platform === 'win32' ? 'cmd.exe' : path.join(coreDir, 'gradlew');
-  const commandArgs = process.platform === 'win32'
-    ? ['/d', '/s', '/c', path.join(coreDir, 'gradlew.bat'), ...args]
-    : args;
+  const commandArgs =
+    process.platform === 'win32'
+      ? ['/d', '/s', '/c', path.join(coreDir, 'gradlew.bat'), ...args]
+      : args;
   const result = spawnSync(command, commandArgs, {
     cwd: coreDir,
     stdio: 'inherit',

@@ -401,9 +401,7 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
   };
 
   const toggleMute = (i: number): void => {
-    setAudioSources((prev) =>
-      prev.map((s, idx) => (idx === i ? { ...s, muted: !s.muted } : s)),
-    );
+    setAudioSources((prev) => prev.map((s, idx) => (idx === i ? { ...s, muted: !s.muted } : s)));
     setSaveState('idle');
   };
 
@@ -424,10 +422,7 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
   };
 
   const addDrive = (): void => {
-    setStorageLocations((prev) => [
-      ...prev,
-      { id: crypto.randomUUID(), path: '', capGb: 500 },
-    ]);
+    setStorageLocations((prev) => [...prev, { id: crypto.randomUUID(), path: '', capGb: 500 }]);
     setSaveState('idle');
   };
 
@@ -440,18 +435,14 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
 
   const setDriveCap = (i: number, capGb: number): void => {
     const edited = storageLocations[i];
-    setStorageLocations((prev) =>
-      prev.map((d, idx) => (idx === i ? { ...d, capGb } : d)),
-    );
+    setStorageLocations((prev) => prev.map((d, idx) => (idx === i ? { ...d, capGb } : d)));
     if (edited) clearDriveError(edited.id);
     setSaveState('idle');
   };
 
   const setDrivePath = (i: number, path: string): void => {
     const edited = storageLocations[i];
-    setStorageLocations((prev) =>
-      prev.map((d, idx) => (idx === i ? { ...d, path } : d)),
-    );
+    setStorageLocations((prev) => prev.map((d, idx) => (idx === i ? { ...d, path } : d)));
     if (edited) clearDriveError(edited.id);
     setSaveState('idle');
   };
@@ -460,9 +451,7 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
     const picked = await window.dotarec?.selectFolder();
     if (picked) {
       const edited = storageLocations[i];
-      setStorageLocations((prev) =>
-        prev.map((d, idx) => (idx === i ? { ...d, path: picked } : d)),
-      );
+      setStorageLocations((prev) => prev.map((d, idx) => (idx === i ? { ...d, path: picked } : d)));
       if (edited) clearDriveError(edited.id);
       setSaveState('idle');
     }
@@ -523,9 +512,7 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
       // core now 400s on <=0 — guard it client-side so we never send a non-positive cap.
       retentionCapGb: clampCapGb(retentionGb),
       // null means "leave unchanged" on the wire, so a blanked field clears via an explicit flag.
-      ...(trimmedAccount === ''
-        ? { clearAccountId: true }
-        : { accountId: Number(trimmedAccount) }),
+      ...(trimmedAccount === '' ? { clearAccountId: true } : { accountId: Number(trimmedAccount) }),
       // FULL-LIST REPLACE: always send the complete current array.
       audioSources,
       // FULL-LIST REPLACE too. All rows are validated non-blank above; clamp each cap to a
@@ -656,8 +643,8 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
                   {encoderChoice === 'auto' && <span className="rec-badge">auto</span>}
                 </label>
                 <p className="rec-desc">
-                  Auto picks the best hardware encoder for your GPU. Override only if you
-                  know which one you want.
+                  Auto picks the best hardware encoder for your GPU. Override only if you know which
+                  one you want.
                 </p>
               </div>
               <div className="rec-control">
@@ -792,9 +779,7 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
                 <label className="rec-label" htmlFor="rec-clip-padding">
                   Clip padding
                 </label>
-                <p className="rec-desc">
-                  Seconds of lead-in and trail kept around each auto-clip.
-                </p>
+                <p className="rec-desc">Seconds of lead-in and trail kept around each auto-clip.</p>
               </div>
               <div className="rec-control rec-capfield">
                 <input
@@ -869,8 +854,8 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
                   Max storage
                 </label>
                 <p className="rec-desc">
-                  Disk budget for the recording drive. Oldest unstarred recordings are removed
-                  first (across all drives).
+                  Disk budget for the recording drive. Oldest unstarred recordings are removed first
+                  (across all drives).
                 </p>
               </div>
               <div className="rec-control rec-capfield">
@@ -928,8 +913,8 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
             <h3 className="rec-sec">Archive drives</h3>
             <p className="rec-desc aud-intro">
               Finished recordings are moved off the recording drive onto these drives, filling each
-              up to its cap. The newest matches stay on the fast recording drive. Leave empty to keep
-              everything on the recording drive.
+              up to its cap. The newest matches stay on the fast recording drive. Leave empty to
+              keep everything on the recording drive.
             </p>
 
             {storageLocations.map((loc, i) => {
@@ -1190,7 +1175,9 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
             <div className="rec-row aud-addrow">
               <div className="rec-rowlabel">
                 <span className="rec-label">Capture a specific app</span>
-                <p className="rec-desc">Record just one program&apos;s sound, like Discord or Spotify.</p>
+                <p className="rec-desc">
+                  Record just one program&apos;s sound, like Discord or Spotify.
+                </p>
               </div>
               <div className="rec-control aud-add">
                 <button type="button" className="rec-browse aud-add-kind" onClick={addApp}>
@@ -1236,11 +1223,7 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
           )}
 
           <div className="rec-actions">
-            <button
-              className="rec-save"
-              type="submit"
-              disabled={saveState === 'saving' || !dirty}
-            >
+            <button className="rec-save" type="submit" disabled={saveState === 'saving' || !dirty}>
               {saveState === 'saving' ? 'Saving…' : 'Save changes'}
             </button>
             {saveState === 'saved' && !dirty && <span className="rec-saved">Saved</span>}

@@ -134,7 +134,12 @@ function encodePng(rgba, size) {
     rgba.copy(raw, y * (stride + 1) + 1, y * stride, y * stride + stride);
   }
   const idat = zlib.deflateSync(raw, { level: 9 });
-  return Buffer.concat([sig, chunk('IHDR', ihdr), chunk('IDAT', idat), chunk('IEND', Buffer.alloc(0))]);
+  return Buffer.concat([
+    sig,
+    chunk('IHDR', ihdr),
+    chunk('IDAT', idat),
+    chunk('IEND', Buffer.alloc(0)),
+  ]);
 }
 
 // --- ICO container (PNG-compressed entries, supported by Windows Vista+) ---

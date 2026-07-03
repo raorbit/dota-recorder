@@ -157,11 +157,19 @@ describe('ObsSupervisor', () => {
   it('rejects start() with the real error (not crash) when obs64.exe fails to launch', async () => {
     obsConnected = false; // keep the readiness poll going so the launch error wins the race
     const onUnexpectedExit = vi.fn();
-    const sup = new ObsSupervisor({ ...baseOpts, onLog: () => {}, onUnexpectedExit, healthTimeoutMs: 5_000 });
+    const sup = new ObsSupervisor({
+      ...baseOpts,
+      onLog: () => {},
+      onUnexpectedExit,
+      healthTimeoutMs: 5_000,
+    });
 
     const starting = sup.start();
     await flush(10);
-    children[0].emit('error', Object.assign(new Error('spawn obs64.exe EACCES'), { code: 'EACCES' }));
+    children[0].emit(
+      'error',
+      Object.assign(new Error('spawn obs64.exe EACCES'), { code: 'EACCES' }),
+    );
 
     await expect(starting).rejects.toThrow(/EACCES/);
     expect(onUnexpectedExit).not.toHaveBeenCalled(); // a launch failure rejects start(), not a phantom crash
@@ -218,9 +226,9 @@ describe('ObsSupervisor', () => {
     await expect(sup.start()).resolves.toBeUndefined();
 
     expect(spawnMock).toHaveBeenCalledTimes(1); // OBS still launched despite the firewall failure
-    expect(lines.some((l) => /could not scope :4466 to loopback \(needs admin\)|LAN-reachable/.test(l))).toBe(
-      true,
-    );
+    expect(
+      lines.some((l) => /could not scope :4466 to loopback \(needs admin\)|LAN-reachable/.test(l)),
+    ).toBe(true);
   });
 
   // Case 4: stop() escalates to taskkill when SIGTERM doesn't exit OBS in the grace window.

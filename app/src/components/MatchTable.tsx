@@ -60,7 +60,10 @@ interface ColumnDef extends ColumnMeta {
 // renders. These live here, not in match-columns, because they return JSX / use React components.
 const CELL: Record<
   ColumnKey,
-  { readonly cellClass?: string; readonly render: (m: MatchSummary, ctx: CellCtx) => React.ReactNode }
+  {
+    readonly cellClass?: string;
+    readonly render: (m: MatchSummary, ctx: CellCtx) => React.ReactNode;
+  }
 > = {
   hero: {
     cellClass: 'mt-hero',
@@ -128,7 +131,10 @@ const CELL: Record<
 
 // The full column list the table renders: pure metadata + the matching cell renderer per key.
 // (Per-key lookups use the imported COLUMN_META_BY_KEY — sort only needs ColumnMeta, not renderers.)
-const ALL_COLUMNS: readonly ColumnDef[] = COLUMN_META.map((meta) => ({ ...meta, ...CELL[meta.key] }));
+const ALL_COLUMNS: readonly ColumnDef[] = COLUMN_META.map((meta) => ({
+  ...meta,
+  ...CELL[meta.key],
+}));
 
 // Hero portrait with graceful fallback: shows the CDN icon, degrading to the plain chip
 // placeholder when there's no hero or the image can't load (e.g. offline / unknown hero).
@@ -173,10 +179,19 @@ function popupItems(panel: HTMLElement | null): HTMLElement[] {
   if (!panel) return [];
   // Exactly the two popup item kinds: action-menu items and column-picker checkboxes. Kept narrow so
   // an incidental future child (a stray button / text input) can't slip into the roving-focus ring.
-  return Array.from(panel.querySelectorAll<HTMLElement>('[role="menuitem"], input[type="checkbox"]'));
+  return Array.from(
+    panel.querySelectorAll<HTMLElement>('[role="menuitem"], input[type="checkbox"]'),
+  );
 }
 
-function PopupMenu({ x, y, onClose, ariaLabel, role = 'menu', children }: PopupMenuProps): React.JSX.Element {
+function PopupMenu({
+  x,
+  y,
+  onClose,
+  ariaLabel,
+  role = 'menu',
+  children,
+}: PopupMenuProps): React.JSX.Element {
   const panelRef = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState({ x, y });
 
@@ -188,8 +203,10 @@ function PopupMenu({ x, y, onClose, ariaLabel, role = 'menu', children }: PopupM
     const margin = 8;
     let nx = x;
     let ny = y;
-    if (x + width > window.innerWidth - margin) nx = Math.max(margin, window.innerWidth - width - margin);
-    if (y + height > window.innerHeight - margin) ny = Math.max(margin, window.innerHeight - height - margin);
+    if (x + width > window.innerWidth - margin)
+      nx = Math.max(margin, window.innerWidth - width - margin);
+    if (y + height > window.innerHeight - margin)
+      ny = Math.max(margin, window.innerHeight - height - margin);
     setPos({ x: nx, y: ny });
   }, [x, y]);
 
@@ -361,10 +378,7 @@ function ClipTable(): React.JSX.Element {
   const selectClip = useLibraryStore((s) => s.selectClip);
   const toggleClipStar = useLibraryStore((s) => s.toggleClipStar);
 
-  const visible = useMemo(
-    () => clips.filter((c) => clipMatchesSearch(c, search)),
-    [clips, search],
-  );
+  const visible = useMemo(() => clips.filter((c) => clipMatchesSearch(c, search)), [clips, search]);
 
   return (
     <div className="mt-root">
@@ -416,7 +430,10 @@ interface MatchRowProps {
   readonly gridTemplate: string;
   readonly selected: boolean;
   readonly ctx: CellCtx;
-  readonly onSelect: (id: number, opts?: { readonly shift?: boolean; readonly toggle?: boolean }) => void;
+  readonly onSelect: (
+    id: number,
+    opts?: { readonly shift?: boolean; readonly toggle?: boolean },
+  ) => void;
   readonly onOpenMenu: (match: MatchSummary, x: number, y: number) => void;
 }
 
@@ -505,7 +522,9 @@ export function MatchTable(): React.JSX.Element {
 
   // The column-picker dropdown anchor (null = closed) and the row context menu state.
   const [colsMenuAt, setColsMenuAt] = useState<{ x: number; y: number } | null>(null);
-  const [rowMenu, setRowMenu] = useState<{ match: MatchSummary; x: number; y: number } | null>(null);
+  const [rowMenu, setRowMenu] = useState<{ match: MatchSummary; x: number; y: number } | null>(
+    null,
+  );
   // Two-step delete inside the row menu: the first "Delete" click arms the confirm so a
   // permanent delete can't fire on a single accidental click.
   const [menuDeleteArmed, setMenuDeleteArmed] = useState(false);
@@ -629,9 +648,7 @@ export function MatchTable(): React.JSX.Element {
     const removing = visibleKeys.includes(key);
     setVisibleByBucket((prev) => {
       const current = prev[bucket] ?? defaultVisibleKeysFor(bucket);
-      const next = current.includes(key)
-        ? current.filter((k) => k !== key)
-        : [...current, key];
+      const next = current.includes(key) ? current.filter((k) => k !== key) : [...current, key];
       return { ...prev, [bucket]: next };
     });
     // Hiding the column this tab is sorted by would leave the list ordered by an invisible column
@@ -721,9 +738,7 @@ export function MatchTable(): React.JSX.Element {
       </div>
 
       <div className="mt-body">
-        {loadState === 'loading' && (
-          <div className="mt-state">Loading recordings…</div>
-        )}
+        {loadState === 'loading' && <div className="mt-state">Loading recordings…</div>}
 
         {loadState === 'error' && (
           <div className="mt-state mt-state-error">
@@ -781,178 +796,184 @@ export function MatchTable(): React.JSX.Element {
         </PopupMenu>
       )}
 
-      {rowMenu && (() => {
-        // The menu acts on the whole multi-selection when the right-clicked row is part of it;
-        // otherwise just that row (openRowMenu already collapsed the selection to it). `count` drives
-        // the labels and which item set renders.
-        const ids =
-          selectedIds.size > 0 && selectedIds.has(rowMenu.match.id)
-            ? [...selectedIds]
-            : [rowMenu.match.id];
-        const count = ids.length;
-        const targets = ids
-          .map((id) => matchById.get(id))
-          .filter((m): m is MatchSummary => m != null);
-        const revealable = targets.filter((m) => canReveal(m));
-        // Mirror the single-row menu: offer Star only when something is unstarred, Unstar only when
-        // something is starred (none starred -> Star only; all starred -> Unstar only; mixed -> both).
-        const anyStarred = targets.some((m) => m.starred);
-        const anyUnstarred = targets.some((m) => !m.starred);
-        const bulkStar = (starred: boolean): void => {
-          targets.forEach((m) => void toggleStar(m.id, starred));
-          closeRowMenu();
-        };
-        return (
-          <PopupMenu
-            x={rowMenu.x}
-            y={rowMenu.y}
-            onClose={closeRowMenu}
-            ariaLabel={count > 1 ? `Actions for ${count} recordings` : 'Recording actions'}
-          >
-            {count === 1 ? (
-              <>
-                <button
-                  type="button"
-                  className="ctx-item"
-                  role="menuitem"
-                  onClick={() => {
-                    selectMatch(rowMenu.match.id);
-                    closeRowMenu();
-                  }}
-                >
-                  Open in player
-                </button>
-                <button
-                  type="button"
-                  className="ctx-item"
-                  role="menuitem"
-                  onClick={() => {
-                    void toggleStar(rowMenu.match.id, !rowMenu.match.starred);
-                    closeRowMenu();
-                  }}
-                >
-                  {rowMenu.match.starred ? 'Unstar' : 'Star (keep from auto-delete)'}
-                </button>
-                {canReveal(rowMenu.match) && (
+      {rowMenu &&
+        (() => {
+          // The menu acts on the whole multi-selection when the right-clicked row is part of it;
+          // otherwise just that row (openRowMenu already collapsed the selection to it). `count` drives
+          // the labels and which item set renders.
+          const ids =
+            selectedIds.size > 0 && selectedIds.has(rowMenu.match.id)
+              ? [...selectedIds]
+              : [rowMenu.match.id];
+          const count = ids.length;
+          const targets = ids
+            .map((id) => matchById.get(id))
+            .filter((m): m is MatchSummary => m != null);
+          const revealable = targets.filter((m) => canReveal(m));
+          // Mirror the single-row menu: offer Star only when something is unstarred, Unstar only when
+          // something is starred (none starred -> Star only; all starred -> Unstar only; mixed -> both).
+          const anyStarred = targets.some((m) => m.starred);
+          const anyUnstarred = targets.some((m) => !m.starred);
+          const bulkStar = (starred: boolean): void => {
+            targets.forEach((m) => void toggleStar(m.id, starred));
+            closeRowMenu();
+          };
+          return (
+            <PopupMenu
+              x={rowMenu.x}
+              y={rowMenu.y}
+              onClose={closeRowMenu}
+              ariaLabel={count > 1 ? `Actions for ${count} recordings` : 'Recording actions'}
+            >
+              {count === 1 ? (
+                <>
                   <button
                     type="button"
                     className="ctx-item"
                     role="menuitem"
                     onClick={() => {
-                      // Best-effort: a failed reveal (file vanished between render and click) is a
-                      // no-op, never an unhandled rejection.
-                      void window.dotarec?.revealPath(rowMenu.match.videoPath as string).catch(() => {});
+                      selectMatch(rowMenu.match.id);
                       closeRowMenu();
                     }}
                   >
-                    Reveal in folder
+                    Open in player
                   </button>
-                )}
-                <button
-                  type="button"
-                  className="ctx-item"
-                  role="menuitem"
-                  onClick={() => {
-                    copyMatchId(rowMenu.match);
-                    closeRowMenu();
-                  }}
-                >
-                  Copy match ID
-                </button>
-                <div className="ctx-sep" role="separator" />
-                <button
-                  type="button"
-                  className="ctx-item ctx-item-danger"
-                  role="menuitem"
-                  onClick={() => {
-                    if (menuDeleteArmed) {
-                      // deleteMatch rethrows on a failed API call; swallow it here (a stale row is
-                      // reconciled by the next load) so it can't surface as an unhandled rejection.
-                      void deleteMatch(rowMenu.match.id).catch(() => {});
-                      closeRowMenu();
-                    } else {
-                      setMenuDeleteArmed(true);
-                    }
-                  }}
-                >
-                  {menuDeleteArmed ? 'Click to confirm delete' : 'Delete recording'}
-                </button>
-              </>
-            ) : (
-              <>
-                <div className="ctx-menu-head" aria-hidden="true">
-                  {count} SELECTED
-                </div>
-                {anyUnstarred && (
-                  <button
-                    type="button"
-                    className="ctx-item"
-                    role="menuitem"
-                    onClick={() => bulkStar(true)}
-                  >
-                    Star {count} (keep from auto-delete)
-                  </button>
-                )}
-                {anyStarred && (
-                  <button
-                    type="button"
-                    className="ctx-item"
-                    role="menuitem"
-                    onClick={() => bulkStar(false)}
-                  >
-                    Unstar {count}
-                  </button>
-                )}
-                {revealable.length > 0 && (
                   <button
                     type="button"
                     className="ctx-item"
                     role="menuitem"
                     onClick={() => {
-                      revealable.forEach(
-                        (m) => void window.dotarec?.revealPath(m.videoPath as string).catch(() => {}),
-                      );
+                      void toggleStar(rowMenu.match.id, !rowMenu.match.starred);
                       closeRowMenu();
                     }}
                   >
-                    Reveal {revealable.length} in folder
+                    {rowMenu.match.starred ? 'Unstar' : 'Star (keep from auto-delete)'}
                   </button>
-                )}
-                <button
-                  type="button"
-                  className="ctx-item"
-                  role="menuitem"
-                  onClick={() => {
-                    const text = targets.map((m) => String(m.dotaMatchId ?? m.id)).join('\n');
-                    void navigator.clipboard?.writeText(text).catch(() => {});
-                    closeRowMenu();
-                  }}
-                >
-                  Copy {count} match IDs
-                </button>
-                <div className="ctx-sep" role="separator" />
-                <button
-                  type="button"
-                  className="ctx-item ctx-item-danger"
-                  role="menuitem"
-                  onClick={() => {
-                    if (menuDeleteArmed) {
-                      // deleteMatches skips any failed delete; the next load() reconciles a straggler.
-                      void deleteMatches(ids).catch(() => {});
-                      setSelectedIds(new Set<number>());
+                  {canReveal(rowMenu.match) && (
+                    <button
+                      type="button"
+                      className="ctx-item"
+                      role="menuitem"
+                      onClick={() => {
+                        // Best-effort: a failed reveal (file vanished between render and click) is a
+                        // no-op, never an unhandled rejection.
+                        void window.dotarec
+                          ?.revealPath(rowMenu.match.videoPath as string)
+                          .catch(() => {});
+                        closeRowMenu();
+                      }}
+                    >
+                      Reveal in folder
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="ctx-item"
+                    role="menuitem"
+                    onClick={() => {
+                      copyMatchId(rowMenu.match);
                       closeRowMenu();
-                    } else {
-                      setMenuDeleteArmed(true);
-                    }
-                  }}
-                >
-                  {menuDeleteArmed ? `Click to confirm delete (${count})` : `Delete ${count} recordings`}
-                </button>
-              </>
-            )}
-          </PopupMenu>
-        );
-      })()}
+                    }}
+                  >
+                    Copy match ID
+                  </button>
+                  <div className="ctx-sep" role="separator" />
+                  <button
+                    type="button"
+                    className="ctx-item ctx-item-danger"
+                    role="menuitem"
+                    onClick={() => {
+                      if (menuDeleteArmed) {
+                        // deleteMatch rethrows on a failed API call; swallow it here (a stale row is
+                        // reconciled by the next load) so it can't surface as an unhandled rejection.
+                        void deleteMatch(rowMenu.match.id).catch(() => {});
+                        closeRowMenu();
+                      } else {
+                        setMenuDeleteArmed(true);
+                      }
+                    }}
+                  >
+                    {menuDeleteArmed ? 'Click to confirm delete' : 'Delete recording'}
+                  </button>
+                </>
+              ) : (
+                <>
+                  <div className="ctx-menu-head" aria-hidden="true">
+                    {count} SELECTED
+                  </div>
+                  {anyUnstarred && (
+                    <button
+                      type="button"
+                      className="ctx-item"
+                      role="menuitem"
+                      onClick={() => bulkStar(true)}
+                    >
+                      Star {count} (keep from auto-delete)
+                    </button>
+                  )}
+                  {anyStarred && (
+                    <button
+                      type="button"
+                      className="ctx-item"
+                      role="menuitem"
+                      onClick={() => bulkStar(false)}
+                    >
+                      Unstar {count}
+                    </button>
+                  )}
+                  {revealable.length > 0 && (
+                    <button
+                      type="button"
+                      className="ctx-item"
+                      role="menuitem"
+                      onClick={() => {
+                        revealable.forEach(
+                          (m) =>
+                            void window.dotarec?.revealPath(m.videoPath as string).catch(() => {}),
+                        );
+                        closeRowMenu();
+                      }}
+                    >
+                      Reveal {revealable.length} in folder
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="ctx-item"
+                    role="menuitem"
+                    onClick={() => {
+                      const text = targets.map((m) => String(m.dotaMatchId ?? m.id)).join('\n');
+                      void navigator.clipboard?.writeText(text).catch(() => {});
+                      closeRowMenu();
+                    }}
+                  >
+                    Copy {count} match IDs
+                  </button>
+                  <div className="ctx-sep" role="separator" />
+                  <button
+                    type="button"
+                    className="ctx-item ctx-item-danger"
+                    role="menuitem"
+                    onClick={() => {
+                      if (menuDeleteArmed) {
+                        // deleteMatches skips any failed delete; the next load() reconciles a straggler.
+                        void deleteMatches(ids).catch(() => {});
+                        setSelectedIds(new Set<number>());
+                        closeRowMenu();
+                      } else {
+                        setMenuDeleteArmed(true);
+                      }
+                    }}
+                  >
+                    {menuDeleteArmed
+                      ? `Click to confirm delete (${count})`
+                      : `Delete ${count} recordings`}
+                  </button>
+                </>
+              )}
+            </PopupMenu>
+          );
+        })()}
     </div>
   );
 }

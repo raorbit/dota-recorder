@@ -51,8 +51,7 @@ function ManualInstall({
   readonly instructions: GsiManualInstructions;
 }): React.JSX.Element {
   const dir =
-    instructions.targetDir ??
-    '…/steamapps/common/dota 2 beta/game/dota/cfg/gamestate_integration/';
+    instructions.targetDir ?? '…/steamapps/common/dota 2 beta/game/dota/cfg/gamestate_integration/';
   return (
     <div className="gsi-result">
       <ol className="gsi-doc-steps">
@@ -60,15 +59,14 @@ function ManualInstall({
           Create the folder <code className="gsi-code">{dir}</code> if it does not exist.
         </li>
         <li>
-          Save a file named{' '}
-          <code className="gsi-code">{instructions.cfgFileName}</code> there with exactly
-          this content:
+          Save a file named <code className="gsi-code">{instructions.cfgFileName}</code> there with
+          exactly this content:
         </li>
       </ol>
       <pre className="gsi-cfg">{instructions.cfgBody}</pre>
       <p className="gsi-doc-foot">
-        Then add <code className="gsi-code">{GSI_LAUNCH_OPTION}</code> to Dota 2's Steam
-        launch options and restart Dota.
+        Then add <code className="gsi-code">{GSI_LAUNCH_OPTION}</code> to Dota 2's Steam launch
+        options and restart Dota.
       </p>
     </div>
   );
@@ -121,26 +119,21 @@ export function GsiSettings({ gsi }: GsiSettingsProps): React.JSX.Element {
       </header>
 
       <p className="gsi-intro">
-        Dota 2 broadcasts live match state (clock, your hero, K/D/A, game phase) to a
-        local HTTP listener this app runs at{' '}
-        <code className="gsi-code">127.0.0.1:3223/gsi</code>. That feed triggers recording
-        and tags timeline moments; the dot above turns green once Dota is POSTing frames.
+        Dota 2 broadcasts live match state (clock, your hero, K/D/A, game phase) to a local HTTP
+        listener this app runs at <code className="gsi-code">127.0.0.1:3223/gsi</code>. That feed
+        triggers recording and tags timeline moments; the dot above turns green once Dota is POSTing
+        frames.
       </p>
 
       <div className="gsi-doc" role="note">
         <div className="gsi-doc-title">One-time setup</div>
         <p className="gsi-intro">
-          Let the app write the GSI config into your Dota install, or copy it in yourself.
-          Either way you'll add a launch option and restart Dota once.
+          Let the app write the GSI config into your Dota install, or copy it in yourself. Either
+          way you'll add a launch option and restart Dota once.
         </p>
 
         <div className="gsi-actions">
-          <button
-            className="gsi-btn"
-            type="button"
-            onClick={autoInstall}
-            disabled={working}
-          >
+          <button className="gsi-btn" type="button" onClick={autoInstall} disabled={working}>
             {working ? 'Working…' : 'Set up automatically'}
           </button>
           <button
@@ -156,13 +149,12 @@ export function GsiSettings({ gsi }: GsiSettingsProps): React.JSX.Element {
         {setup.phase === 'installed' && (
           <div className="gsi-result" role="status">
             <p>
-              Installed the GSI config at{' '}
-              <code className="gsi-code">{setup.result.cfgPath}</code>.
+              Installed the GSI config at <code className="gsi-code">{setup.result.cfgPath}</code>.
             </p>
             <p>
-              Add <code className="gsi-code">{GSI_LAUNCH_OPTION}</code> to Dota 2's Steam
-              launch options, then restart Dota. The status above goes green once a match
-              is in progress and recording arms automatically.
+              Add <code className="gsi-code">{GSI_LAUNCH_OPTION}</code> to Dota 2's Steam launch
+              options, then restart Dota. The status above goes green once a match is in progress
+              and recording arms automatically.
             </p>
           </div>
         )}
@@ -177,9 +169,8 @@ export function GsiSettings({ gsi }: GsiSettingsProps): React.JSX.Element {
       </div>
 
       <p className="gsi-doc-foot">
-        GSI gives full fidelity for <strong>your</strong> player; allies and enemies are
-        coarse without spectating. Precise kill/Roshan timings are backfilled later from the
-        match replay.
+        GSI gives full fidelity for <strong>your</strong> player; allies and enemies are coarse
+        without spectating. Precise kill/Roshan timings are backfilled later from the match replay.
       </p>
     </section>
   );

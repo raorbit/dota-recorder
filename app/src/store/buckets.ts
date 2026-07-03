@@ -3,13 +3,7 @@ import type { MatchSummary } from '../api/client';
 // The seven library buckets the sidebar lists. `unsorted` is the holding pen for
 // recorded-but-not-yet-enriched matches: a row never defaults into `ranked`.
 export type Bucket =
-  | 'ranked'
-  | 'unranked'
-  | 'turbo'
-  | 'abilityDraft'
-  | 'manual'
-  | 'clips'
-  | 'unsorted';
+  'ranked' | 'unranked' | 'turbo' | 'abilityDraft' | 'manual' | 'clips' | 'unsorted';
 
 export const BUCKET_LABELS: Record<Bucket, string> = {
   ranked: 'Ranked',

@@ -55,7 +55,7 @@ extraResources:
   - from: build-resources/obs
     to: obs
     filter:
-      - ".obs-*.ok"
+      - '.obs-*.ok'
   # Static ffmpeg.exe fetched at build time by scripts/fetch-ffmpeg.mjs (npm run
   # fetch:ffmpeg, chained into dist). The Electron supervisor threads this path into
   # the core (app.ffmpeg.path / DOTAREC_FFMPEG_PATH) so the core never depends on
@@ -68,7 +68,7 @@ extraResources:
   - from: build-resources
     to: .
     filter:
-      - ".ffmpeg-*.ok"
+      - '.ffmpeg-*.ok'
 
 # koffi (optional native FFI for the Job Object) must stay outside the asar so its
 # .node binary is loadable. In koffi 3.x the native binary no longer lives under
@@ -78,8 +78,8 @@ extraResources:
 # so the packaged build would silently fall back to taskkill /T /F. Harmless when koffi
 # isn't installed (nothing matches).
 asarUnpack:
-  - "**/node_modules/koffi/**"
-  - "**/node_modules/@koromix/**"
+  - '**/node_modules/koffi/**'
+  - '**/node_modules/@koromix/**'
 
 win:
   # Brand red-diamond icon (multi-size .ico) for the exe, taskbar, and installer.

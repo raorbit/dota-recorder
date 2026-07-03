@@ -32,9 +32,7 @@ export function App(): React.JSX.Element {
   useEffect(() => startLibrary(), []);
 
   const selectedMatch =
-    selectedMatchId === null
-      ? null
-      : (matches.find((m) => m.id === selectedMatchId) ?? null);
+    selectedMatchId === null ? null : (matches.find((m) => m.id === selectedMatchId) ?? null);
 
   const openSettings = (tab: SettingsTab): void => {
     setSettingsTab(tab);
