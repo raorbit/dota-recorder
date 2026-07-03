@@ -1,5 +1,11 @@
 import type { Dispatch, SetStateAction } from 'react';
-import { ENCODER_LABELS, FORMAT_PRESETS, FPS_PRESETS, QUALITY_PRESETS } from './settings-helpers';
+import {
+  ENCODER_LABELS,
+  FORMAT_PRESETS,
+  FPS_PRESETS,
+  QUALITY_PRESETS,
+  withStoredOption,
+} from './settings-helpers';
 import type { SaveState } from './settings-helpers';
 
 // The encoder-override picker offers `auto` (the blank sentinel — re-arms the GPU
@@ -33,14 +39,8 @@ export function VideoSection({
   setRecFormat,
   setSaveState,
 }: VideoSectionProps): React.JSX.Element {
-  // Mirror resOptions in the container: a stored quality/format outside the picker list
-  // (e.g. "Small" or "ts") is preserved as a leading option so saving doesn't silently change it.
-  const qualityOptions = QUALITY_PRESETS.some((p) => p.value === quality)
-    ? QUALITY_PRESETS
-    : [{ value: quality, label: quality || '—' }, ...QUALITY_PRESETS];
-  const formatOptions = FORMAT_PRESETS.some((p) => p.value === recFormat)
-    ? FORMAT_PRESETS
-    : [{ value: recFormat, label: recFormat || '—' }, ...FORMAT_PRESETS];
+  const qualityOptions = withStoredOption(QUALITY_PRESETS, quality);
+  const formatOptions = withStoredOption(FORMAT_PRESETS, recFormat);
 
   return (
     <section className="rec-card">

@@ -14,6 +14,7 @@ import {
   RES_PRESETS,
   clampCapGb,
   clampPadding,
+  withStoredOption,
 } from './recording/settings-helpers';
 import type { SaveState } from './recording/settings-helpers';
 import { useAudioInputs } from './recording/useAudioInputs';
@@ -350,9 +351,7 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
   const status = recorderStatusLabel(obs);
   const activeUsage = usage?.drives.find((u) => u.role === 'active');
   const encoderToken = settings?.encoder ?? '';
-  const resOptions = RES_PRESETS.some((p) => p.value === resolution)
-    ? RES_PRESETS
-    : [{ value: resolution, label: resolution || '—' }, ...RES_PRESETS];
+  const resOptions = withStoredOption(RES_PRESETS, resolution);
 
   return (
     <section className="rec-panel" aria-label="Recording settings">

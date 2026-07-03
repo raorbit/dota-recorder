@@ -5,6 +5,23 @@ import type { DriveUsage } from '../../../api/client';
 // contracts can never drift apart.
 export type SaveState = 'idle' | 'saving' | 'saved' | 'error';
 
+export interface SelectOption {
+  readonly value: string;
+  readonly label: string;
+}
+
+// A stored value outside the preset list (an ultrawide resolution, a legacy quality/format
+// token) must survive a save untouched, so it's shown as a leading option rather than
+// dropped. A blank stored value labels as an em dash. Returns the presets as-is once the
+// stored value is already one of them.
+export function withStoredOption(
+  presets: ReadonlyArray<SelectOption>,
+  value: string,
+): ReadonlyArray<SelectOption> {
+  if (presets.some((p) => p.value === value)) return presets;
+  return [{ value, label: value || '—' }, ...presets];
+}
+
 // Resolution presets offered in the dropdown. A stored value outside this list
 // (e.g. an ultrawide) is preserved and shown as an extra leading option.
 export const RES_PRESETS: ReadonlyArray<{ readonly value: string; readonly label: string }> = [
