@@ -1,0 +1,9 @@
+core/
+**/dist/
+**/electron-dist/
+build-resources/
+release/
+logs/
+node_modules/
+*.md
+package-lock.json
