@@ -41,6 +41,11 @@ jobs:
       - name: Install renderer deps
         run: npm --prefix app ci
 
+      # eslint + its plugins are ROOT devDeps (see eslint.config.mjs), so this must run
+      # after `npm ci` at the root. `lint` is `eslint . --max-warnings 0` — warnings fail CI.
+      - name: Lint
+        run: npm run lint
+
       - name: Renderer + Electron typecheck
         run: npm --prefix app run typecheck
 
