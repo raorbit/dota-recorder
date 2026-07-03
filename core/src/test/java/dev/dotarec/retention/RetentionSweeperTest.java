@@ -551,6 +551,49 @@ class RetentionSweeperTest {
     }
 
     @Test
+    void outOfRootVideoPathIsNeitherDeletedNorPrunedAndTheSweepContinues() throws Exception {
+        // A row's video_path points at a real, on-disk file OUTSIDE every configured storage root (a
+        // tampered/hand-edited path or a `..` escape) — not videoDir, not an archive, not a
+        // previousVideoDir. Its parent directory exists (so driveReachable passes and the sweep reaches
+        // deleteFileQuietly), but the containment guard must REFUSE the unlink: the file survives on disk
+        // and the row keeps its path (never nulled, never credited). The pass must not stop there — a
+        // NEWER in-root VOD is still evicted, proving the refusal is a skip, not an abort.
+        long gib = 1024L * 1024 * 1024;
+        settings.get().retentionCapGb = 1;
+
+        // Out-of-root file: a real 1.5 GiB .mp4 under a sibling dir that is NOT any storage root. Older
+        // (played_at 1_000) so it is the FIRST sweep candidate — the guard fires before the in-root one.
+        Path outsideDir = Files.createDirectories(videoDir.getParent().resolve("outside-all-roots"));
+        Path outsideFile = outsideDir.resolve("tampered.mp4");
+        createSparseFile(outsideFile, 3 * gib / 2);
+        long outsideId = matches.insert(new NewMatch(
+                null, "match", "enriched", "puck",
+                1, 2, 3, 400, 500, 10000, 120,
+                "win", 7, 22, null, null, 1800,
+                1_000L, outsideFile.toString(), null, 3 * gib / 2, false, 1_000L, null));
+
+        // In-root active-drive VOD: a real 1 GiB file, NEWER, so eviction must fall through to it after
+        // the out-of-root candidate is refused.
+        long inRootId = seedWithFiles("in-root.mp4", "in-root.jpg", gib, 2_000L, false);
+
+        RetentionSweeper.SweepResult result = sweeper.sweep(null);
+
+        // The out-of-root file is neither unlinked on disk nor pruned in the DB, and got no freed credit.
+        assertThat(Files.exists(outsideFile))
+                .as("a file outside all storage roots must never be unlinked by the sweep")
+                .isTrue();
+        assertThat(matches.findById(outsideId).orElseThrow().videoPath())
+                .as("an out-of-root row must keep its path (not nulled/pruned)")
+                .isEqualTo(outsideFile.toString());
+        assertThat(result.deletedIds())
+                .as("the sweep continues past the refused candidate to the in-root one")
+                .containsExactly(inRootId);
+        assertThat(result.freedBytes()).isEqualTo(gib);
+        assertThat(Files.exists(videoDir.resolve("in-root.mp4"))).isFalse();
+        assertThat(matches.findById(inRootId).orElseThrow().videoPath()).isNull();
+    }
+
+    @Test
     void freeSpaceCheckNeverThrowsAndReturnsNullWhenHealthy() {
         // The temp video drive has plenty of space in CI; the check must not throw and (almost
         // always) reports healthy. We only assert it doesn't blow up and returns a String-or-null.
