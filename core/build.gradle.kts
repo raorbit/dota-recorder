@@ -5,7 +5,15 @@ plugins {
 }
 
 group = "dev.dotarec"
-version = "0.1.5"
+// Single source of truth for the app version is the repo-root package.json (electron-builder
+// already derives the installer name and latest.yml from it). Reading it here keeps the jar's
+// Implementation-Version -- and therefore /health's version field -- from drifting behind the
+// npm side. Fails loudly rather than falling back: a silent default is what caused the skew.
+version = run {
+    val pkg = rootDir.resolveSibling("package.json")
+    val match = Regex("\"version\"\\s*:\\s*\"([^\"]+)\"").find(pkg.readText())
+    match?.groupValues?.get(1) ?: error("Could not read version from $pkg")
+}
 
 java {
     toolchain {
