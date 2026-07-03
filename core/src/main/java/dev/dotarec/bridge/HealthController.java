@@ -26,10 +26,11 @@ public class HealthController {
 
     public HealthController(MigrationRunner migrations) {
         this.migrations = migrations;
-        // Project version is stamped at build time; fall back to a literal if the implementation
-        // version is unavailable (e.g. exploded dev runs).
+        // Project version is stamped into the jar manifest at build time. The fallback is a
+        // sentinel, not a version literal: a hardcoded number here silently rots (it only shows
+        // in exploded dev runs, where "dev" is the honest answer).
         String impl = HealthController.class.getPackage().getImplementationVersion();
-        this.version = (impl != null) ? impl : "0.1.5";
+        this.version = (impl != null) ? impl : "dev";
     }
 
     @GetMapping("/health")
