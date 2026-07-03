@@ -17,6 +17,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as assignJob from './job-object';
 import { BRIDGE_BASE, BRIDGE_TOKEN_HEADER } from './paths';
+import { scrubSecrets } from './scrub';
 
 export interface ObsSupervisorOptions {
   /** Writable OBS dir (%LOCALAPPDATA%/dota-recorder/obs) — obs64.exe lives under bin/64bit. */
@@ -309,14 +310,9 @@ export class ObsSupervisor {
     const text = buf.toString('utf8');
     for (const line of text.split(/\r?\n/)) {
       if (line.length === 0) continue;
-      // Secret hygiene (mirrors JvmSupervisor.emitLines): OBS echoes its --websocket_password arg on
-      // startup and can surface the bridge token if it ever logs the core's env, and electron.log is
-      // durable and often shared in bug reports. Scrub both before writing. Each split is guarded on a
-      // truthy secret — splitting on '' explodes the line into per-character garbage.
-      let safe = line;
-      if (this.password) safe = safe.split(this.password).join('***');
-      if (this.bridgeToken) safe = safe.split(this.bridgeToken).join('***');
-      this.onLog(safe);
+      // OBS echoes its --websocket_password arg on startup and can surface the bridge token if it ever
+      // logs the core's env; scrub both before they reach electron.log.
+      this.onLog(scrubSecrets(line, [this.password, this.bridgeToken]));
     }
   }
 

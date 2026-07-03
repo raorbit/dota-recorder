@@ -11,6 +11,7 @@
 // loud status-card error on crash are later steps; this is the Step 0 skeleton.
 import { spawn, type ChildProcess } from 'node:child_process';
 import * as assignJob from './job-object';
+import { scrubSecrets } from './scrub';
 import {
   BRIDGE_TOKEN_ENV,
   BRIDGE_TOKEN_HEADER,
@@ -209,11 +210,9 @@ export class JvmSupervisor {
     const text = buf.toString('utf8');
     for (const line of text.split(/\r?\n/)) {
       if (line.length === 0) continue;
-      // Secret hygiene: the bridge token lives in the core's env, and if the core ever echoes its
-      // environment (a debug bean, a verbose stack trace) it would otherwise land in electron.log in
-      // plaintext. Logs are durable and often shared in bug reports, so scrub it before it is written.
-      const safe = this.bridgeToken ? line.split(this.bridgeToken).join('***') : line;
-      this.onLog(safe);
+      // The bridge token lives in the core's env; if the core ever echoes its environment (a debug
+      // bean, a verbose stack trace) it would otherwise land in electron.log in plaintext.
+      this.onLog(scrubSecrets(line, [this.bridgeToken]));
     }
   }
 
