@@ -1,5 +1,7 @@
 # dota-recorder
 
+[![Latest release](https://img.shields.io/github/v/release/raorbit/dota-recorder)](https://github.com/raorbit/dota-recorder/releases)
+
 A local-only Windows desktop app that auto-records every Dota 2 match, tags your own
 deaths and kills on a timeline, and lets you click a marker to jump straight to that
 moment in the recorded video. Modeled on [Warcraft Recorder](https://github.com/aza547/wow-recorder),
@@ -12,7 +14,7 @@ point it at your Dota install once and it records in the background.
 
 ## Status
 
-v0.1.5. The full feature surface is built, the core
+The full feature surface is built, the core
 **detect → record → tag → store → seek** loop is validated end-to-end against a real Dota
 match, and the packaged Windows installer is confirmed installing and running. Releases
 since v0.1.1 have added a manual stop-recording control, multi-select bulk actions and
