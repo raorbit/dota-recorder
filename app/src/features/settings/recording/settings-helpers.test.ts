@@ -8,6 +8,7 @@ import {
   clampCapGb,
   clampPadding,
   fmtSize,
+  withStoredOption,
 } from './settings-helpers';
 
 describe('clampCapGb', () => {
@@ -64,6 +65,28 @@ describe('fmtSize', () => {
   it('switches to TB at or past 1024 GB', () => {
     expect(fmtSize(1024 * 1024 ** 3)).toBe('1.0 TB');
     expect(fmtSize(2 * 1024 ** 4)).toBe('2.0 TB');
+  });
+});
+
+describe('withStoredOption', () => {
+  const presets = [
+    { value: '1920x1080', label: '1920 × 1080 (1080p)' },
+    { value: '3840x2160', label: '3840 × 2160 (4K)' },
+  ];
+
+  it('returns the presets unchanged when the stored value is one of them', () => {
+    expect(withStoredOption(presets, '1920x1080')).toBe(presets);
+  });
+
+  it('prepends a stored value outside the list, labelled with its own value', () => {
+    expect(withStoredOption(presets, '2560x1080')).toEqual([
+      { value: '2560x1080', label: '2560x1080' },
+      ...presets,
+    ]);
+  });
+
+  it('labels a blank stored value with an em dash', () => {
+    expect(withStoredOption(presets, '')).toEqual([{ value: '', label: '—' }, ...presets]);
   });
 });
 
