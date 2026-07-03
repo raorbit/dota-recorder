@@ -27,9 +27,6 @@ public class EnrichmentQueue {
 
     private static final Logger log = LoggerFactory.getLogger(EnrichmentQueue.class);
 
-    /** Stop re-polling a match after this many attempts; the crossing attempt flips it to failed. */
-    static final int MAX_ATTEMPTS = 10;
-
     private final MatchRepository matches;
     private final Enricher enricher;
 
@@ -41,7 +38,8 @@ public class EnrichmentQueue {
     /** Polls and dispatches eligible pending rows. Cadence mirrors {@code RetentionSweeper}. */
     @Scheduled(fixedDelay = 60_000L)
     public void sweep() {
-        List<PendingMatch> pending = matches.findPendingEnrichment(MAX_ATTEMPTS, System.currentTimeMillis());
+        List<PendingMatch> pending =
+                matches.findPendingEnrichment(Enricher.MAX_ATTEMPTS, System.currentTimeMillis());
         if (pending.isEmpty()) {
             return;
         }
