@@ -69,6 +69,14 @@ public class RecordingSession {
      */
     private boolean reachedGameInProgress;
 
+    // The session's map identity, latched from the FIRST frame that carries a map name: whether this
+    // recording is a Hero Demo. A session is entirely demo or entirely not, so the FSM treats a
+    // mid-recording flip as a new session (see shouldRollToNewRecording). Latched (not last-seen)
+    // and only from a non-null map name, so heartbeat/menu frames that drop the map block can never
+    // mutate the identity mid-recording.
+    private boolean heroDemo;
+    private boolean mapIdentitySeen;
+
     public String getSurrogateId() {
         return surrogateId;
     }
@@ -214,6 +222,16 @@ public class RecordingSession {
         return reachedGameInProgress;
     }
 
+    /** True once a frame with a map name has latched whether this session is a Hero Demo. */
+    public boolean hasMapIdentity() {
+        return mapIdentitySeen;
+    }
+
+    /** Whether this recording is a Hero Demo session; meaningless until {@link #hasMapIdentity()}. */
+    public boolean isHeroDemo() {
+        return heroDemo;
+    }
+
     /** Latches that this recording has seen a GAME_IN_PROGRESS frame (set by the FSM). */
     public void markReachedGameInProgress() {
         this.reachedGameInProgress = true;
@@ -228,6 +246,10 @@ public class RecordingSession {
     public void observe(GsiFrame frame) {
         if (frame.matchId() != 0L) {
             this.matchId = frame.matchId();
+        }
+        if (!mapIdentitySeen && frame.mapName() != null) {
+            this.mapIdentitySeen = true;
+            this.heroDemo = frame.isHeroDemo();
         }
         if (frame.heroPresent() && frame.hero() != null) {
             this.hero = frame.hero();

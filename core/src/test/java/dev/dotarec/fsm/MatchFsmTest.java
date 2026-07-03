@@ -299,6 +299,79 @@ class MatchFsmTest {
     }
 
     @Test
+    void demoInProgressFrameWhileRecordingRealMatch_rollsAndDemoStaysBlocked() {
+        // The demo enters straight at GAME_IN_PROGRESS (its arm frames were missed), so neither the
+        // match-id guard (demo id is 0) nor the arm-state guard can see the transition. The demo flag
+        // flip must roll: finalize the real match, then the redispatched demo frame is blocked in
+        // IDLE (recordDemoMatches defaults off) instead of being absorbed into match 111's recording.
+        fsm.onFrame(frame().matchId(111L)
+                .state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")
+                .activity("playing")
+                .hero("npc_dota_hero_lina")
+                .build());
+        assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
+
+        fsm.onFrame(frame().heroDemo()
+                .state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
+
+        assertThat(fsm.getState()).isEqualTo(MatchState.IDLE);
+        assertThat(obs.stopCalls).isEqualTo(1);
+        assertThat(obs.startCalls).as("the demo must not start a second recording").isEqualTo(1);
+        assertThat(matches.findAll()).singleElement()
+                .satisfies(row -> assertThat(row.dotaMatchId()).isEqualTo(111L));
+    }
+
+    @Test
+    void realMatchInProgressFrameWhileRecordingDemo_rollsAndRecordsTheMatch() {
+        SettingsStore.Settings demoOn = new SettingsStore.Settings();
+        demoOn.recordDemoMatches = true;
+        when(settings.get()).thenReturn(demoOn);
+
+        fsm.onFrame(frame().heroDemo()
+                .state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
+        assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
+
+        // The real match's first observed frame is already GAME_IN_PROGRESS (arm frames missed).
+        // The id guard can't fire (the demo session's id is 0), so the demo flag flip must roll.
+        fsm.onFrame(frame().matchId(222L)
+                .state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")
+                .activity("playing")
+                .hero("npc_dota_hero_rubick")
+                .build());
+
+        assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
+        assertThat(obs.stopCalls).isEqualTo(1);
+        assertThat(obs.startCalls).isEqualTo(2);
+        // The finalized row is the demo (no dota match id); the real match is the live session now.
+        assertThat(matches.findAll()).singleElement()
+                .satisfies(row -> assertThat(row.dotaMatchId()).isNull());
+        assertThat(fsm.currentSession().getMatchId()).isEqualTo(222L);
+    }
+
+    @Test
+    void mapNamelessHeartbeatWhileRecordingDemo_doesNotRoll() {
+        SettingsStore.Settings demoOn = new SettingsStore.Settings();
+        demoOn.recordDemoMatches = true;
+        when(settings.get()).thenReturn(demoOn);
+
+        fsm.onFrame(frame().heroDemo()
+                .state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
+        assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
+
+        // Heartbeat/menu-shaped frames drop the map block (mapName null). Null carries no map
+        // identity, so the flip guard must hold the recording rather than shred the demo session.
+        for (int i = 0; i < 3; i++) {
+            fsm.onFrame(frame().mapName(null).state("UNKNOWN").noHero().noPlayer().build());
+        }
+        fsm.onFrame(frame().heroDemo()
+                .state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
+
+        assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
+        assertThat(obs.stopCalls).isZero();
+        assertThat(obs.startCalls).isEqualTo(1);
+    }
+
+    @Test
     void unknownState_isANoOp() {
         fsm.onFrame(frame().state("UNKNOWN").build());
         fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_SOME_FUTURE_STATE").build());

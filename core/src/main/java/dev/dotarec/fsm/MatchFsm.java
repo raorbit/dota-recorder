@@ -250,6 +250,18 @@ public class MatchFsm {
             // A genuinely different match id while recording -> the previous match ended; roll.
             return true;
         }
+        // A demo<->non-demo flip mid-recording is a session change the other two guards can be blind
+        // to: a Hero Demo has match id 0 (so the id guard can't fire against it), and a session
+        // entered straight at GAME_IN_PROGRESS skips the arm states. Keyed on the demo flag (map
+        // "hero_demo_main"), NOT a generic map-name diff -- the demo map name is the only one a live
+        // capture proves stable, whereas rolling on any name change would shred one real match into
+        // multiple rows if the client ever churns the name across phases. A null mapName
+        // (heartbeat/menu frames) carries no identity and can never flip this.
+        if (frame.mapName() != null
+                && s.hasMapIdentity()
+                && frame.isHeroDemo() != s.isHeroDemo()) {
+            return true;
+        }
         // An arm state (HERO_SELECTION/STRATEGY_TIME/PRE_GAME) only signals a NEW match once we've
         // already reached GAME_IN_PROGRESS for the current one (a fresh draft began without a
         // POST_GAME). Repeated arm-state frames of the SAME draft -- of which Dota streams many at
