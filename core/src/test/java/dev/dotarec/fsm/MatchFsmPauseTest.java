@@ -7,6 +7,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.dotarec.bridge.EventPublisher;
 import dev.dotarec.clip.ClipService;
 import dev.dotarec.config.SettingsStore;
@@ -106,7 +107,7 @@ class MatchFsmPauseTest {
         when(settings.get()).thenReturn(new SettingsStore.Settings());
         fsm = new MatchFsm(
                 obs, new FakeThumbs(), new EventTagger(), matches, markers, pauses, journal, events,
-                ds, clipService, settings, TimeSource.system());
+                ds, clipService, settings, new ObjectMapper(), TimeSource.system());
     }
 
     @Test
@@ -230,6 +231,7 @@ class MatchFsmPauseTest {
                 ds,
                 clipService,
                 settings,
+                new ObjectMapper(),
                 TimeSource.system());
 
         // Open a pause so finalize has a span to persist -- which then throws and triggers rollback.
