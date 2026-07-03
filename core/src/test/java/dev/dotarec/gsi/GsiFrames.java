@@ -16,6 +16,8 @@ public final class GsiFrames {
     private boolean alive = true;
     private boolean playerPresent = true;
     private long matchId = 0L;
+    /** Any non-demo map name by default; demo tests opt in via {@link #heroDemo()}. */
+    private String mapName = "dota";
     private String hero = "npc_dota_hero_drow_ranger";
     private int heroId = 6;
     private String activity = "playing";
@@ -41,11 +43,19 @@ public final class GsiFrames {
     public GsiFrames alive(boolean v) { this.alive = v; return this; }
     public GsiFrames playerPresent(boolean v) { this.playerPresent = v; return this; }
     public GsiFrames matchId(long v) { this.matchId = v; return this; }
+    public GsiFrames mapName(String v) { this.mapName = v; return this; }
     public GsiFrames hero(String v) { this.hero = v; return this; }
     public GsiFrames activity(String v) { this.activity = v; return this; }
     public GsiFrames kills(int v) { this.kills = v; return this; }
     public GsiFrames deaths(int v) { this.deaths = v; return this; }
     public GsiFrames assists(int v) { this.assists = v; return this; }
+
+    /** Models a Hero Demo frame: map {@code hero_demo_main} with matchid 0, as the demo reports. */
+    public GsiFrames heroDemo() {
+        this.mapName = GsiFrame.HERO_DEMO_MAP;
+        this.matchId = 0L;
+        return this;
+    }
 
     /** Models a heartbeat / hero-select frame with no hero block. */
     public GsiFrames noHero() {
@@ -71,7 +81,7 @@ public final class GsiFrames {
     public GsiFrame build() {
         return new GsiFrame(
                 wallClockMillis, monotonicNanos, gameState, gameClock, paused, heroPresent, alive,
-                playerPresent, matchId, hero, heroId, activity, kills, deaths, assists, radiantScore,
-                direScore);
+                playerPresent, matchId, mapName, hero, heroId, activity, kills, deaths, assists,
+                radiantScore, direScore);
     }
 }
