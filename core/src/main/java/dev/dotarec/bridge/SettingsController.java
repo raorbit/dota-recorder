@@ -6,6 +6,7 @@ import dev.dotarec.config.SettingsStore.AudioSource;
 import dev.dotarec.config.SettingsStore.Settings;
 import dev.dotarec.config.SettingsStore.StorageLocation;
 import dev.dotarec.config.StorageRoots;
+import dev.dotarec.gsi.GsiPayload;
 import dev.dotarec.obs.ObsController;
 import dev.dotarec.obs.ObsSceneConfigurer;
 import dev.dotarec.obs.setup.ObsConfigWriter;
@@ -95,7 +96,7 @@ public class SettingsController {
         // actual incoming value is checked (null = leave unchanged, and clearAccountId wins).
         if (!Boolean.TRUE.equals(patch.clearAccountId())
                 && patch.accountId() != null
-                && (patch.accountId() <= 0 || patch.accountId() > 0xFFFFFFFFL)) {
+                && !GsiPayload.isValidAccountId(patch.accountId())) {
             throw new ResponseStatusException(
                     HttpStatus.BAD_REQUEST,
                     "invalid account id: " + patch.accountId() + " (expected a 32-bit Dota account id)");
