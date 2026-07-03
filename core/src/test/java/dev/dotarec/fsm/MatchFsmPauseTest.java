@@ -10,6 +10,7 @@ import static org.mockito.Mockito.when;
 import dev.dotarec.bridge.EventPublisher;
 import dev.dotarec.clip.ClipService;
 import dev.dotarec.config.SettingsStore;
+import dev.dotarec.config.TimeSource;
 import dev.dotarec.data.MarkerRepository;
 import dev.dotarec.data.MatchRepository;
 import dev.dotarec.data.MatchSummary;
@@ -105,7 +106,7 @@ class MatchFsmPauseTest {
         when(settings.get()).thenReturn(new SettingsStore.Settings());
         fsm = new MatchFsm(
                 obs, new FakeThumbs(), new EventTagger(), matches, markers, pauses, journal, events,
-                ds, clipService, settings);
+                ds, clipService, settings, TimeSource.system());
     }
 
     @Test
@@ -228,7 +229,8 @@ class MatchFsmPauseTest {
                 events,
                 ds,
                 clipService,
-                settings);
+                settings,
+                TimeSource.system());
 
         // Open a pause so finalize has a span to persist -- which then throws and triggers rollback.
         fsmWithBadPauses.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")

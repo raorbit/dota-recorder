@@ -13,6 +13,7 @@ import static org.assertj.core.data.Offset.offset;
 import dev.dotarec.bridge.EventPublisher;
 import dev.dotarec.clip.ClipService;
 import dev.dotarec.config.SettingsStore;
+import dev.dotarec.config.TimeSource;
 import dev.dotarec.data.MarkerRepository;
 import dev.dotarec.data.MarkerRow;
 import dev.dotarec.data.MatchRepository;
@@ -142,7 +143,7 @@ class MatchFsmTest {
         // record-confirmed offset base from this clock and synthetic frames carry .mono() stamps
         // relative to ANCHOR_NANOS (the wall path is exercised separately via FakeObs.confirmedAt).
         fsm = new MatchFsm(obs, thumbs, new EventTagger(), matches, markers, pauses, journal, events,
-                ds, clipService, settings, () -> ANCHOR_NANOS);
+                ds, clipService, settings, new TimeSource(() -> ANCHOR_NANOS, System::currentTimeMillis));
     }
 
     @Test
@@ -451,7 +452,8 @@ class MatchFsmTest {
         java.util.function.LongSupplier steppingNano =
                 () -> nanoReads.getAndIncrement() == 0 ? ANCHOR_NANOS : ANCHOR_NANOS + 8_000_000_000L;
         MatchFsm localFsm = new MatchFsm(obs, thumbs, new EventTagger(), matches, markers, pauses,
-                journal, events, ds, clipService, settings, steppingNano);
+                journal, events, ds, clipService, settings,
+                new TimeSource(steppingNano, System::currentTimeMillis));
 
         localFsm.onFrame(frame().wall(confirmedMs - 20_000L)
                 .mono(ANCHOR_NANOS)
@@ -509,7 +511,8 @@ class MatchFsmTest {
         java.util.function.LongSupplier backwardWallClock = () -> backwardWall;
 
         MatchFsm monoFsm = new MatchFsm(obs, thumbs, new EventTagger(), matches, markers, pauses,
-                journal, events, ds, clipService, settings, steppingNano, backwardWallClock);
+                journal, events, ds, clipService, settings,
+                new TimeSource(steppingNano, backwardWallClock));
 
         // Start (consumes the anchor nano read).
         monoFsm.onFrame(frame().mono(anchorNanos)
@@ -555,7 +558,7 @@ class MatchFsmTest {
     void thumbnailFailure_doesNotLoseTheRecording() {
         ThumbnailCapturer failing = id -> { throw new ObsException("no scene"); };
         fsm = new MatchFsm(obs, failing, new EventTagger(), matches, markers, pauses, journal, events,
-                ds, clipService, settings);
+                ds, clipService, settings, TimeSource.system());
 
         fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
         fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_POST_GAME").noHero().build());
@@ -611,7 +614,7 @@ class MatchFsmTest {
         when(throwing.insert(any(java.sql.Connection.class), any(MatchRepository.NewMatch.class)))
                 .thenThrow(new IllegalStateException("disk full"));
         fsm = new MatchFsm(obs, thumbs, new EventTagger(), throwing, markers, pauses, journal, events,
-                ds, clipService, settings);
+                ds, clipService, settings, TimeSource.system());
 
         fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
         assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
@@ -633,7 +636,7 @@ class MatchFsmTest {
         when(throwing.insert(any(java.sql.Connection.class), any(MatchRepository.NewMatch.class)))
                 .thenThrow(new IllegalStateException("disk full"));
         fsm = new MatchFsm(obs, thumbs, new EventTagger(), throwing, markers, pauses, journal, events,
-                ds, clipService, settings);
+                ds, clipService, settings, TimeSource.system());
 
         fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
         String sessionId = fsm.currentSession().getSurrogateId();
