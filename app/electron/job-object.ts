@@ -22,7 +22,7 @@ function createNoop(): AssignFn {
 // out (and overridable) so unit tests can inject a fake koffi without a real
 // native binary; production passes nothing and gets the real require.
 function loadKoffi(): typeof import('koffi') {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- lazy guarded native load
   return require('koffi') as typeof import('koffi');
 }
 
