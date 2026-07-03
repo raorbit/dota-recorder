@@ -15,6 +15,7 @@ import {
 } from '../api/client';
 import { bucketLabelOf } from '../store/buckets';
 import { heroDisplayName } from '../data/heroes';
+import { clipLabel } from '../lib/clip-format';
 import { shouldShowVodOverlay } from '../lib/marker-overlay';
 import { useLibraryStore } from '../store/library';
 import './video-player.css';
@@ -80,17 +81,6 @@ function fmtPlayTime(seconds: number): string {
   const mm = Math.floor(s / 60);
   const ss = s % 60;
   return `${mm}:${String(ss).padStart(2, '0')}`;
-}
-
-// A clip's display label: its explicit `label`, else a kind-derived fallback
-// ("Rampage" for an auto/triggered clip, "Manual" otherwise). Mirrors the
-// triggerReason → human-name idea without inventing names for unknown triggers.
-function clipLabel(clip: Clip): string {
-  if (clip.label != null && clip.label.trim() !== '') return clip.label;
-  if (clip.kind === 'auto') {
-    return clip.triggerReason === 'rampage' ? 'Rampage' : (clip.triggerReason ?? 'Auto');
-  }
-  return 'Manual';
 }
 
 // A clip span's length as a compact +Ns badge (whole seconds, never negative).
