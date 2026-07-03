@@ -248,6 +248,57 @@ class MatchFsmTest {
     }
 
     @Test
+    void heroDemo_withDemoRecordingOff_neverStartsRecording() {
+        // recordDemoMatches defaults to false (setUp's settings mock returns fresh defaults), so a
+        // full Hero Demo session -- arm-state frames then in-progress play -- must never arm.
+        fsm.onFrame(frame().heroDemo()
+                .state("DOTA_GAMERULES_STATE_HERO_SELECTION").noHero().activity(null).build());
+        for (int i = 0; i < 5; i++) {
+            fsm.onFrame(frame().heroDemo()
+                    .state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
+        }
+
+        assertThat(fsm.getState()).isEqualTo(MatchState.IDLE);
+        assertThat(obs.startCalls).isZero();
+        assertThat(matches.findAll()).isEmpty();
+    }
+
+    @Test
+    void heroDemo_withDemoRecordingOn_recordsLikeARealMatch() {
+        SettingsStore.Settings demoOn = new SettingsStore.Settings();
+        demoOn.recordDemoMatches = true;
+        when(settings.get()).thenReturn(demoOn);
+
+        fsm.onFrame(frame().heroDemo()
+                .state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
+
+        assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
+        assertThat(obs.startCalls).isEqualTo(1);
+    }
+
+    @Test
+    void demoArmFrameWhileRecordingRealMatch_finalizesOldButDoesNotStartDemoRecording() {
+        // A real match is rolling; the player then jumps straight into a Hero Demo (a fresh draft
+        // without POST_GAME). The roll must still finalize the real match, but the redispatched demo
+        // frame lands in IDLE where the demo gate (recordDemoMatches=false) blocks the new start.
+        fsm.onFrame(frame().matchId(111L)
+                .state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")
+                .activity("playing")
+                .hero("npc_dota_hero_lina")
+                .build());
+        assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
+
+        fsm.onFrame(frame().heroDemo()
+                .state("DOTA_GAMERULES_STATE_HERO_SELECTION").noHero().activity(null).build());
+
+        assertThat(fsm.getState()).isEqualTo(MatchState.IDLE);
+        assertThat(obs.stopCalls).isEqualTo(1);
+        assertThat(obs.startCalls).as("the demo must not start a second recording").isEqualTo(1);
+        assertThat(matches.findAll()).singleElement()
+                .satisfies(row -> assertThat(row.dotaMatchId()).isEqualTo(111L));
+    }
+
+    @Test
     void unknownState_isANoOp() {
         fsm.onFrame(frame().state("UNKNOWN").build());
         fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_SOME_FUTURE_STATE").build());
