@@ -1,5 +1,10 @@
 import type { DriveUsage } from '../../../api/client';
 
+// Save-lifecycle union shared by the container (which owns the state) and the
+// sections that reset it to 'idle' on edit — one declaration so the prop
+// contracts can never drift apart.
+export type SaveState = 'idle' | 'saving' | 'saved' | 'error';
+
 // Resolution presets offered in the dropdown. A stored value outside this list
 // (e.g. an ultrawide) is preserved and shown as an extra leading option.
 export const RES_PRESETS: ReadonlyArray<{ readonly value: string; readonly label: string }> = [

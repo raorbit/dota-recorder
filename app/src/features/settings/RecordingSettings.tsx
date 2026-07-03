@@ -15,6 +15,7 @@ import {
   clampCapGb,
   clampPadding,
 } from './recording/settings-helpers';
+import type { SaveState } from './recording/settings-helpers';
 import { useAudioInputs } from './recording/useAudioInputs';
 import { useScenePreview } from './recording/useScenePreview';
 import { useStorageUsage } from './recording/useStorageUsage';
@@ -26,7 +27,6 @@ import { VideoSection } from './recording/VideoSection';
 import './recording-settings.css';
 
 type LoadState = 'loading' | 'ready' | 'error';
-type SaveState = 'idle' | 'saving' | 'saved' | 'error';
 
 interface RecordingSettingsProps {
   // Live recorder status, lifted from App's StatusSocket. Null until the first

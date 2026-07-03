@@ -1,8 +1,7 @@
 import type { Dispatch, SetStateAction } from 'react';
 import type { DriveUsage, StorageUsage } from '../../../api/client';
 import { CAP_MIN_GB, capExceedsDrive, clampCapGb, fmtSize } from './settings-helpers';
-
-type SaveState = 'idle' | 'saving' | 'saved' | 'error';
+import type { SaveState } from './settings-helpers';
 
 interface StorageSectionProps {
   readonly videoDir: string;

@@ -1,12 +1,11 @@
 import type { Dispatch, SetStateAction } from 'react';
 import { ENCODER_LABELS, FORMAT_PRESETS, FPS_PRESETS, QUALITY_PRESETS } from './settings-helpers';
+import type { SaveState } from './settings-helpers';
 
 // The encoder-override picker offers `auto` (the blank sentinel — re-arms the GPU
 // probe at boot) plus the four EncoderProbe tokens. Any other string silently falls
 // back to x264 in OBS, so only these are offered.
 const ENCODER_OVERRIDE_TOKENS: ReadonlyArray<string> = ['x264', 'nvenc', 'qsv', 'amd'];
-
-type SaveState = 'idle' | 'saving' | 'saved' | 'error';
 
 interface VideoSectionProps {
   readonly encoderChoice: string;
