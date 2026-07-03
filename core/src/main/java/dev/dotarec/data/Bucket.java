@@ -11,7 +11,7 @@ import java.util.Optional;
  * disagree. Each {@link #predicate()} is a self-contained boolean SQL fragment safe to drop into a
  * {@code WHERE} clause (no user input, no bind params).
  *
- * <p>Key invariant from the plan: un-enriched matches ({@code enrichment_state} in
+ * <p>Key invariant: un-enriched matches ({@code enrichment_state} in
  * {@code pending}/{@code failed}/{@code gsi_only}) route to {@link #UNSORTED}, NEVER defaulting into
  * {@link #UNRANKED}. Turbo ({@code game_mode=23}) and Ability Draft ({@code game_mode=18}) are their
  * own buckets and are explicitly carved out of {@link #UNRANKED}.

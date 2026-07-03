@@ -5,10 +5,10 @@ import org.springframework.stereotype.Component;
 /**
  * Tracks when the last GSI frame arrived so the UI can show GSI "alive/dead" health.
  *
- * <p>Plan: the status card is green "when receiving frames". GSI cadence is ~10Hz (see
+ * <p>The status card is green "when receiving frames". GSI cadence is ~10Hz (see
  * {@code GsiCfgInstaller} throttle), so a multi-second gap means the feed dropped.
  *
- * <p>TODO(plan: Edge cases): a grace window distinct from this raw liveness check should keep
+ * <p>TODO: a grace window distinct from this raw liveness check should keep
  * recording through brief GSI drops (abandons / reconnects).
  */
 @Component

@@ -28,7 +28,7 @@ import org.springframework.stereotype.Component;
  * Tiered-storage placement: keeps recent VODs on the fast active recording drive and relocates the
  * oldest off it onto the configured archive drives, filling each up to its own cap.
  *
- * <p>Model (plan: Multi-drive storage). There is one ordered, capped location list: index 0 is the
+ * <p>Model: there is one ordered, capped location list: index 0 is the
  * active drive ({@code videoDir} / {@code retentionCapGb}, where OBS records); indices 1..N are the
  * archive drives ({@code storageLocations}). On each pass:
  *
