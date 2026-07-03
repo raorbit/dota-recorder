@@ -5,6 +5,7 @@ import dev.dotarec.config.SettingsStore;
 import dev.dotarec.config.SettingsStore.AudioSource;
 import dev.dotarec.config.SettingsStore.Settings;
 import dev.dotarec.config.SettingsStore.StorageLocation;
+import dev.dotarec.config.StorageRoots;
 import dev.dotarec.obs.ObsController;
 import dev.dotarec.obs.setup.ObsConfigWriter;
 import java.util.List;
@@ -280,29 +281,29 @@ public class SettingsController {
 
     /**
      * True when canonical path {@code outer} contains {@code inner} (i.e. {@code outer} is a strict
-     * parent of {@code inner}). Appends a trailing {@link java.io.File#separator} to {@code outer}
-     * before the prefix test so {@code D:\rec} matches {@code D:\rec\archive} but not a sibling
-     * {@code D:\record} — identical to the attribution-side prefix logic.
+     * parent of {@code inner}). Delegates the trailing-separator prefix to {@link StorageRoots#prefix} so
+     * {@code D:\rec} matches {@code D:\rec\archive} but not a sibling {@code D:\record} — identical to the
+     * attribution-side prefix logic.
      */
     private static boolean contains(String outer, String inner) {
-        String prefix = outer.endsWith(java.io.File.separator) ? outer : outer + java.io.File.separator;
-        return inner.startsWith(prefix);
+        return inner.startsWith(StorageRoots.prefix(outer));
     }
 
     /**
      * Best-effort path normalization for distinctness/containment checks (Windows paths are
-     * case-insensitive). MUST match the canonical form used by the byte-attribution code
-     * ({@code RecordingArchiver.locationOf} and {@code StorageController.normalize}):
-     * {@code toAbsolutePath().normalize().toString().toLowerCase()}. Without {@code toAbsolutePath()}
-     * a relative archive path (e.g. {@code "."}) would canonicalize differently here than at
-     * attribution time, so it could pass this distinctness check yet still resolve onto the active
-     * recording dir at move time (self-move). Keeping both forms identical closes that drift.
+     * case-insensitive). Delegates to {@link StorageRoots#normalize} — the same canonical form the
+     * byte-attribution code ({@code RecordingArchiver.locationOf}) and the stream guard
+     * ({@code StorageRoots.isUnder}) use. The leading {@link String#trim()} strips stray whitespace off
+     * user-typed archive paths before canonicalizing; {@code toAbsolutePath()} inside {@code normalize}
+     * keeps a relative archive path (e.g. {@code "."}) from canonicalizing differently here than at
+     * attribution time, which would let it pass this distinctness check yet still resolve onto the active
+     * recording dir at move time (self-move).
      */
     private static String normalizePath(String path) {
         try {
-            return java.nio.file.Path.of(path.trim()).toAbsolutePath().normalize().toString().toLowerCase();
+            return StorageRoots.normalize(path.trim());
         } catch (RuntimeException e) {
-            return path.trim().toLowerCase();
+            return path.trim().toLowerCase(java.util.Locale.ROOT);
         }
     }
 

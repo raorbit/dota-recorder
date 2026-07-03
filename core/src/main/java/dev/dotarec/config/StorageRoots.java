@@ -23,6 +23,32 @@ public final class StorageRoots {
     }
 
     /**
+     * The canonical form of a path for containment and distinctness checks: an absolute, {@code .}/{@code
+     * ..}-collapsed, lowercased string. Defined ONCE here so the stream guard, the retention
+     * archiver/sweeper, and the
+     * settings distinctness check can never canonicalize the same path two different ways. Lowercasing
+     * uses {@link Locale#ROOT} so the fold is deterministic across the host's default locale (Turkish
+     * {@code I} would otherwise fold differently).
+     */
+    public static String normalize(Path path) {
+        return path.toAbsolutePath().normalize().toString().toLowerCase(Locale.ROOT);
+    }
+
+    /** {@link #normalize(Path)} for a raw path string. */
+    public static String normalize(String path) {
+        return normalize(Path.of(path));
+    }
+
+    /**
+     * A {@link #normalize normalized} directory turned into a containment prefix by appending a trailing
+     * {@link File#separator}, so {@code c:\vid} matches a child {@code c:\vid\a.mp4} but not a sibling
+     * {@code c:\video2\...}.
+     */
+    public static String prefix(String normalizedDir) {
+        return normalizedDir.endsWith(File.separator) ? normalizedDir : normalizedDir + File.separator;
+    }
+
+    /**
      * The configured storage roots: the active {@code videoDir}, every archive drive's path, and every
      * historical {@code videoDir}. Defined ONCE here so the match/clip controllers and the retention
      * sweeper can never enforce divergent allow-lists.
@@ -48,10 +74,11 @@ public final class StorageRoots {
      * a path that lives under one of the configured storage roots. A path outside every root (a
      * tampered DB row, a {@code ..} escape, a stale/misrooted file) is rejected.
      *
-     * <p>Mirrors {@code RecordingArchiver.locationOf} normalization: each candidate is reduced to an
-     * absolute, normalized path and matched as a case-insensitive string prefix terminated by a file
-     * separator (Windows paths are case-insensitive, and the trailing separator keeps {@code C:\vid}
-     * from matching a sibling {@code C:\video2\...}).
+     * <p>Uses {@link #normalize normalize}/{@link #prefix prefix}, the same canonical form the retention
+     * archiver and the settings distinctness check share: each candidate is reduced to an absolute,
+     * normalized path and matched as a case-insensitive string prefix terminated by a file separator
+     * (Windows paths are case-insensitive, and the trailing separator keeps {@code C:\vid} from matching
+     * a sibling {@code C:\video2\...}).
      *
      * @param file  the resolved file to check
      * @param roots the configured storage roots (any blank/unparseable root is skipped)
@@ -60,7 +87,7 @@ public final class StorageRoots {
     public static boolean isUnder(Path file, List<String> roots) {
         String fileStr;
         try {
-            fileStr = file.toAbsolutePath().normalize().toString().toLowerCase(Locale.ROOT);
+            fileStr = normalize(file);
         } catch (RuntimeException e) {
             return false;
         }
@@ -70,12 +97,11 @@ public final class StorageRoots {
             }
             String dirStr;
             try {
-                dirStr = Path.of(root).toAbsolutePath().normalize().toString().toLowerCase(Locale.ROOT);
+                dirStr = normalize(root);
             } catch (RuntimeException e) {
                 continue;
             }
-            String dirPrefix = dirStr.endsWith(File.separator) ? dirStr : dirStr + File.separator;
-            if (fileStr.startsWith(dirPrefix)) {
+            if (fileStr.startsWith(prefix(dirStr))) {
                 return true;
             }
         }
