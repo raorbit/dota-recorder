@@ -5,6 +5,7 @@ import dev.dotarec.clip.ClipService;
 import dev.dotarec.clip.RampageDetector;
 import dev.dotarec.clip.RampageDetector.RampageSpan;
 import dev.dotarec.config.SettingsStore;
+import dev.dotarec.config.TimeSource;
 import dev.dotarec.data.MarkerRepository;
 import dev.dotarec.data.MatchRepository;
 import dev.dotarec.data.MatchRepository.NewMatch;
@@ -29,11 +30,9 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.function.LongSupplier;
 import javax.sql.DataSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 /**
@@ -91,28 +90,21 @@ public class MatchFsm {
     private final ClipService clipService;
     private final SettingsStore settings;
 
-    /** Monotonic clock for the record-confirmed anchor; {@code System::nanoTime} in production,
-     * overridable so a test can pin the anchor to the same stamps its synthetic frames carry. */
-    private final LongSupplier nanoClock;
-
-    /** Wall clock ({@code System::currentTimeMillis} in production) used for storage/display stamps
-     * only ({@code played_at}, {@code created_at}, journal, pause drain) -- NEVER for the finalize
-     * duration, which shares the monotonic {@link #nanoClock} with the marker offsets. Overridable so
-     * a test can step it backward and prove duration/offsets don't follow a wall-clock step. */
-    private final LongSupplier wallClock;
+    /** The monotonic + wall clocks. The monotonic clock ({@code System::nanoTime}) anchors the
+     * record-confirmed offset and derives the finalize duration; the wall clock
+     * ({@code System::currentTimeMillis}) is for storage/display stamps only ({@code played_at},
+     * {@code created_at}, journal, pause drain), NEVER for offset math. A test injects a fake TimeSource
+     * to pin the anchor to its synthetic frames or step the wall clock backward independently. */
+    private final TimeSource time;
 
     private volatile MatchState state = MatchState.IDLE;
     private RecordingSession session;
 
-    // MatchFsm declares two constructors (this production one + the package-private test seam below),
-    // so Spring can't auto-select one — @Autowired marks the production ctor. Without it the real app
-    // fails to boot ("No default constructor found": Spring falls back to a missing no-arg ctor). The
-    // catch: this only bites with @EnableScheduling active (the production default). The
-    // DotaRecorderApplicationTests smoke test boots with scheduling DISABLED, which masks it — the
-    // context loads fine there WITHOUT this annotation — so green CI does NOT guard this (verified live,
-    // and by flipping app.scheduling.enabled=true in that test). Same two-ctor + @Autowired pattern as
-    // RetentionSweeper / RecordingArchiver / OpenDotaClient.
-    @Autowired
+    // Single constructor: Spring auto-selects it with no @Autowired needed, and the clocks arrive as one
+    // injected TimeSource bean (ClockConfig) instead of per-clock test-seam ctor overloads. Those
+    // overloads previously forced an @Autowired on the production ctor whose absence only broke boot
+    // under @EnableScheduling (the production default) — a trap the scheduling-disabled smoke test
+    // masked. A test constructs `new TimeSource(fakeNano, fakeWall)` directly to pin either clock.
     public MatchFsm(
             ObsRecorder obs,
             ThumbnailCapturer thumbnails,
@@ -124,47 +116,8 @@ public class MatchFsm {
             EventPublisher events,
             DataSource dataSource,
             ClipService clipService,
-            SettingsStore settings) {
-        this(obs, thumbnails, tagger, matches, markers, pauses, journal, events, dataSource,
-                clipService, settings, System::nanoTime, System::currentTimeMillis);
-    }
-
-    // Test seam: injects the monotonic clock used for the record-confirmed offset anchor. Defaults the
-    // wall clock to the production source so existing callers that only override the nano clock are
-    // unaffected.
-    MatchFsm(
-            ObsRecorder obs,
-            ThumbnailCapturer thumbnails,
-            EventTagger tagger,
-            MatchRepository matches,
-            MarkerRepository markers,
-            PauseRepository pauses,
-            RecordingSessionRepository journal,
-            EventPublisher events,
-            DataSource dataSource,
-            ClipService clipService,
             SettingsStore settings,
-            LongSupplier nanoClock) {
-        this(obs, thumbnails, tagger, matches, markers, pauses, journal, events, dataSource,
-                clipService, settings, nanoClock, System::currentTimeMillis);
-    }
-
-    // Test seam: injects BOTH the monotonic offset-anchor clock and the wall clock, so a test can step
-    // the wall clock backward and prove the finalize duration/marker offsets follow the monotonic clock.
-    MatchFsm(
-            ObsRecorder obs,
-            ThumbnailCapturer thumbnails,
-            EventTagger tagger,
-            MatchRepository matches,
-            MarkerRepository markers,
-            PauseRepository pauses,
-            RecordingSessionRepository journal,
-            EventPublisher events,
-            DataSource dataSource,
-            ClipService clipService,
-            SettingsStore settings,
-            LongSupplier nanoClock,
-            LongSupplier wallClock) {
+            TimeSource time) {
         this.obs = obs;
         this.thumbnails = thumbnails;
         this.tagger = tagger;
@@ -176,8 +129,7 @@ public class MatchFsm {
         this.dataSource = dataSource;
         this.clipService = clipService;
         this.settings = settings;
-        this.nanoClock = nanoClock;
-        this.wallClock = wallClock;
+        this.time = time;
     }
 
     public MatchState getState() {
@@ -292,7 +244,7 @@ public class MatchFsm {
             // Monotonic anchor stamped the instant OUTPUT_STARTED is confirmed -- the same clock the
             // GsiController stamps each frame's monotonicNanos with, so the per-marker delta is
             // immune to an OS/NTP wall-clock step (the wall anchor below is for storage/display only).
-            confirmedNanos = nanoClock.getAsLong();
+            confirmedNanos = time.nanoTime();
         } catch (ObsException e) {
             log.warn("Recording not confirmed by OBS: {}; staying IDLE", e.getMessage());
             return;
@@ -408,7 +360,7 @@ public class MatchFsm {
                         e.toString());
             }
 
-            long now = wallClock.getAsLong();
+            long now = time.wallMillis();
             // Finalize duration MUST come from the MONOTONIC clock, the same anchor the marker offsets
             // are measured against ({@code getRecordConfirmedNanos} / VideoOffsetCalculator) -- NOT the
             // wall clock. durationS is the clamp upper bound for every marker (persistFinalized +
@@ -417,7 +369,7 @@ public class MatchFsm {
             // point while the offsets themselves stayed monotonic. The wall stamps below (played_at,
             // recordStartedWallMs) are storage/display only.
             int durationS =
-                    (int) Math.max(0, (nanoClock.getAsLong() - s.getRecordConfirmedNanos()) / 1_000_000_000L);
+                    (int) Math.max(0, (time.nanoTime() - s.getRecordConfirmedNanos()) / 1_000_000_000L);
             Long fileSizeBytes = fileSizeOrNull(videoPath);
             updateJournalSnapshot(s, "stopping", videoPath, thumbPath);
 
