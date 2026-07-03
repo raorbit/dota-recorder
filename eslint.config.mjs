@@ -40,8 +40,8 @@ export default js.config(
     },
   },
   // Renderer: browser globals, React hooks + Fast Refresh rules. exhaustive-deps stays a
-  // warning by design — three mount-only useEffect(..., []) in RecordingSettings.tsx are
-  // intentional one-shot loads, not stale-closure bugs.
+  // warning by design — the settings container and its extracted hooks (useScenePreview,
+  // useStorageUsage) keep mount-only useEffect(..., []) one-shot loads, not stale-closure bugs.
   {
     files: ['app/src/**/*.{ts,tsx}'],
     languageOptions: {
