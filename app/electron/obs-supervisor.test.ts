@@ -366,7 +366,11 @@ describe('ObsSupervisor', () => {
 
   it('scrubs the bridge token from emitted log lines', async () => {
     const lines: string[] = [];
-    const sup = new ObsSupervisor({ ...baseOpts, bridgeToken: 'secrettoken', onLog: (line) => lines.push(line) });
+    const sup = new ObsSupervisor({
+      ...baseOpts,
+      bridgeToken: 'secrettoken',
+      onLog: (line) => lines.push(line),
+    });
     await sup.start();
 
     children[0].stdout.emit('data', Buffer.from('before secrettoken after\n'));
