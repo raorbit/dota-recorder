@@ -204,6 +204,9 @@ public class SettingsController {
                     if (patch.clipPaddingSeconds() != null) {
                         current.clipPaddingSeconds = Math.max(1, Math.min(60, patch.clipPaddingSeconds()));
                     }
+                    if (patch.recordDemoMatches() != null) {
+                        current.recordDemoMatches = patch.recordDemoMatches();
+                    }
                     return current;
                 });
         // Apply the (possibly new) audio source list to a live OBS without waiting for a reconnect.
@@ -328,7 +331,8 @@ public class SettingsController {
             String format,
             List<StorageLocation> storageLocations,
             boolean autoClipOnRampage,
-            int clipPaddingSeconds) {
+            int clipPaddingSeconds,
+            boolean recordDemoMatches) {
 
         static SettingsView of(Settings s) {
             return new SettingsView(
@@ -343,7 +347,8 @@ public class SettingsController {
                     s.format,
                     s.storageLocations,
                     s.autoClipOnRampage,
-                    s.clipPaddingSeconds);
+                    s.clipPaddingSeconds,
+                    s.recordDemoMatches);
         }
     }
 
@@ -366,5 +371,6 @@ public class SettingsController {
             String format,
             List<StorageLocation> storageLocations,
             Boolean autoClipOnRampage,
-            Integer clipPaddingSeconds) {}
+            Integer clipPaddingSeconds,
+            Boolean recordDemoMatches) {}
 }

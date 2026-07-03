@@ -100,6 +100,32 @@ class SettingsStoreTest {
     }
 
     @Test
+    void recordDemoMatches_defaultsOff_andSurvivesUpdateAndReload(@TempDir Path dir) {
+        SettingsStore store = new SettingsStore(paths(dir));
+        // Off by default: a fresh install (and a legacy settings.json predating the field, which
+        // deserializes it false naturally) must not record Hero Demo sessions.
+        assertThat(store.get().recordDemoMatches).isFalse();
+
+        store.update(
+                s -> {
+                    s.recordDemoMatches = true;
+                    return s;
+                });
+
+        // copy() carries it across an unrelated update (the copy() trap)...
+        store.update(
+                s -> {
+                    s.resolution = "1280x720";
+                    return s;
+                });
+        assertThat(store.get().recordDemoMatches).isTrue();
+
+        // ...and it round-trips through settings.json.
+        SettingsStore reloaded = new SettingsStore(paths(dir));
+        assertThat(reloaded.get().recordDemoMatches).isTrue();
+    }
+
+    @Test
     void load_backfillsVideoControlsFromLegacyJson(@TempDir Path dir) throws Exception {
         // A settings.json predating fps/quality/format deserializes fps to 0 and quality/format to
         // null; load() must backfill the defaults so writeProfile never substitutes "0"/null.
