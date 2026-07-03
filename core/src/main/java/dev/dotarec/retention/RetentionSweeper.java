@@ -58,12 +58,24 @@ public class RetentionSweeper {
         long totalBytes(Path dir) throws IOException;
     }
 
+    /**
+     * Probes a directory's real usable free space. Pulled behind an interface (mirroring
+     * {@link RecordingArchiver.FreeSpaceProbe}) so a test can drive {@link #checkFreeSpaceWarning()}'s
+     * low-disk branch deterministically instead of depending on the host filesystem's actual free
+     * space.
+     */
+    @FunctionalInterface
+    public interface UsableSpaceProbe {
+        long usableBytes(Path dir) throws IOException;
+    }
+
     private final MatchRepository matches;
     private final ClipRepository clips;
     private final SettingsStore settings;
     private final EventPublisher events;
     private final StorageMaintenanceLock maintenanceLock;
     private final TotalSpaceProbe totalSpace;
+    private final UsableSpaceProbe usableSpace;
 
     @org.springframework.beans.factory.annotation.Autowired
     public RetentionSweeper(
@@ -73,21 +85,23 @@ public class RetentionSweeper {
             EventPublisher events,
             StorageMaintenanceLock maintenanceLock) {
         this(matches, clips, settings, events, maintenanceLock,
-                dir -> Files.getFileStore(dir).getTotalSpace());
+                dir -> Files.getFileStore(dir).getTotalSpace(),
+                dir -> Files.getFileStore(dir).getUsableSpace());
     }
 
     /**
      * Backward-compatible constructor for existing tests: defaults a fresh {@link
      * StorageMaintenanceLock} (the sweeper is the sole lock holder in those tests, so a private
-     * instance is fine) and a real total-space probe.
+     * instance is fine) and real total/usable-space probes.
      */
     public RetentionSweeper(MatchRepository matches, ClipRepository clips, SettingsStore settings,
                             EventPublisher events) {
         this(matches, clips, settings, events, new StorageMaintenanceLock(),
-                dir -> Files.getFileStore(dir).getTotalSpace());
+                dir -> Files.getFileStore(dir).getTotalSpace(),
+                dir -> Files.getFileStore(dir).getUsableSpace());
     }
 
-    /** Test seam: inject a deterministic total-space probe (and the shared lock). */
+    /** Test seam: inject a deterministic total-space probe (and the shared lock); real usable-space. */
     RetentionSweeper(
             MatchRepository matches,
             ClipRepository clips,
@@ -95,12 +109,26 @@ public class RetentionSweeper {
             EventPublisher events,
             StorageMaintenanceLock maintenanceLock,
             TotalSpaceProbe totalSpace) {
+        this(matches, clips, settings, events, maintenanceLock, totalSpace,
+                dir -> Files.getFileStore(dir).getUsableSpace());
+    }
+
+    /** Test seam: inject deterministic total- AND usable-space probes (and the shared lock). */
+    RetentionSweeper(
+            MatchRepository matches,
+            ClipRepository clips,
+            SettingsStore settings,
+            EventPublisher events,
+            StorageMaintenanceLock maintenanceLock,
+            TotalSpaceProbe totalSpace,
+            UsableSpaceProbe usableSpace) {
         this.matches = matches;
         this.clips = clips;
         this.settings = settings;
         this.events = events;
         this.maintenanceLock = maintenanceLock;
         this.totalSpace = totalSpace;
+        this.usableSpace = usableSpace;
     }
 
     /**
@@ -261,7 +289,7 @@ public class RetentionSweeper {
         Path videoDir = videoDir();
         long free;
         try {
-            free = Files.getFileStore(videoDir).getUsableSpace();
+            free = usableSpace.usableBytes(videoDir);
         } catch (IOException e) {
             // Can't read the filesystem (e.g. dir not yet created): don't warn, don't block.
             log.debug("Free-space check skipped for {}", videoDir, e);

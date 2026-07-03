@@ -601,6 +601,30 @@ class RetentionSweeperTest {
         assertThat(warning == null || warning.contains("Low disk space")).isTrue();
     }
 
+    @Test
+    @SuppressWarnings("unchecked")
+    void freeSpaceCheckWarnsAndPublishesErrorWhenUnderTheLowDiskThreshold() {
+        long gib = 1024L * 1024 * 1024;
+        // Inject a usable-space probe reporting 1 GiB free — under the 5 GiB low-disk threshold — so the
+        // warning branch runs deterministically instead of depending on the host drive's real free space.
+        RetentionSweeper.UsableSpaceProbe lowDisk = dir -> gib;
+        RetentionSweeper lowSweeper = new RetentionSweeper(
+                matches, clips, settings, events, new StorageMaintenanceLock(),
+                dir -> 100L * gib, lowDisk);
+
+        String warning = lowSweeper.checkFreeSpaceWarning();
+
+        // Returns a warning (never blocks) and publishes a {scope:"disk"} error frame with the free/
+        // threshold bytes so the UI can surface it.
+        assertThat(warning).contains("Low disk space").contains(String.valueOf(gib));
+        ArgumentCaptor<Object> payload = ArgumentCaptor.forClass(Object.class);
+        verify(events).publish(eq("error"), payload.capture());
+        Map<String, Object> body = (Map<String, Object>) payload.getValue();
+        assertThat(body.get("scope")).isEqualTo("disk");
+        assertThat(body.get("freeBytes")).isEqualTo(gib);
+        assertThat((long) (Long) body.get("thresholdBytes")).isEqualTo(5L * gib);
+    }
+
     /** Seeds a match with on-disk video + thumbnail files of {@code sizeBytes}, returns the id. */
     private long seedWithFiles(String video, String thumb, long sizeBytes, long playedAt,
                                boolean starred) throws Exception {
