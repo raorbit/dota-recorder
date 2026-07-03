@@ -2,6 +2,7 @@ package dev.dotarec.retention;
 
 import dev.dotarec.bridge.EventPublisher;
 import dev.dotarec.config.SettingsStore;
+import dev.dotarec.config.StorageRoots;
 import dev.dotarec.data.ClipRepository;
 import dev.dotarec.data.ClipRow;
 import dev.dotarec.data.MatchRepository;
@@ -461,12 +462,30 @@ public class RetentionSweeper {
         if (path == null || path.isBlank()) {
             return true;
         }
+        Path target;
         try {
-            boolean removed = Files.deleteIfExists(Path.of(path));
+            target = Path.of(path);
+        } catch (RuntimeException e) {
+            log.warn("Could not delete unparseable path {} during retention sweep: {}", path, e.toString());
+            return false;
+        }
+        // Containment guard: never unlink a file that sits outside every configured storage root (a
+        // tampered/hand-edited video_path, a `..` escape). Use the SAME allow-list the bridge streams
+        // with (StorageRoots — videoDir + archive drives + previousVideoDirs), so a legitimately
+        // archived or moved-off-of VOD is still deletable and only a genuinely misrooted file is
+        // refused. Return false WITHOUT nulling the row: an orphaned misrooted file must stay visible in
+        // the library (row preserved, no freed-bytes credit) rather than be silently pruned as if evicted.
+        if (!StorageRoots.isUnder(target, StorageRoots.of(settings.get()))) {
+            log.warn("Refusing to delete {} during retention sweep: path is outside all storage roots",
+                    path);
+            return false;
+        }
+        try {
+            boolean removed = Files.deleteIfExists(target);
             if (removed) {
                 log.debug("Deleted {}", path);
             }
-            return !Files.exists(Path.of(path));
+            return !Files.exists(target);
         } catch (IOException | RuntimeException e) {
             // A locked/missing file must not abort the sweep. Return false so the row keeps its path
             // and the next sweep retries instead of forgetting a file that may still be on disk.

@@ -1,6 +1,7 @@
 package dev.dotarec.bridge;
 
 import dev.dotarec.config.SettingsStore;
+import dev.dotarec.config.StorageRoots;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpRange;
 import org.springframework.http.HttpStatus;
@@ -8,14 +9,12 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
 
-import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
@@ -54,68 +53,22 @@ final class VideoStreamSupport {
 
     /**
      * Path-traversal guard for the file-serving stream endpoints: a stored {@code video_path}/
-     * {@code thumb_path} must resolve to a real file that lives <em>under one of the configured storage
-     * roots</em> ({@code settings.videoDir} plus each {@code settings.storageLocations[].path}). A path
-     * outside every root (a tampered DB row, a {@code ..} escape) is rejected — the caller maps that to
-     * a 404. Archived VODs/clips live under an archive root, so <em>all</em> roots are allowed: a
-     * legitimately archived file is never rejected.
-     *
-     * <p>Mirrors {@code RecordingArchiver.locationOf} normalization: each candidate is reduced to an
-     * absolute, normalized path and matched as a case-insensitive string prefix terminated by a file
-     * separator (Windows paths are case-insensitive, and the trailing separator keeps {@code C:\vid}
-     * from matching a sibling {@code C:\video2\...}).
-     *
-     * @param file  the resolved file to serve
-     * @param roots the configured storage roots (any blank/unparseable root is skipped)
-     * @return true when {@code file} is contained by at least one root
+     * {@code thumb_path} must resolve to a real file that lives under one of the configured storage
+     * roots. A path outside every root (a tampered DB row, a {@code ..} escape) is rejected — the
+     * caller maps that to a 404. Thin delegator to {@link StorageRoots#isUnder} so the bridge and the
+     * retention sweeper share ONE containment definition (see {@link #storageRoots}).
      */
     static boolean isUnderAnyRoot(Path file, List<String> roots) {
-        String fileStr;
-        try {
-            fileStr = file.toAbsolutePath().normalize().toString().toLowerCase(Locale.ROOT);
-        } catch (RuntimeException e) {
-            return false;
-        }
-        for (String root : roots) {
-            if (root == null || root.isBlank()) {
-                continue;
-            }
-            String dirStr;
-            try {
-                dirStr = Path.of(root).toAbsolutePath().normalize().toString().toLowerCase(Locale.ROOT);
-            } catch (RuntimeException e) {
-                continue;
-            }
-            String dirPrefix = dirStr.endsWith(File.separator) ? dirStr : dirStr + File.separator;
-            if (fileStr.startsWith(dirPrefix)) {
-                return true;
-            }
-        }
-        return false;
+        return StorageRoots.isUnder(file, roots);
     }
 
     /**
-     * The configured storage roots for {@link #isUnderAnyRoot}: the active {@code videoDir}, every
-     * archive drive's path, and every historical {@code videoDir} the user has since moved off. The
-     * historical dirs are READ+DELETE roots only (rows recorded before a videoDir change keep absolute
-     * paths under the old folder), so their files stay streamable and a delete still unlinks them —
-     * retention/archiver ignore them. This is the containment guard's trust boundary, defined ONCE so
-     * the match and clip controllers can never enforce divergent allow-lists.
+     * The configured storage roots for {@link #isUnderAnyRoot}. Thin delegator to
+     * {@link StorageRoots#of} so the match/clip controllers and the retention sweeper can never enforce
+     * divergent allow-lists.
      */
     static List<String> storageRoots(SettingsStore.Settings s) {
-        List<String> roots = new ArrayList<>();
-        roots.add(s.videoDir);
-        if (s.storageLocations != null) {
-            for (SettingsStore.StorageLocation loc : s.storageLocations) {
-                if (loc != null) {
-                    roots.add(loc.path());
-                }
-            }
-        }
-        if (s.previousVideoDirs != null) {
-            roots.addAll(s.previousVideoDirs);
-        }
-        return roots;
+        return StorageRoots.of(s);
     }
 
     /**
