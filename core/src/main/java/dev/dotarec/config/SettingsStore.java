@@ -137,6 +137,12 @@ public class SettingsStore {
          * settings.json deserializes it as 0/absent, mirroring the fps/quality backfill.
          */
         public int clipPaddingSeconds = 8;
+        /**
+         * When true the recorder also captures Hero Demo sessions (GSI map {@code hero_demo_main});
+         * the FSM otherwise skips them so the library only collects real matches. Defaults to false
+         * naturally, so a legacy settings.json predating the field deserializes it off.
+         */
+        public boolean recordDemoMatches = false;
 
         /** Field-by-field copy (all fields are primitive/immutable) for atomic copy-on-write updates. */
         Settings copy() {
@@ -158,6 +164,7 @@ public class SettingsStore {
             c.gsiAuthToken = gsiAuthToken;
             c.autoClipOnRampage = autoClipOnRampage;
             c.clipPaddingSeconds = clipPaddingSeconds;
+            c.recordDemoMatches = recordDemoMatches;
             // Deep-copy the list (records are immutable, so element sharing is safe). Omitting this
             // would silently drop audioSources on every copy-on-write update(). Null-safe: the field
             // defaults to null pre-seed, though copy() is only ever called on post-load settings.
