@@ -253,6 +253,12 @@ public class CrashRecoveryRunner implements ApplicationRunner {
         }
     }
 
+    /**
+     * Parses a journaled marker payload — the shared {@link MarkerPayload} shape {@code MatchFsm}
+     * serializes. Deserialized field-by-field (NOT {@code readValue}) on purpose: an absent {@code
+     * gameClock} falls back to the journal event's own game clock rather than becoming null, and a
+     * missing {@code videoOffsetS} defaults to 0.0. Returns null on a blank or malformed payload.
+     */
     private MarkerPayload parseMarker(RecordingEventRow event) {
         String payload = event.payloadJson();
         if (payload == null || payload.isBlank()) {
@@ -752,7 +758,4 @@ public class CrashRecoveryRunner implements ApplicationRunner {
     private static String normalize(Path path) {
         return path.toAbsolutePath().normalize().toString().toLowerCase(Locale.ROOT);
     }
-
-    private record MarkerPayload(
-            String type, double videoOffsetS, Integer gameClock, String label, String source) {}
 }
