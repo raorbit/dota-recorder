@@ -107,6 +107,9 @@ public class MatchFsm {
     private volatile MatchState state = MatchState.IDLE;
     private RecordingSession session;
 
+    /** Latches the once-per-demo-session "not recording" log so the ~10Hz feed can't spam it. */
+    private boolean demoSkipLogged;
+
     // Single constructor: Spring auto-selects it with no @Autowired needed, and the clocks arrive as one
     // injected TimeSource bean (ClockConfig) instead of per-clock test-seam ctor overloads. Those
     // overloads previously forced an @Autowired on the production ctor whose absence only broke boot
@@ -162,6 +165,12 @@ public class MatchFsm {
 
         switch (state) {
             case IDLE -> {
+                if (demoBlocked(frame)) {
+                    // Hero Demo with demo recording off: never arm. Evaluated for EVERY idle frame
+                    // (not just start-worthy ones) so the log latch resets on the first non-demo
+                    // frame and the next demo session logs its skip again.
+                    return;
+                }
                 if (isArmState(gs) || (GAME_IN_PROGRESS.equals(gs) && isPlaying(frame))) {
                     startRecording(frame);
                 }
@@ -205,6 +214,25 @@ public class MatchFsm {
 
     private boolean isArmState(String gs) {
         return HERO_SELECTION.equals(gs) || STRATEGY_TIME.equals(gs) || PRE_GAME.equals(gs);
+    }
+
+    /**
+     * True when this frame belongs to a Hero Demo session and {@code recordDemoMatches} (off by
+     * default) is disabled -- the IDLE gate then skips arming entirely. The setting is read per
+     * frame, so toggling it in Settings takes effect on the next frame without a restart. A demo
+     * already recording (started while the setting was on) is untouched: the gate only guards the
+     * start, and the demo's POST_GAME / watchdog finalizes it normally.
+     */
+    private boolean demoBlocked(GsiFrame frame) {
+        if (!frame.isHeroDemo() || settings.get().recordDemoMatches) {
+            demoSkipLogged = false;
+            return false;
+        }
+        if (!demoSkipLogged) {
+            demoSkipLogged = true;
+            log.info("Hero Demo detected; not recording (demo recording is off in Settings)");
+        }
+        return true;
     }
 
     private boolean isPlaying(GsiFrame frame) {
