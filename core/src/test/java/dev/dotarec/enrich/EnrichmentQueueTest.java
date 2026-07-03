@@ -79,7 +79,7 @@ class EnrichmentQueueTest {
     void skipsRowsAtOrOverTheAttemptCap() {
         long under = insertPending(20L);
         long atCap = insertPending(21L);
-        repo.applyEnrichment(atCap, pendingAttempts(EnrichmentQueue.MAX_ATTEMPTS));
+        repo.applyEnrichment(atCap, pendingAttempts(Enricher.MAX_ATTEMPTS));
 
         queue.sweep();
 
@@ -133,7 +133,7 @@ class EnrichmentQueueTest {
         // A row whose async task died mid-fetch must not be stuck forever: once the lease window
         // passes, the row is eligible (and re-claimable) again. Query past the 5-minute lease.
         List<MatchRepository.PendingMatch> after = repo.findPendingEnrichment(
-                EnrichmentQueue.MAX_ATTEMPTS, System.currentTimeMillis() + 6L * 60_000L);
+                Enricher.MAX_ATTEMPTS, System.currentTimeMillis() + 6L * 60_000L);
         assertThat(after).extracting(MatchRepository.PendingMatch::id).contains(id);
     }
 

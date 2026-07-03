@@ -52,8 +52,12 @@ public class Enricher {
 
     private static final Logger log = LoggerFactory.getLogger(Enricher.class);
 
-    /** Attempt cap shared with the queue's eligibility filter; the crossing attempt flips to failed. */
-    static final int MAX_ATTEMPTS = 10;
+    /**
+     * Attempt cap: the crossing attempt flips a row to {@code failed}. The single declaration —
+     * {@link EnrichmentQueue}'s WHERE eligibility filter reads it here so the queue stops re-polling on
+     * exactly the attempt this class fails the row permanently, and the two can't disagree.
+     */
+    public static final int MAX_ATTEMPTS = 10;
 
     private static final long BACKOFF_BASE_MS = 60_000L;
     private static final long BACKOFF_CAP_MS = 30L * 60_000L;
