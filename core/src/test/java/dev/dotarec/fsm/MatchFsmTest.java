@@ -10,6 +10,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.assertj.core.data.Offset.offset;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.dotarec.bridge.EventPublisher;
 import dev.dotarec.clip.ClipService;
 import dev.dotarec.config.SettingsStore;
@@ -143,7 +144,8 @@ class MatchFsmTest {
         // record-confirmed offset base from this clock and synthetic frames carry .mono() stamps
         // relative to ANCHOR_NANOS (the wall path is exercised separately via FakeObs.confirmedAt).
         fsm = new MatchFsm(obs, thumbs, new EventTagger(), matches, markers, pauses, journal, events,
-                ds, clipService, settings, new TimeSource(() -> ANCHOR_NANOS, System::currentTimeMillis));
+                ds, clipService, settings, new ObjectMapper(),
+                new TimeSource(() -> ANCHOR_NANOS, System::currentTimeMillis));
     }
 
     @Test
@@ -452,7 +454,7 @@ class MatchFsmTest {
         java.util.function.LongSupplier steppingNano =
                 () -> nanoReads.getAndIncrement() == 0 ? ANCHOR_NANOS : ANCHOR_NANOS + 8_000_000_000L;
         MatchFsm localFsm = new MatchFsm(obs, thumbs, new EventTagger(), matches, markers, pauses,
-                journal, events, ds, clipService, settings,
+                journal, events, ds, clipService, settings, new ObjectMapper(),
                 new TimeSource(steppingNano, System::currentTimeMillis));
 
         localFsm.onFrame(frame().wall(confirmedMs - 20_000L)
@@ -511,7 +513,7 @@ class MatchFsmTest {
         java.util.function.LongSupplier backwardWallClock = () -> backwardWall;
 
         MatchFsm monoFsm = new MatchFsm(obs, thumbs, new EventTagger(), matches, markers, pauses,
-                journal, events, ds, clipService, settings,
+                journal, events, ds, clipService, settings, new ObjectMapper(),
                 new TimeSource(steppingNano, backwardWallClock));
 
         // Start (consumes the anchor nano read).
@@ -558,7 +560,7 @@ class MatchFsmTest {
     void thumbnailFailure_doesNotLoseTheRecording() {
         ThumbnailCapturer failing = id -> { throw new ObsException("no scene"); };
         fsm = new MatchFsm(obs, failing, new EventTagger(), matches, markers, pauses, journal, events,
-                ds, clipService, settings, TimeSource.system());
+                ds, clipService, settings, new ObjectMapper(), TimeSource.system());
 
         fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
         fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_POST_GAME").noHero().build());
@@ -614,7 +616,7 @@ class MatchFsmTest {
         when(throwing.insert(any(java.sql.Connection.class), any(MatchRepository.NewMatch.class)))
                 .thenThrow(new IllegalStateException("disk full"));
         fsm = new MatchFsm(obs, thumbs, new EventTagger(), throwing, markers, pauses, journal, events,
-                ds, clipService, settings, TimeSource.system());
+                ds, clipService, settings, new ObjectMapper(), TimeSource.system());
 
         fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
         assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
@@ -636,7 +638,7 @@ class MatchFsmTest {
         when(throwing.insert(any(java.sql.Connection.class), any(MatchRepository.NewMatch.class)))
                 .thenThrow(new IllegalStateException("disk full"));
         fsm = new MatchFsm(obs, thumbs, new EventTagger(), throwing, markers, pauses, journal, events,
-                ds, clipService, settings, TimeSource.system());
+                ds, clipService, settings, new ObjectMapper(), TimeSource.system());
 
         fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
         String sessionId = fsm.currentSession().getSurrogateId();
@@ -734,6 +736,73 @@ class MatchFsmTest {
         assertThat(fsm.getState()).isEqualTo(MatchState.IDLE);
         assertThat(obs.stopCalls).as("exactly one OBS stop despite the race").isEqualTo(1);
         assertThat(matches.findAll()).hasSize(1);
+    }
+
+    @Test
+    void markerLabelWithControlChars_roundTripsThroughJournalAndCrashRecovery() throws Exception {
+        // A marker label carrying a quote, newline AND tab must survive the journaled payload intact:
+        // MatchFsm.markerPayload serializes it (now via Jackson, which escapes \r/\t/control chars the
+        // old hand-rolled json() dropped) and CrashRecoveryRunner.parseMarker reads it back. Both the
+        // real serialize and the real parse run here (via a real journal + a real recovery pass), so a
+        // key rename on either side or a lost control char would fail this end-to-end round trip.
+        String trickyLabel = "quote\" newline\n tab\t carriage\r done";
+        // A tagger that emits exactly one marker (with the tricky label) on the first prev->curr tick,
+        // so the FSM journals a real markerPayload for it. Later ticks emit nothing.
+        java.util.concurrent.atomic.AtomicBoolean emitted = new java.util.concurrent.atomic.AtomicBoolean();
+        EventTagger labelTagger =
+                new EventTagger() {
+                    @Override
+                    public List<dev.dotarec.tagger.PendingMarker> diff(
+                            GsiFrame prev,
+                            GsiFrame curr,
+                            dev.dotarec.fsm.RecordingSession.TaggerState state,
+                            long recordConfirmedNanos,
+                            double durationS) {
+                        if (prev == null || curr == null || !emitted.compareAndSet(false, true)) {
+                            return List.of();
+                        }
+                        return List.of(
+                                new dev.dotarec.tagger.PendingMarker("kill", 2.5, 120, trickyLabel, "gsi"));
+                    }
+                };
+        MatchFsm labelFsm = new MatchFsm(obs, thumbs, labelTagger, matches, markers, pauses, journal,
+                events, ds, clipService, settings, new ObjectMapper(),
+                new TimeSource(() -> ANCHOR_NANOS, System::currentTimeMillis));
+
+        // Start, then a second GAME_IN_PROGRESS tick so the tagger's prev->curr diff runs and journals
+        // the marker. No POST_GAME: the session stays unfinished so recovery has a journal to replay.
+        labelFsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing")
+                .hero("npc_dota_hero_puck").build());
+        labelFsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing")
+                .hero("npc_dota_hero_puck").build());
+        assertThat(labelFsm.getState()).isEqualTo(MatchState.RECORDING);
+
+        // Recover the unfinished session: CrashRecoveryRunner.parseMarker reads the journaled payload
+        // back into the markers table. Uses the SAME temp DB/journal the FSM just wrote.
+        CrashRecoveryRunner runner =
+                new CrashRecoveryRunner(
+                        journal,
+                        matches,
+                        new dev.dotarec.data.ClipRepository(ds),
+                        markers,
+                        pauses,
+                        ds,
+                        new ObjectMapper(),
+                        settings,
+                        new dev.dotarec.retention.StorageMaintenanceLock());
+        runner.run(null);
+
+        MatchSummary recovered = matches.findAll().get(0);
+        assertThat(markers.findByMatchId(recovered.id()))
+                .singleElement()
+                .satisfies(
+                        marker -> {
+                            assertThat(marker.type()).isEqualTo("kill");
+                            assertThat(marker.label())
+                                    .as("the quote/newline/tab/carriage label must survive intact")
+                                    .isEqualTo(trickyLabel);
+                            assertThat(marker.source()).isEqualTo("gsi");
+                        });
     }
 
     private static void await(CyclicBarrier gate) {

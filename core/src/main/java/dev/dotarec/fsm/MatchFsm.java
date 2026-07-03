@@ -1,5 +1,7 @@
 package dev.dotarec.fsm;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.dotarec.bridge.EventPublisher;
 import dev.dotarec.clip.ClipService;
 import dev.dotarec.clip.RampageDetector;
@@ -90,6 +92,11 @@ public class MatchFsm {
     private final ClipService clipService;
     private final SettingsStore settings;
 
+    /** Serializes the journaled marker payload. Spring Boot autoconfigures the singleton; the key set
+     * MUST stay {type, videoOffsetS, gameClock, label, source} — CrashRecoveryRunner.parseMarker reads
+     * those exact keys and silently drops a recovered marker on any renamed/missing one. */
+    private final ObjectMapper mapper;
+
     /** The monotonic + wall clocks. The monotonic clock ({@code System::nanoTime}) anchors the
      * record-confirmed offset and derives the finalize duration; the wall clock
      * ({@code System::currentTimeMillis}) is for storage/display stamps only ({@code played_at},
@@ -117,6 +124,7 @@ public class MatchFsm {
             DataSource dataSource,
             ClipService clipService,
             SettingsStore settings,
+            ObjectMapper mapper,
             TimeSource time) {
         this.obs = obs;
         this.thumbnails = thumbnails;
@@ -129,6 +137,7 @@ public class MatchFsm {
         this.dataSource = dataSource;
         this.clipService = clipService;
         this.settings = settings;
+        this.mapper = mapper;
         this.time = time;
     }
 
@@ -653,21 +662,31 @@ public class MatchFsm {
         }
     }
 
+    /**
+     * Serializes a marker into the journaled event payload via Jackson. Hand-rolled escaping missed
+     * {@code \r}/{@code \t}/control chars, corrupting any label that carried them; the mapper escapes
+     * everything correctly. The key set is FROZEN as {type, videoOffsetS, gameClock, label, source} —
+     * CrashRecoveryRunner.parseMarker reads those exact keys and silently drops a recovered marker on a
+     * renamed/missing one. Returns null on a serialization failure (appendJournalEvent tolerates null).
+     */
     private String markerPayload(PendingMarker marker) {
-        return "{"
-                + "\"type\":\"" + json(marker.type()) + "\","
-                + "\"videoOffsetS\":" + marker.videoOffsetS() + ","
-                + "\"gameClock\":" + (marker.gameClock() != null ? marker.gameClock() : "null") + ","
-                + "\"label\":" + (marker.label() != null ? "\"" + json(marker.label()) + "\"" : "null") + ","
-                + "\"source\":\"" + json(marker.source()) + "\""
-                + "}";
+        try {
+            return mapper.writeValueAsString(
+                    new MarkerPayloadDto(
+                            marker.type(),
+                            marker.videoOffsetS(),
+                            marker.gameClock(),
+                            marker.label(),
+                            marker.source()));
+        } catch (JsonProcessingException e) {
+            log.warn("Could not serialize marker payload ({}): {}", marker.type(), e.toString());
+            return null;
+        }
     }
 
-    private static String json(String value) {
-        return value == null
-                ? ""
-                : value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n");
-    }
+    /** Journaled marker shape. Field names ARE the JSON keys CrashRecoveryRunner.parseMarker reads. */
+    private record MarkerPayloadDto(
+            String type, double videoOffsetS, Integer gameClock, String label, String source) {}
 
     private void publishRecorded(long matchRowId, RecordingSession s, int durationS) {
         Map<String, Object> payload = new HashMap<>();
