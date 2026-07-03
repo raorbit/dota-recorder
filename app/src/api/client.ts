@@ -673,14 +673,23 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null;
 }
 
-// Validate a `status` frame's payload against the exact fields toStatus() reads: gsi.connected,
-// obs.{connected,sceneActive,recording}, fsm.state, fsm.activeMatchId. Returns the payload as a
-// StatusSnapshot on success, else null (a malformed frame is dropped, not force-cast into a crash).
+// A field that is a number, or null/absent. Absent is treated as null so an omitted optional field
+// (older/newer core) narrows cleanly instead of dropping the whole frame.
+function isNullableNumber(v: unknown): v is number | null | undefined {
+  return v === null || v === undefined || typeof v === 'number';
+}
+
+// Validate a `status` frame's payload against the exact fields the renderer reads: gsi.{connected,
+// lastFrameAgoMs}, obs.{connected,sceneActive,recording}, fsm.{state,activeMatchId}. Returns a
+// normalized StatusSnapshot on success, else null (a malformed frame is dropped, not force-cast into a
+// crash). The two nullable-number fields are normalized undefined -> null: GsiSettings does arithmetic
+// on lastFrameAgoMs and toStatus/library read activeMatchId, so a bare `undefined` slipping through
+// would surface as NaN / a wrong id rather than the intended null.
 function parseStatusSnapshot(payload: unknown): StatusSnapshot | null {
   if (!isRecord(payload)) return null;
   const { gsi, obs, fsm } = payload;
   if (!isRecord(gsi) || !isRecord(obs) || !isRecord(fsm)) return null;
-  if (typeof gsi.connected !== 'boolean') return null;
+  if (typeof gsi.connected !== 'boolean' || !isNullableNumber(gsi.lastFrameAgoMs)) return null;
   if (
     typeof obs.connected !== 'boolean' ||
     typeof obs.sceneActive !== 'boolean' ||
@@ -688,18 +697,29 @@ function parseStatusSnapshot(payload: unknown): StatusSnapshot | null {
   ) {
     return null;
   }
-  if (typeof fsm.state !== 'string') return null;
-  if (fsm.activeMatchId !== null && typeof fsm.activeMatchId !== 'number') return null;
-  return payload as unknown as StatusSnapshot;
+  if (typeof fsm.state !== 'string' || !isNullableNumber(fsm.activeMatchId)) return null;
+  return {
+    gsi: { connected: gsi.connected, lastFrameAgoMs: gsi.lastFrameAgoMs ?? null },
+    obs: { connected: obs.connected, sceneActive: obs.sceneActive, recording: obs.recording },
+    fsm: { state: fsm.state, activeMatchId: fsm.activeMatchId ?? null },
+  };
 }
 
-// Validate a clip.* frame just enough to route it: every clip payload carries a numeric
-// parentMatchId (emitClipEvent scopes on it). The remaining Clip fields are NOT validated here
-// — the renderer re-fetches the clip list on these events rather than trusting the payload, so a
-// deep check of all 14 fields would be dead work. `type` is trusted from the already-narrowed
-// envelope. Returns null when parentMatchId is missing/non-numeric so the frame is dropped.
+// Validate a clip.* frame just enough to route it AND to survive what its listeners dereference.
+// Every clip payload carries a numeric parentMatchId (emitClipEvent scopes on it). clip.created /
+// clip.ready listeners re-fetch the clip list rather than trusting the payload, so parentMatchId is
+// the only field worth checking. clip.progress is the exception: VideoPlayer reads payload.clipId and
+// payload.percent straight off the frame (no re-fetch), so those two must be numeric or the progress
+// bar would render with NaN/undefined. `type` is trusted from the already-narrowed envelope. Returns
+// null when a required field is missing/non-numeric so the frame is dropped.
 function parseClipEvent(type: ClipEventType, payload: unknown): ClipEvent | null {
   if (!isRecord(payload) || typeof payload.parentMatchId !== 'number') return null;
+  if (
+    type === 'clip.progress' &&
+    (typeof payload.clipId !== 'number' || typeof payload.percent !== 'number')
+  ) {
+    return null;
+  }
   return { type, payload } as ClipEvent;
 }
 
