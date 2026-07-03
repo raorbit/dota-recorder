@@ -18,12 +18,12 @@ import {
   setStarred,
   setClipStarred,
   deleteMatch as apiDeleteMatch,
+  toStatus,
   StatusSocket,
   type MatchSummary,
   type Clip,
   type BucketCounts,
   type Status,
-  type StatusSnapshot,
 } from '../api/client';
 import type { Bucket } from './buckets';
 import { mergeLibraryLoad } from '../lib/library-load';
@@ -252,18 +252,6 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
   };
 });
 
-// Maps a raw status snapshot to the flattened Status the store keeps. (toStatus is
-// private to the client module; re-derive the same shape here.)
-function snapshotToStatus(snapshot: StatusSnapshot): Status {
-  return {
-    fsmState: snapshot.fsm.state,
-    matchId: snapshot.fsm.activeMatchId,
-    recording: snapshot.obs.recording,
-    gsiConnected: snapshot.gsi.connected,
-    snapshot,
-  };
-}
-
 /**
  * Wires the library store to live data: kicks off the initial load, primes the
  * status from a one-shot GET /status, and subscribes to the StatusSocket. The
@@ -284,7 +272,7 @@ export function startLibrary(): () => void {
   void (async (): Promise<void> => {
     try {
       const snapshot = await fetchStatus();
-      store.setStatus(snapshotToStatus(snapshot));
+      store.setStatus(toStatus(snapshot));
     } catch {
       // Core not up yet; the socket will fill this in once it connects.
     }

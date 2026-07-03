@@ -101,7 +101,7 @@ interface WsEnvelope {
   readonly payload: unknown;
 }
 
-function toStatus(snapshot: StatusSnapshot): Status {
+export function toStatus(snapshot: StatusSnapshot): Status {
   return {
     fsmState: snapshot.fsm.state,
     matchId: snapshot.fsm.activeMatchId,
