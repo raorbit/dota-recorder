@@ -175,6 +175,9 @@ export interface Settings {
   // clip's span. Mirrors SettingsStore.Settings.autoClipOnRampage / clipPaddingSeconds.
   readonly autoClipOnRampage: boolean;
   readonly clipPaddingSeconds: number;
+  // When true the recorder also captures Hero Demo sessions (GSI map "hero_demo_main");
+  // off by default so the library only collects real matches.
+  readonly recordDemoMatches: boolean;
 }
 
 // Per-drive disk usage from GET /storage/usage, used to show real free/total space and

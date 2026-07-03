@@ -78,6 +78,9 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
   const [autoClipOnRampage, setAutoClipOnRampage] = useState(false);
   const [clipPaddingSeconds, setClipPaddingSeconds] = useState(8);
 
+  // Whether Hero Demo sessions are recorded too. Off by default (real matches only).
+  const [recordDemoMatches, setRecordDemoMatches] = useState(false);
+
   // The editable audio-source list. The core seeds it (we never synthesize a default
   // here); the per-kind picker-options cache lives in useAudioInputs.
   const [audioSources, setAudioSources] = useState<AudioSource[]>([]);
@@ -115,6 +118,7 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
         setEncoderChoice(s.encoder ? s.encoder : 'auto');
         setAutoClipOnRampage(s.autoClipOnRampage);
         setClipPaddingSeconds(s.clipPaddingSeconds);
+        setRecordDemoMatches(s.recordDemoMatches);
         setLoadState('ready');
         // Ordering matters: settings load first, THEN prime the audio-input kinds.
         primeAll();
@@ -142,6 +146,7 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
       (encoderChoice === 'auto' ? '' : encoderChoice) !== settings.encoder ||
       autoClipOnRampage !== settings.autoClipOnRampage ||
       clipPaddingSeconds !== settings.clipPaddingSeconds ||
+      recordDemoMatches !== settings.recordDemoMatches ||
       JSON.stringify(audioSources) !== JSON.stringify(settings.audioSources) ||
       JSON.stringify(storageLocations) !== JSON.stringify(settings.storageLocations));
 
@@ -322,6 +327,7 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
       // Clamp to [1,60]: a cleared field reads as 0; the core clamps too, but clamping here
       // keeps the UI honest about the value that will take effect.
       clipPaddingSeconds: clampPadding(clipPaddingSeconds),
+      recordDemoMatches,
     };
 
     try {
@@ -339,6 +345,7 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
       setEncoderChoice(updated.encoder ? updated.encoder : 'auto');
       setAutoClipOnRampage(updated.autoClipOnRampage);
       setClipPaddingSeconds(updated.clipPaddingSeconds);
+      setRecordDemoMatches(updated.recordDemoMatches);
       setSaveState('saved');
       // Stat any newly added drive so its free/total + warning appear right after saving.
       refreshUsage();
@@ -406,6 +413,36 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
                     </option>
                   ))}
                 </select>
+              </div>
+            </div>
+          </section>
+
+          <section className="rec-card">
+            <h3 className="rec-sec">Capture</h3>
+            <div className="rec-row">
+              <div className="rec-rowlabel">
+                <span className="rec-label" id="rec-demo-label">
+                  Record demo matches
+                </span>
+                <p className="rec-desc">
+                  Also record Hero Demo sessions, not just real matches.
+                </p>
+              </div>
+              <div className="rec-control">
+                <button
+                  type="button"
+                  className="rec-switch"
+                  role="switch"
+                  aria-checked={recordDemoMatches}
+                  aria-labelledby="rec-demo-label"
+                  data-on={recordDemoMatches ? 'true' : 'false'}
+                  onClick={() => {
+                    setRecordDemoMatches((v) => !v);
+                    setSaveState('idle');
+                  }}
+                >
+                  <span className="rec-switch-knob" aria-hidden="true" />
+                </button>
               </div>
             </div>
           </section>
