@@ -145,23 +145,15 @@ describe('packaged layout ↔ electron-builder.yml (PR #22 regression)', () => {
     expect(isShipped(suffix), `${suffix} not shipped by any extraResources to:`).toBe(true);
   });
 
-  it('ships the dir obsVersion() scans for the .obs-*.ok marker', () => {
+  it('maps the dir obsVersion() scans under the obs target via a .obs-*.ok filter', () => {
+    // obsVersion() probes exactly one dir before reading the version marker; that dir is the `obs`
+    // target, under which the marker ships as a SIBLING of obs-portable/ gated by a `.obs-*.ok`
+    // filter (a flat copy would drop it — the exact #22 failure). Tie the two together: the dir the
+    // reader scans must be a yml target that carries the marker filter. This exact-`to:` + filter
+    // check subsumes a plain isShipped() assertion on the same dir.
     fsState.scannedDirs.length = 0;
     obsVersion();
-    // obsVersion() probes exactly one dir before reading the marker; recover it and strip
-    // the resources prefix. This is the dir that must carry the .obs-*.ok filter mapping.
     expect(fsState.scannedDirs.length).toBeGreaterThan(0);
-    const scanned = suffixUnderResources(fsState.scannedDirs[0]);
-    expect(isShipped(scanned), `${scanned} not shipped by any extraResources to:`).toBe(true);
-  });
-
-  it('maps the .obs-*.ok marker under the obs target via a filter', () => {
-    // The version marker ships as a SIBLING of obs-portable/ under the `obs` target, gated by
-    // a `.obs-*.ok` filter (a flat copy would drop it — the exact #22 failure). obsVersion()
-    // scans that same `obs` dir, so tie the two together: the scanned dir's target must carry
-    // the marker filter.
-    fsState.scannedDirs.length = 0;
-    obsVersion();
     const scanned = suffixUnderResources(fsState.scannedDirs[0]);
     const markerEntry = resources.find(
       (e) =>
