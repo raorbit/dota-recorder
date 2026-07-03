@@ -2,32 +2,27 @@ import { useEffect, useState } from 'react';
 import {
   fetchSettings,
   updateSettings,
-  BUILTIN_DESKTOP_ID,
-  BUILTIN_MICROPHONE_ID,
   type AudioSource,
-  type AudioSourceKind,
   type Settings,
   type SettingsPatch,
   type StorageLocation,
 } from '../../api/client';
 import type { StatusSnapshot } from '../../api/client';
 import {
-  CAP_MIN_GB,
-  ENCODER_LABELS,
-  FORMAT_PRESETS,
-  FPS_PRESETS,
   PADDING_MAX_S,
   PADDING_MIN_S,
-  QUALITY_PRESETS,
   RES_PRESETS,
-  capExceedsDrive,
   clampCapGb,
   clampPadding,
-  fmtSize,
 } from './recording/settings-helpers';
 import { useAudioInputs } from './recording/useAudioInputs';
 import { useScenePreview } from './recording/useScenePreview';
 import { useStorageUsage } from './recording/useStorageUsage';
+import { ArchiveDrivesSection } from './recording/ArchiveDrivesSection';
+import { AudioMixerSection } from './recording/AudioMixerSection';
+import { ScenePreview } from './recording/ScenePreview';
+import { StorageSection } from './recording/StorageSection';
+import { VideoSection } from './recording/VideoSection';
 import './recording-settings.css';
 
 type LoadState = 'loading' | 'ready' | 'error';
@@ -39,51 +34,6 @@ interface RecordingSettingsProps {
   // rather than a misleading error.
   readonly obs: StatusSnapshot['obs'] | null;
 }
-
-// The encoder-override picker offers `auto` (the blank sentinel — re-arms the GPU
-// probe at boot) plus the four EncoderProbe tokens. Any other string silently falls
-// back to x264 in OBS, so only these are offered.
-const ENCODER_OVERRIDE_TOKENS: ReadonlyArray<string> = ['x264', 'nvenc', 'qsv', 'amd'];
-
-// Single-glyph icon per WASAPI kind, shown in each mixer row's chip (also keyed via [data-kind]).
-const AUDIO_KIND_ICON: Record<AudioSourceKind, string> = {
-  application: '◫',
-  output: '🔊',
-  input: '🎙',
-};
-
-const AUDIO_KIND_LABEL: Record<AudioSourceKind, string> = {
-  application: 'Application',
-  output: 'Output device',
-  input: 'Microphone',
-};
-
-// Which mixer row a source renders as: the two built-ins (matched by reserved id) are fixed,
-// non-removable rows; everything else is a removable application/app capture.
-type MixerRowKind = 'microphone' | 'desktop' | 'app';
-
-function mixerRowKind(src: AudioSource): MixerRowKind {
-  if (src.id === BUILTIN_MICROPHONE_ID) return 'microphone';
-  if (src.id === BUILTIN_DESKTOP_ID) return 'desktop';
-  return 'app';
-}
-
-// Static presentation for the two always-present built-in rows. `dataKind` drives the chip tint.
-const BUILTIN_ROW_META: Record<
-  'microphone' | 'desktop',
-  { readonly name: string; readonly desc: string; readonly dataKind: AudioSourceKind }
-> = {
-  microphone: {
-    name: 'Microphone',
-    desc: 'Your voice · default device',
-    dataKind: 'input',
-  },
-  desktop: {
-    name: 'Desktop audio',
-    desc: 'All system sound — including Discord, browser, music',
-    dataKind: 'output',
-  },
-};
 
 // Single self-describing "Recorder" indicator. The recorder is app-managed now,
 // so we deliberately avoid any OBS jargon; the prefix makes the chip readable on
@@ -403,27 +353,10 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
   const resOptions = RES_PRESETS.some((p) => p.value === resolution)
     ? RES_PRESETS
     : [{ value: resolution, label: resolution || '—' }, ...RES_PRESETS];
-  // Mirror resOptions: a stored quality/format outside the picker list (e.g. "Small"
-  // or "ts") is preserved as a leading option so saving doesn't silently change it.
-  const qualityOptions = QUALITY_PRESETS.some((p) => p.value === quality)
-    ? QUALITY_PRESETS
-    : [{ value: quality, label: quality || '—' }, ...QUALITY_PRESETS];
-  const formatOptions = FORMAT_PRESETS.some((p) => p.value === recFormat)
-    ? FORMAT_PRESETS
-    : [{ value: recFormat, label: recFormat || '—' }, ...FORMAT_PRESETS];
 
   return (
     <section className="rec-panel" aria-label="Recording settings">
-      <div className="rec-preview">
-        {preview?.dataUri ? (
-          <img className="rec-preview-img" src={preview.dataUri} alt="Live scene preview" />
-        ) : (
-          <div className="rec-preview-empty">OBS preview unavailable</div>
-        )}
-        <span className="rec-preview-badge" data-state={status.state}>
-          {status.text}
-        </span>
-      </div>
+      <ScenePreview preview={preview} status={status} />
 
       <header className="rec-panel-head">
         <h2 className="rec-panel-title">Recording</h2>
@@ -478,117 +411,18 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
             </div>
           </section>
 
-          <section className="rec-card">
-            <h3 className="rec-sec">Video</h3>
-            <div className="rec-row">
-              <div className="rec-rowlabel">
-                <label className="rec-label">
-                  Encoder
-                  {encoderChoice === 'auto' && <span className="rec-badge">auto</span>}
-                </label>
-                <p className="rec-desc">
-                  Auto picks the best hardware encoder for your GPU. Override only if you know which
-                  one you want.
-                </p>
-              </div>
-              <div className="rec-control">
-                <select
-                  id="rec-encoder"
-                  className="rec-select"
-                  aria-label="Encoder"
-                  value={encoderChoice}
-                  onChange={(e) => {
-                    setEncoderChoice(e.target.value);
-                    setSaveState('idle');
-                  }}
-                >
-                  <option value="auto">
-                    Auto — {ENCODER_LABELS[encoderToken] ?? (encoderToken || 'detecting')}
-                  </option>
-                  {ENCODER_OVERRIDE_TOKENS.map((t) => (
-                    <option key={t} value={t}>
-                      {ENCODER_LABELS[t] ?? t}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-            <div className="rec-row">
-              <div className="rec-rowlabel">
-                <label className="rec-label" htmlFor="rec-fps">
-                  Frame rate
-                </label>
-                <p className="rec-desc">Frames per second captured into the recording.</p>
-              </div>
-              <div className="rec-control">
-                <select
-                  id="rec-fps"
-                  className="rec-select"
-                  value={fps}
-                  onChange={(e) => {
-                    setFps(Number(e.target.value));
-                    setSaveState('idle');
-                  }}
-                >
-                  {FPS_PRESETS.map((o) => (
-                    <option key={o.value} value={o.value}>
-                      {o.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-            <div className="rec-row">
-              <div className="rec-rowlabel">
-                <label className="rec-label" htmlFor="rec-quality">
-                  Quality
-                </label>
-                <p className="rec-desc">Higher quality means larger files.</p>
-              </div>
-              <div className="rec-control">
-                <select
-                  id="rec-quality"
-                  className="rec-select"
-                  value={quality}
-                  onChange={(e) => {
-                    setQuality(e.target.value);
-                    setSaveState('idle');
-                  }}
-                >
-                  {qualityOptions.map((o) => (
-                    <option key={o.value} value={o.value}>
-                      {o.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-            <div className="rec-row">
-              <div className="rec-rowlabel">
-                <label className="rec-label" htmlFor="rec-format">
-                  Format
-                </label>
-                <p className="rec-desc">Recording container. All options are crash-safe.</p>
-              </div>
-              <div className="rec-control">
-                <select
-                  id="rec-format"
-                  className="rec-select"
-                  value={recFormat}
-                  onChange={(e) => {
-                    setRecFormat(e.target.value);
-                    setSaveState('idle');
-                  }}
-                >
-                  {formatOptions.map((o) => (
-                    <option key={o.value} value={o.value}>
-                      {o.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-          </section>
+          <VideoSection
+            encoderChoice={encoderChoice}
+            setEncoderChoice={setEncoderChoice}
+            encoderToken={encoderToken}
+            fps={fps}
+            setFps={setFps}
+            quality={quality}
+            setQuality={setQuality}
+            recFormat={recFormat}
+            setRecFormat={setRecFormat}
+            setSaveState={setSaveState}
+          />
 
           <section className="rec-card">
             <h3 className="rec-sec">Auto-clip</h3>
@@ -650,386 +484,38 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
             </div>
           </section>
 
-          <section className="rec-card">
-            <h3 className="rec-sec">Storage</h3>
-            <div className="rec-row">
-              <div className="rec-rowlabel">
-                <label className="rec-label" htmlFor="rec-videodir">
-                  Output folder
-                </label>
-                <p className="rec-desc">Where recordings and thumbnails are written.</p>
-              </div>
-              <div className="rec-control rec-path">
-                <input
-                  id="rec-videodir"
-                  className="rec-input rec-pathinput"
-                  type="text"
-                  value={videoDir}
-                  autoComplete="off"
-                  spellCheck={false}
-                  placeholder="C:\Users\you\Videos\dota-recorder"
-                  onChange={(e) => {
-                    setVideoDir(e.target.value);
-                    setSaveState('idle');
-                  }}
-                />
-                <button
-                  type="button"
-                  className="rec-browse"
-                  aria-label="Browse for the output folder"
-                  onClick={() => void onBrowse()}
-                >
-                  Browse
-                </button>
-              </div>
-            </div>
-            {folderChanged && (
-              <p className="rec-note" role="status">
-                <span className="rec-note-icon" aria-hidden="true">
-                  i
-                </span>
-                Existing recordings stay in their current folder — only new recordings will be saved
-                here.
-              </p>
-            )}
-            <div className="rec-row">
-              <div className="rec-rowlabel">
-                <label className="rec-label" htmlFor="rec-retention">
-                  Max storage
-                </label>
-                <p className="rec-desc">
-                  Disk budget for the recording drive. Oldest unstarred recordings are removed first
-                  (across all drives).
-                </p>
-              </div>
-              <div className="rec-control rec-capfield">
-                <input
-                  id="rec-retention"
-                  className="rec-input rec-capinput"
-                  type="number"
-                  min={CAP_MIN_GB}
-                  step={10}
-                  value={retentionGb}
-                  onChange={(e) => {
-                    // Keep the raw value while typing (so the field can be cleared and
-                    // retyped); NaN is held as 0 and snapped to the floor on blur/save.
-                    const v = Number(e.target.value);
-                    setRetentionGb(Number.isFinite(v) ? v : 0);
-                    setSaveState('idle');
-                  }}
-                  // Reflect a sensible value once the user leaves the field: a cleared/<=0
-                  // cap snaps up to the floor rather than persisting (and later sending) 0.
-                  onBlur={() => setRetentionGb((v) => clampCapGb(v))}
-                />
-                <span className="rec-capunit">GB</span>
-                {activeUsage && (
-                  <span className="rec-capfree">
-                    {fmtSize(activeUsage.freeBytes)} free of {fmtSize(activeUsage.totalBytes)}
-                  </span>
-                )}
-              </div>
-            </div>
-            {capExceedsDrive(retentionGb, activeUsage) && (
-              // role="alert" (assertive): a cap that can't be reached is an actionable
-              // problem the user should hear immediately, not a passive status. The visible
-              // "Warning:" prefix carries the meaning without relying on the gold colour
-              // (the icon is aria-hidden, so it's the prefix that reaches a screen reader).
-              <p className="rec-note rec-note-warn" role="alert">
-                <span className="rec-note-icon" aria-hidden="true">
-                  !
-                </span>
-                <strong className="rec-note-label">Warning:</strong> Cap {retentionGb} GB exceeds
-                this drive — it will fill before the cap is reached.
-              </p>
-            )}
-            {usage && (
-              <p className="rec-note" role="status">
-                <span className="rec-note-icon" aria-hidden="true">
-                  i
-                </span>
-                Storing {fmtSize(usage.totalBytes)} of recordings across all drives —{' '}
-                {fmtSize(usage.starredBytes)} starred (never auto-deleted).
-              </p>
-            )}
-          </section>
+          <StorageSection
+            videoDir={videoDir}
+            setVideoDir={setVideoDir}
+            retentionGb={retentionGb}
+            setRetentionGb={setRetentionGb}
+            usage={usage}
+            activeUsage={activeUsage}
+            folderChanged={folderChanged}
+            onBrowse={onBrowse}
+            setSaveState={setSaveState}
+          />
 
-          <section className="rec-card" aria-label="Archive drives">
-            <h3 className="rec-sec">Archive drives</h3>
-            <p className="rec-desc aud-intro">
-              Finished recordings are moved off the recording drive onto these drives, filling each
-              up to its cap. The newest matches stay on the fast recording drive. Leave empty to
-              keep everything on the recording drive.
-            </p>
+          <ArchiveDrivesSection
+            storageLocations={storageLocations}
+            usage={usage}
+            driveErrors={driveErrors}
+            addDrive={addDrive}
+            removeDrive={removeDrive}
+            setDriveCap={setDriveCap}
+            setDrivePath={setDrivePath}
+            onBrowseDrive={onBrowseDrive}
+          />
 
-            {storageLocations.map((loc, i) => {
-              const u = usage?.drives.find((x) => x.role === 'archive' && x.path === loc.path);
-              const warn = capExceedsDrive(loc.capGb, u);
-              const rowError = driveErrors[loc.id];
-              // Distinct accessible names so a screen-reader user can tell the (otherwise
-              // identical) per-drive controls apart: prefer the entered path, fall back to
-              // the 1-based row number for a still-blank drive.
-              const driveName = loc.path.trim() !== '' ? loc.path.trim() : `drive ${i + 1}`;
-              return (
-                <div className="rec-row drv-row" key={loc.id}>
-                  <div className="rec-rowlabel drv-path">
-                    <div className="rec-control rec-path">
-                      <input
-                        className="rec-input rec-pathinput"
-                        type="text"
-                        value={loc.path}
-                        autoComplete="off"
-                        spellCheck={false}
-                        placeholder="D:\dota-archive"
-                        aria-label={`Folder for archive ${driveName}`}
-                        onChange={(e) => setDrivePath(i, e.target.value)}
-                      />
-                      <button
-                        type="button"
-                        className="rec-browse"
-                        aria-label={`Browse for archive ${driveName} folder`}
-                        onClick={() => void onBrowseDrive(i)}
-                      >
-                        Browse
-                      </button>
-                    </div>
-                    {u && (
-                      <p className="rec-desc drv-free">
-                        {fmtSize(u.usedBytes)} used · {fmtSize(u.freeBytes)} free of{' '}
-                        {fmtSize(u.totalBytes)}
-                      </p>
-                    )}
-                    {warn && (
-                      // role="alert" + visible "Warning:" prefix — same rationale as the
-                      // Max-storage warning above (assertive, not colour-only).
-                      <p className="rec-note rec-note-warn" role="alert">
-                        <span className="rec-note-icon" aria-hidden="true">
-                          !
-                        </span>
-                        <strong className="rec-note-label">Warning:</strong> Cap {loc.capGb} GB
-                        exceeds this drive — it will fill before the cap is reached.
-                      </p>
-                    )}
-                    {rowError && (
-                      // Save was blocked because this row is blank/invalid (FIX ii); keep the
-                      // row visible and tell the user what to fix instead of silently dropping it.
-                      <p className="rec-note rec-note-warn" role="alert">
-                        <span className="rec-note-icon" aria-hidden="true">
-                          !
-                        </span>
-                        <strong className="rec-note-label">Warning:</strong> {rowError}
-                      </p>
-                    )}
-                  </div>
-                  <div className="rec-control drv-control">
-                    <div className="rec-capfield">
-                      <input
-                        className="rec-input rec-capinput"
-                        type="number"
-                        min={CAP_MIN_GB}
-                        step={10}
-                        aria-label={`Cap in GB for archive ${driveName}`}
-                        value={loc.capGb}
-                        onChange={(e) => {
-                          // Keep the raw value while typing; clamp on blur/save so a
-                          // momentarily-cleared field can't persist (or send) 0.
-                          const v = Number(e.target.value);
-                          setDriveCap(i, Number.isFinite(v) ? v : 0);
-                        }}
-                        onBlur={() => setDriveCap(i, clampCapGb(loc.capGb))}
-                      />
-                      <span className="rec-capunit">GB</span>
-                    </div>
-                    <button
-                      type="button"
-                      className="aud-remove"
-                      aria-label={`Remove archive ${driveName}`}
-                      title="Remove drive"
-                      onClick={() => removeDrive(i)}
-                    >
-                      ✕
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
-
-            <div className="rec-row aud-addrow">
-              <div className="rec-rowlabel">
-                <span className="rec-label">Add a drive</span>
-                <p className="rec-desc">Use a larger drive to archive older recordings.</p>
-              </div>
-              <div className="rec-control aud-add">
-                <button type="button" className="rec-browse aud-add-kind" onClick={addDrive}>
-                  + Add drive
-                </button>
-              </div>
-            </div>
-          </section>
-
-          <section className="rec-card" aria-label="Audio">
-            <h3 className="rec-sec">Audio</h3>
-            <p className="rec-desc aud-intro">
-              Everything switched on here is mixed into your recording. Microphone and Desktop audio
-              are off by default, so nothing is captured behind your back.
-            </p>
-
-            {audioSources.map((src, i) => {
-              const row = mixerRowKind(src);
-              const volId = `aud-vol-${src.id}`;
-              // Display name for the row's accessible labels: the built-in name, or the app's label
-              // (falling back to a generic word until one is picked).
-              const rowName =
-                row === 'app'
-                  ? src.label || (src.kind === 'application' ? 'application' : 'device')
-                  : BUILTIN_ROW_META[row].name;
-
-              // Volume + On/Off cluster, identical for every row kind. The slider dims when the row is
-              // off (muted) to reinforce the toggle, but stays adjustable so you can pre-set a level.
-              const controls = (
-                <>
-                  <div className={`rec-slider aud-volume${src.muted ? ' aud-volume-off' : ''}`}>
-                    <label className="aud-srlabel" htmlFor={volId}>
-                      Volume
-                    </label>
-                    <input
-                      id={volId}
-                      className="rec-range"
-                      type="range"
-                      min={0}
-                      max={100}
-                      aria-label={`${rowName} volume`}
-                      value={src.volume}
-                      onChange={(e) => setVolume(i, Number(e.target.value))}
-                    />
-                    <span className="rec-rangeval aud-volval">{src.volume}%</span>
-                  </div>
-                  <button
-                    type="button"
-                    className="aud-mute"
-                    data-muted={src.muted ? 'on' : 'off'}
-                    aria-pressed={!src.muted}
-                    aria-label={src.muted ? `Turn ${rowName} on` : `Turn ${rowName} off`}
-                    title={src.muted ? `Turn ${rowName} on` : `Turn ${rowName} off`}
-                    onClick={() => toggleMute(i)}
-                  >
-                    {src.muted ? 'Off' : 'On'}
-                  </button>
-                </>
-              );
-
-              // Built-in microphone / desktop rows: fixed name + description, no picker, no remove.
-              if (row !== 'app') {
-                const meta = BUILTIN_ROW_META[row];
-                return (
-                  <div className="rec-row aud-row" key={src.id}>
-                    <div className="rec-rowlabel aud-meta">
-                      <span
-                        className="aud-kind"
-                        data-kind={meta.dataKind}
-                        aria-hidden="true"
-                        title={meta.name}
-                      >
-                        {AUDIO_KIND_ICON[meta.dataKind]}
-                      </span>
-                      <div className="aud-rowtext">
-                        <span className="rec-label">{meta.name}</span>
-                        <p className="rec-desc aud-rowdesc">{meta.desc}</p>
-                      </div>
-                    </div>
-                    <div className="rec-control aud-control">
-                      {controls}
-                      {/* Keep the right edge aligned with app rows, which have a remove button here. */}
-                      <span className="aud-remove-spacer" aria-hidden="true" />
-                    </div>
-                  </div>
-                );
-              }
-
-              // App-capture row: an app picker (the only dropdown left), volume, On/Off, and remove.
-              // Surface an unknown stored target as a leading option so a previously-picked app that
-              // isn't currently running still shows instead of silently resetting.
-              const opts = inputsByKind[src.kind];
-              const withDefault =
-                src.kind === 'application' || opts.some((o) => o.value === 'default')
-                  ? opts
-                  : [{ value: 'default', label: 'Default' }, ...opts];
-              const selectValue = src.target ?? '';
-              const options =
-                selectValue !== '' && !withDefault.some((o) => o.value === selectValue)
-                  ? [{ value: selectValue, label: src.label || selectValue }, ...withDefault]
-                  : withDefault;
-              const targetId = `aud-target-${src.id}`;
-
-              return (
-                <div className="rec-row aud-row" key={src.id}>
-                  <div className="rec-rowlabel aud-meta">
-                    <span
-                      className="aud-kind"
-                      data-kind={src.kind}
-                      aria-hidden="true"
-                      title={AUDIO_KIND_LABEL[src.kind]}
-                    >
-                      {AUDIO_KIND_ICON[src.kind]}
-                    </span>
-                    <div className="aud-fields">
-                      <label className="aud-srlabel" htmlFor={targetId}>
-                        {src.kind === 'application' ? 'Application' : 'Device'}
-                      </label>
-                      <select
-                        id={targetId}
-                        className="rec-select aud-target"
-                        value={selectValue}
-                        onChange={(e) => {
-                          const opt = options.find((o) => o.value === e.target.value);
-                          setTarget(i, e.target.value, opt?.label ?? '');
-                        }}
-                      >
-                        {src.kind === 'application' && selectValue === '' && (
-                          <option value="">Select an application…</option>
-                        )}
-                        {options.map((o) => (
-                          <option key={o.value} value={o.value}>
-                            {o.label}
-                          </option>
-                        ))}
-                      </select>
-                      {src.target?.includes('dota2.exe') && (
-                        <p className="rec-desc aud-rowdesc">
-                          Removing this stops recording game audio.
-                        </p>
-                      )}
-                    </div>
-                  </div>
-                  <div className="rec-control aud-control">
-                    {controls}
-                    <button
-                      type="button"
-                      className="aud-remove"
-                      aria-label={`Remove ${rowName}`}
-                      title="Remove source"
-                      onClick={() => removeAt(i)}
-                    >
-                      ✕
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
-
-            <div className="rec-row aud-addrow">
-              <div className="rec-rowlabel">
-                <span className="rec-label">Capture a specific app</span>
-                <p className="rec-desc">
-                  Record just one program&apos;s sound, like Discord or Spotify.
-                </p>
-              </div>
-              <div className="rec-control aud-add">
-                <button type="button" className="rec-browse aud-add-kind" onClick={addApp}>
-                  <span aria-hidden="true">＋</span> Add app
-                </button>
-              </div>
-            </div>
-          </section>
+          <AudioMixerSection
+            audioSources={audioSources}
+            inputsByKind={inputsByKind}
+            addApp={addApp}
+            removeAt={removeAt}
+            setTarget={setTarget}
+            setVolume={setVolume}
+            toggleMute={toggleMute}
+          />
 
           <section className="rec-card">
             <h3 className="rec-sec">Account</h3>
