@@ -220,6 +220,26 @@ describe('JvmSupervisor', () => {
     expect(lines).toContain('before *** after');
   });
 
+  it('masks a late-added secret (the core-minted OBS password) only after addScrubSecret', async () => {
+    const lines: string[] = [];
+    const sup = new JvmSupervisor({
+      bridgeToken: 'secrettoken',
+      onLog: (line) => lines.push(line),
+    });
+    await sup.start();
+
+    // Before registration: the token is masked but the password (not yet known) flows through.
+    children[0].stdout.emit('data', Buffer.from('token secrettoken pw obspassword\n'));
+    expect(lines).toContain('token *** pw obspassword');
+
+    sup.addScrubSecret('obspassword');
+    // Idempotent: a duplicate registration must not double-mask or otherwise corrupt output.
+    sup.addScrubSecret('obspassword');
+
+    children[0].stdout.emit('data', Buffer.from('token secrettoken pw obspassword\n'));
+    expect(lines).toContain('token *** pw ***');
+  });
+
   it('does not corrupt log lines when the bridge token is an empty string', async () => {
     // Regression guard: an empty token must hit the `: line` branch, not split('') into characters.
     const lines: string[] = [];

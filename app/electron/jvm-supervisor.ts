@@ -53,14 +53,29 @@ export class JvmSupervisor {
   private stopping = false;
   private readonly healthTimeoutMs: number;
   private readonly bridgeToken: string | undefined;
+  // Secrets masked out of every core log line by emitLines. Seeded with the bridge token (known at
+  // construction); the OBS websocket password is core-owned and only knowable after boot, so it's
+  // appended later via addScrubSecret once main.ts fetches it from /obs/launch-args.
+  private readonly logSecrets: Array<string | undefined>;
   private readonly onLog: (line: string) => void;
   private readonly onUnexpectedExit: ((info: ExitInfo) => void) | undefined;
 
   constructor(opts: SupervisorOptions = {}) {
     this.healthTimeoutMs = opts.healthTimeoutMs ?? 30_000;
     this.bridgeToken = opts.bridgeToken;
+    this.logSecrets = [opts.bridgeToken];
     this.onLog = opts.onLog ?? ((line) => console.log(`[core] ${line}`));
     this.onUnexpectedExit = opts.onUnexpectedExit;
+  }
+
+  /**
+   * Register a secret to mask from all subsequent core log lines. Used for values the core mints at
+   * runtime (the OBS websocket password), which aren't known when the supervisor is constructed.
+   * Idempotent: re-adding a secret already in the list is a no-op.
+   */
+  addScrubSecret(secret: string): void {
+    if (!secret || this.logSecrets.includes(secret)) return;
+    this.logSecrets.push(secret);
   }
 
   /** Spawn the JVM core and resolve once GET /health reports ok. */
@@ -210,9 +225,10 @@ export class JvmSupervisor {
     const text = buf.toString('utf8');
     for (const line of text.split(/\r?\n/)) {
       if (line.length === 0) continue;
-      // The bridge token lives in the core's env; if the core ever echoes its environment (a debug
-      // bean, a verbose stack trace) it would otherwise land in electron.log in plaintext.
-      this.onLog(scrubSecrets(line, [this.bridgeToken]));
+      // The bridge token and the core-minted OBS websocket password both live in / flow through the
+      // core; if it ever echoes them (a debug bean, a verbose stack trace, a settings dump) they would
+      // otherwise land in electron.log in plaintext.
+      this.onLog(scrubSecrets(line, this.logSecrets));
     }
   }
 
