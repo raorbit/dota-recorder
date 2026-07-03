@@ -362,9 +362,16 @@ export function fetchHealth(): Promise<Health> {
 
 // One-shot poll of the live status snapshot (GET /status). The StatusSocket is
 // the primary live feed; this is for views that mount independently of the socket
-// or want an immediate value before the first frame arrives.
-export function fetchStatus(): Promise<StatusSnapshot> {
-  return getJson<StatusSnapshot>('/status');
+// or want an immediate value before the first frame arrives. Runs through the
+// same guard as the WS path so a malformed body rejects instead of flowing a
+// mistyped object into toStatus/GsiSettings.
+export async function fetchStatus(): Promise<StatusSnapshot> {
+  const raw = await getJson<unknown>('/status');
+  const snapshot = parseStatusSnapshot(raw);
+  if (!snapshot) {
+    throw new Error('malformed /status payload');
+  }
+  return snapshot;
 }
 
 // POST /recording/stop result. `wasRecording` is whether a recording was actually in
