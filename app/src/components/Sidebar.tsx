@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useLibraryStore, type Bucket } from '../store/library';
+import { BUCKET_LABELS } from '../store/buckets';
 import { stopRecording, type BucketCounts, type Status } from '../api/client';
 import './sidebar.css';
 
@@ -23,25 +24,28 @@ interface BucketDef {
 }
 
 // The two prominent buckets (Ranked active style + Unranked) and the four compact
-// rows below them, in the mockup's order.
+// rows below them, in the mockup's order. Labels come from BUCKET_LABELS (the same map
+// bucketLabelOf uses for the MODE column + search) so a rename lands in one place.
 const PRIMARY_BUCKETS: readonly BucketDef[] = [
-  { key: 'ranked', label: 'Ranked', badge: 'accent' },
-  { key: 'unranked', label: 'Unranked', badge: 'plain' },
+  { key: 'ranked', label: BUCKET_LABELS.ranked, badge: 'accent' },
+  { key: 'unranked', label: BUCKET_LABELS.unranked, badge: 'plain' },
 ];
 
 const SECONDARY_BUCKETS: readonly BucketDef[] = [
-  { key: 'turbo', label: 'Turbo', badge: 'plain' },
-  { key: 'abilityDraft', label: 'Ability Draft', badge: 'plain' },
+  { key: 'turbo', label: BUCKET_LABELS.turbo, badge: 'plain' },
+  { key: 'abilityDraft', label: BUCKET_LABELS.abilityDraft, badge: 'plain' },
   // Clips is a permanent tab: always shown (even at 0 clips) so saved clips always have a
   // visible home. Populated from the clips table (count = ClipRepository total); opening it
   // lists every saved clip (see MatchTable's ClipTable). Gold badge, like the mockup.
-  { key: 'clips', label: 'Clips', badge: 'gold' },
+  { key: 'clips', label: BUCKET_LABELS.clips, badge: 'gold' },
 ];
 
 // Optional buckets shown only once the backend reports a non-zero count (so an empty
 // library doesn't advertise empty sections, mirroring the Unsorted bucket). Manual has
 // no creation UI yet, so it stays gated until a manual recording exists.
-const OPTIONAL_BUCKETS: readonly BucketDef[] = [{ key: 'manual', label: 'Manual', badge: 'plain' }];
+const OPTIONAL_BUCKETS: readonly BucketDef[] = [
+  { key: 'manual', label: BUCKET_LABELS.manual, badge: 'plain' },
+];
 
 function countFor(counts: BucketCounts, key: Bucket): number {
   return counts[key];
@@ -190,7 +194,8 @@ export function Sidebar({
 
       <div className="sb-primary">
         {PRIMARY_BUCKETS.map(renderBucket)}
-        {showUnsorted && renderBucket({ key: 'unsorted', label: 'Unsorted', badge: 'plain' })}
+        {showUnsorted &&
+          renderBucket({ key: 'unsorted', label: BUCKET_LABELS.unsorted, badge: 'plain' })}
       </div>
 
       <div className="sb-secondary">
