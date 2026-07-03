@@ -110,6 +110,17 @@ class ObsSceneConfigurerTest {
     }
 
     @Test
+    void contractAudioKinds_areExactlyTheKindsThatMapToAnObsKind() {
+        // The exposed contract set (SettingsController's allow-list source) must be exactly the kinds
+        // kindToObsKind resolves — so a validated kind is always reconcilable and neither can drift.
+        assertThat(ObsSceneConfigurer.CONTRACT_AUDIO_KINDS)
+                .containsExactly("application", "output", "input");
+        for (String kind : ObsSceneConfigurer.CONTRACT_AUDIO_KINDS) {
+            assertThat(ObsSceneConfigurer.kindToObsKind(kind)).isNotNull();
+        }
+    }
+
+    @Test
     void ownedInputName_isDotarecPrefixPlusId() {
         assertThat(ObsSceneConfigurer.ownedInputName(source("abc-123", "output", "default")))
                 .isEqualTo("dotarec:abc-123");

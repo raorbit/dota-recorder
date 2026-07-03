@@ -126,19 +126,9 @@ public class AudioController {
     }
 
     private static String obsKind(String kind) {
-        if (kind == null) {
-            return null;
-        }
-        switch (kind) {
-            case "application":
-                return ObsSceneConfigurer.KIND_APPLICATION;
-            case "output":
-                return ObsSceneConfigurer.KIND_OUTPUT;
-            case "input":
-                return ObsSceneConfigurer.KIND_INPUT;
-            default:
-                return null;
-        }
+        // Delegate to the single contract-kind mapping so this enumeration path can't drift from the
+        // reconcile/readiness paths (see ObsSceneConfigurer#kindToObsKind).
+        return ObsSceneConfigurer.kindToObsKind(kind);
     }
 
     private static String propertyName(String kind) {
