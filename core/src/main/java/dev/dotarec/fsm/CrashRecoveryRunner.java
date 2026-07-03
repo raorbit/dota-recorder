@@ -3,6 +3,7 @@ package dev.dotarec.fsm;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.dotarec.config.SettingsStore;
+import dev.dotarec.config.StorageRoots;
 import dev.dotarec.data.ClipRepository;
 import dev.dotarec.data.ClipRow;
 import dev.dotarec.data.MarkerRepository;
@@ -755,7 +756,8 @@ public class CrashRecoveryRunner implements ApplicationRunner {
         }
     }
 
+    /** Delegates to the shared canonical form so attribution can never diverge from the archiver's. */
     private static String normalize(Path path) {
-        return path.toAbsolutePath().normalize().toString().toLowerCase(Locale.ROOT);
+        return StorageRoots.normalize(path);
     }
 }
