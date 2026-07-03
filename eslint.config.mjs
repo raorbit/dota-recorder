@@ -24,6 +24,9 @@ export default js.config(
       '**/*.d.ts',
       'release/**',
       'logs/**',
+      // Local-only (git-excluded) dirs that still exist on disk: session worktrees + plans.
+      '.claude/**',
+      'plans/**',
     ],
   },
   // Base recommended set for every TS/TSX file. no-explicit-any stays a warning (the wire
