@@ -600,7 +600,7 @@ public class MatchFsm {
 
     private void openJournal(RecordingSession s, GsiFrame frame) {
         try {
-            long now = System.currentTimeMillis();
+            long now = time.wallMillis();
             journal.open(
                     new RecordingSessionRow(
                             s.getSurrogateId(),
@@ -641,7 +641,7 @@ public class MatchFsm {
                             s.getAssists(),
                             videoPath,
                             thumbPath,
-                            System.currentTimeMillis()));
+                            time.wallMillis()));
         } catch (RuntimeException e) {
             log.warn("Could not update recording journal for {}: {}", s.getSurrogateId(), e.toString());
         }
@@ -652,7 +652,7 @@ public class MatchFsm {
         try {
             journal.appendEvent(
                     s.getSurrogateId(),
-                    new RecordingEvent(type, wallMs, gameClock, payloadJson, System.currentTimeMillis()));
+                    new RecordingEvent(type, wallMs, gameClock, payloadJson, time.wallMillis()));
         } catch (RuntimeException e) {
             log.warn(
                     "Could not append {} event to recording journal for {}: {}",
