@@ -30,8 +30,8 @@ keyboard seek in the browse UI, and a reworked audio mixer.
 
 - **Automatic recording** — detects match start from GSI and records in the background; no
   manual OBS wrangling. A stop button in the status card force-finalizes the current recording.
-- **Death/kill markers** — diffs your own kills and deaths into timeline markers, anchored to
-  wall-clock so a click seeks the video to the right frame.
+- **Death/kill markers** — diffs your own kills and deaths into timeline markers on a monotonic
+  clock, so a click seeks the video to the right frame.
 - **Browse & review** — filter your match library, multi-select with shift/ctrl-click for bulk
   actions (star, delete), and seek ±10s with the arrow keys in the player.
 - **Audio mixer** — a single mixer with game, mic, and desktop sources; mic and desktop default
@@ -60,8 +60,13 @@ Electron main  ── supervises ──►  JVM core (Spring Boot)
 Electron is the sole supervisor: it spawns and reaps the JVM core and OBS, and the
 renderer talks to the core over loopback only — nothing binds beyond `127.0.0.1`. The
 core parses GSI frames into match state, drives an OBS recording, diffs your kills/deaths
-into timeline markers, and stores VODs + markers in SQLite. Seek offsets are anchored to
-wall-clock (not the game clock), so clicking a marker lands on the right frame.
+into timeline markers, and stores VODs + markers in SQLite. Seek offsets are computed on a
+monotonic clock anchored at OBS's record confirmation (never the pausable game clock), so
+clicking a marker lands on the right frame.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design — process lifecycle, clock domains,
+crash recovery, storage, and the security model — and [DEVELOPMENT.md](DEVELOPMENT.md) for how
+the project was built and validated.
 
 ## Requirements
 
