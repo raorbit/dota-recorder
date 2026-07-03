@@ -92,9 +92,9 @@ public class MatchFsm {
     private final ClipService clipService;
     private final SettingsStore settings;
 
-    /** Serializes the journaled marker payload. Spring Boot autoconfigures the singleton; the key set
-     * MUST stay {type, videoOffsetS, gameClock, label, source} — CrashRecoveryRunner.parseMarker reads
-     * those exact keys and silently drops a recovered marker on any renamed/missing one. */
+    /** Serializes the journaled marker payload. Spring Boot autoconfigures the singleton; the wire shape
+     * is the shared {@link MarkerPayload} record, whose component names are the frozen JSON keys
+     * CrashRecoveryRunner.parseMarker reads back. */
     private final ObjectMapper mapper;
 
     /** The monotonic + wall clocks. The monotonic clock ({@code System::nanoTime}) anchors the
@@ -665,14 +665,14 @@ public class MatchFsm {
     /**
      * Serializes a marker into the journaled event payload via Jackson. Hand-rolled escaping missed
      * {@code \r}/{@code \t}/control chars, corrupting any label that carried them; the mapper escapes
-     * everything correctly. The key set is FROZEN as {type, videoOffsetS, gameClock, label, source} —
-     * CrashRecoveryRunner.parseMarker reads those exact keys and silently drops a recovered marker on a
-     * renamed/missing one. Returns null on a serialization failure (appendJournalEvent tolerates null).
+     * everything correctly. The wire shape is the shared {@link MarkerPayload} record whose component
+     * names are the frozen JSON keys {@code CrashRecoveryRunner.parseMarker} reads back. Returns null on a
+     * serialization failure (appendJournalEvent tolerates null).
      */
     private String markerPayload(PendingMarker marker) {
         try {
             return mapper.writeValueAsString(
-                    new MarkerPayloadDto(
+                    new MarkerPayload(
                             marker.type(),
                             marker.videoOffsetS(),
                             marker.gameClock(),
@@ -683,10 +683,6 @@ public class MatchFsm {
             return null;
         }
     }
-
-    /** Journaled marker shape. Field names ARE the JSON keys CrashRecoveryRunner.parseMarker reads. */
-    private record MarkerPayloadDto(
-            String type, double videoOffsetS, Integer gameClock, String label, String source) {}
 
     private void publishRecorded(long matchRowId, RecordingSession s, int durationS) {
         Map<String, Object> payload = new HashMap<>();
