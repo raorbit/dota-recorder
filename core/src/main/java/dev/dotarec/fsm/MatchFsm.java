@@ -40,7 +40,7 @@ import org.springframework.stereotype.Service;
 /**
  * Match state machine: interprets GSI frames and decides when to start/stop recording.
  *
- * <p>Lifecycle (plan: Match lifecycle):
+ * <p>Lifecycle:
  * <ul>
  *   <li>Arm + StartRecord EARLY -- at HERO_SELECTION / STRATEGY_TIME / PRE_GAME -- so OBS's
  *       StartRecord -&gt; OUTPUT_STARTED latency cannot clip the opening of the match.</li>

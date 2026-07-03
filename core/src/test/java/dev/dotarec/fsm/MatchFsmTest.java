@@ -445,7 +445,7 @@ class MatchFsmTest {
         // wall stamp is deliberately a wildly different value -- if the offset regressed to wall-clock
         // it would read 13.5s, not 3.5s.
         // The shared setUp fsm pins nanoClock to a CONSTANT ANCHOR_NANOS; with the monotonic finalize
-        // duration (Finding A) that would make durationS 0 and clamp the marker to 0. Use a stepping
+        // duration that would make durationS 0 and clamp the marker to 0. Use a stepping
         // nano clock (anchor at start, +8s at finalize) so finalize sees real elapsed monotonic time,
         // exactly as production's advancing System.nanoTime would. nanoClock is read twice: the start
         // anchor, then finalize.
@@ -496,7 +496,7 @@ class MatchFsmTest {
 
     @Test
     void finalizeDurationAndMarkerClampFollowMonotonicClock_notABackwardWallStep() {
-        // Finding A: durationS (the clamp upper bound for every marker + the stored duration_s) must be
+        // durationS (the clamp upper bound for every marker + the stored duration_s) must be
         // derived from the MONOTONIC clock, the same anchor the marker offsets use -- never the wall
         // clock. Here the wall clock STEPS BACKWARD before finalize (an NTP correction). If the duration
         // still read (now - recordConfirmedWallMs)/1000 it would go negative and clamp to 0, dragging

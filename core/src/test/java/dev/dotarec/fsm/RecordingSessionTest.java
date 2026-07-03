@@ -7,7 +7,7 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Unit-tests the small per-session {@link TaggerState} the {@code EventTagger} threads across ticks:
- * the deaths high-water mark (Findings B + C) and the per-dead-episode dedupe latch (Finding B). The
+ * the deaths high-water mark and the per-dead-episode dedupe latch. The
  * end-to-end death-detection behavior these back is covered in {@code EventTaggerTest}; this pins the
  * state primitives directly.
  */

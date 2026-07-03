@@ -35,12 +35,12 @@ import org.springframework.stereotype.Service;
  * the running total on the first player-present frame, plus a per-dead-episode dedupe latch, so death
  * detection survives desync modes the raw diff misses:
  * <ul>
- *   <li><b>Counter/alive straddle (Finding B):</b> the deaths increment and the alive true-&gt;false
+ *   <li><b>Counter/alive straddle:</b> the deaths increment and the alive true-&gt;false
  *       edge describe one death but can land on adjacent ticks. The counter path emits deaths beyond
  *       the high-water mark; the falling edge is a fallback gated by the latch that also advances the
  *       high-water mark, so the counter catching up later -- even after a respawn cleared the latch --
  *       never re-emits it. Exactly one marker per death whichever signal leads and however far apart.</li>
- *   <li><b>Block dropout / unobserved respawn (Finding C):</b> if the player/hero block vanishes on the
+ *   <li><b>Block dropout / unobserved respawn:</b> if the player/hero block vanishes on the
  *       death tick, or the whole respawn window between two deaths is dropped by GSI, the monotonic
  *       counter still reveals those deaths against the high-water mark once the block returns, so none
  *       are lost -- the counter path is deliberately NOT gated by the episode latch.</li>
@@ -117,7 +117,7 @@ public class EventTagger {
         // every death it shows BEYOND emittedDeaths, the high-water mark of deaths already tagged. This is
         // deliberately NOT gated by the episode latch: a death is still emitted when the intervening
         // respawn window was never observed (dropped frames) or a block-dropout tick hid the death -- the
-        // counter reveals it once the player block returns (Finding C). The high-water mark also means the
+        // counter reveals it once the player block returns. The high-water mark also means the
         // counter never re-emits a death the falling edge already tagged (it cannot re-cross that value).
         boolean deathCounterFired = false;
         if (curr.playerPresent() && state.deaths().seeded()) {
@@ -134,7 +134,7 @@ public class EventTagger {
         // presence on BOTH frames (so a vanished hero block can't manufacture a phantom death) AND on the
         // per-episode latch (so it fires at most once per dead episode and never duplicates a death the
         // counter already tagged). It advances the high-water mark by one, so the counter catching up later
-        // -- even after a respawn cleared the latch -- cannot re-emit the same death (Finding B, both the
+        // -- even after a respawn cleared the latch -- cannot re-emit the same death (covers both the
         // counter-leads and the counter-lags-past-respawn cases).
         if (!deathCounterFired
                 && !state.deathEmittedThisEpisode()
@@ -166,7 +166,7 @@ public class EventTagger {
      * the mark. Callers gate on the player block being present on {@code curr}; an unseeded mark also
      * suppresses the returning-from-dropout burst (marks are only seeded from a player-present frame).
      * The monotonic counter reveals a kill/assist that landed on a single-frame block-dropout tick once
-     * the block returns -- a raw prev-&gt;curr diff dropped it (Finding F4).
+     * the block returns -- a raw prev-&gt;curr diff dropped it.
      */
     private void emitBeyondMark(List<PendingMarker> markers, String type,
             TaggerState.HighWaterCounter mark, int total, double offset, Integer gameClock) {

@@ -156,7 +156,7 @@ class EventTaggerTest {
                 .isZero();
     }
 
-    // ---- Finding B: one death across a counter/alive straddle on ADJACENT ticks ----------------
+    // ---- one death across a counter/alive straddle on ADJACENT ticks ---------------------------
 
     @Test
     void deathEdgeLeadsCounterOnAdjacentTick_emitsExactlyOneDeath() {
@@ -253,7 +253,7 @@ class EventTaggerTest {
                 .isEmpty();
     }
 
-    // ---- Finding C: a death during a single-frame player-block dropout is not lost -------------
+    // ---- a death during a single-frame player-block dropout is not lost ------------------------
 
     @Test
     void deathDuringSingleFrameBlockDropout_isEmittedWhenBlockReturns() {
@@ -276,7 +276,7 @@ class EventTaggerTest {
                 .hasSize(1);
     }
 
-    // ---- Finding F4: a kill/assist during a single-frame player-block dropout is not lost ------
+    // ---- a kill/assist during a single-frame player-block dropout is not lost ------------------
 
     @Test
     void killDuringSingleFrameBlockDropout_isEmittedWhenBlockReturns() {
