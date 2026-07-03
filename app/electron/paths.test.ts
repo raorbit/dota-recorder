@@ -33,13 +33,7 @@ vi.mock('node:fs', async (importOriginal) => {
 });
 
 import * as path from 'node:path';
-import {
-  bundledJavawPath,
-  obsDir,
-  obsSourceDir,
-  obsVersion,
-  resolveCoreJar,
-} from './paths';
+import { bundledJavawPath, obsDir, obsSourceDir, obsVersion, resolveCoreJar } from './paths';
 
 // path.resolve / path.join on Windows-style inputs run through the host's path module.
 // On a non-Windows host the separators normalize to '/', so compare via path helpers
@@ -156,9 +150,7 @@ describe('obsDir', () => {
     delete process.env.LOCALAPPDATA;
     appState.getPathReturns = { appData: 'C:/Users/x/AppData/Roaming' };
 
-    expect(obsDir()).toBe(
-      path.join('C:/Users/x/AppData/Roaming', 'dota-recorder', 'obs'),
-    );
+    expect(obsDir()).toBe(path.join('C:/Users/x/AppData/Roaming', 'dota-recorder', 'obs'));
   });
 });
 

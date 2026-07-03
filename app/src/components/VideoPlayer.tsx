@@ -326,7 +326,8 @@ export function VideoPlayer({
       }
       // Stand down while a menu/dialog overlay owns focus (e.g. the table's row-actions PopupMenu,
       // whose roving focus ignores horizontal arrows) so it can't scrub the background video.
-      if (t?.closest?.('[role="menu"],[role="menuitem"],[role="dialog"],[role="alertdialog"]')) return;
+      if (t?.closest?.('[role="menu"],[role="menuitem"],[role="dialog"],[role="alertdialog"]'))
+        return;
       const v = videoRef.current;
       if (!v || !v.currentSrc) return; // no video loaded — let the key behave normally
       e.preventDefault();
@@ -409,12 +410,14 @@ export function VideoPlayer({
   }
 
   // Enter/Space activates a role="button" control (the glyph controls aren't <button>s).
-  const keyActivate = (fn: () => void) => (e: React.KeyboardEvent): void => {
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault();
-      fn();
-    }
-  };
+  const keyActivate =
+    (fn: () => void) =>
+    (e: React.KeyboardEvent): void => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        fn();
+      }
+    };
 
   // Confirmed delete: removes the row + .mp4/thumbnail. On success the store clears the
   // selection, so this view falls back to the library (no local cleanup needed); on failure
@@ -489,7 +492,7 @@ export function VideoPlayer({
     // Map against the media element's REAL duration — the same timebase the playhead,
     // seek, and the offsets POSTed to ffmpeg use. The DB durationS estimate can disagree,
     // which would otherwise land the cut on the wrong sub-range of the VOD.
-    const d = usableDuration(videoRef.current) ?? (durationS ?? 0);
+    const d = usableDuration(videoRef.current) ?? durationS ?? 0;
     const fraction = clamp01((e.clientX - rect.left) / rect.width);
     const offset = fraction * d;
     setClipRange((prev) =>
@@ -920,9 +923,15 @@ export function VideoPlayer({
                   className="vp-icon vp-clip-star"
                   role="button"
                   tabIndex={0}
-                  aria-label={clip.starred ? `Unstar clip ${clipLabel(clip)}` : `Star clip ${clipLabel(clip)}`}
+                  aria-label={
+                    clip.starred ? `Unstar clip ${clipLabel(clip)}` : `Star clip ${clipLabel(clip)}`
+                  }
                   aria-pressed={clip.starred}
-                  title={clip.starred ? 'Starred — kept from auto-delete' : 'Star to keep from auto-delete'}
+                  title={
+                    clip.starred
+                      ? 'Starred — kept from auto-delete'
+                      : 'Star to keep from auto-delete'
+                  }
                   data-on={clip.starred ? 'true' : 'false'}
                   onClick={() => void onToggleClipStar(clip)}
                   onKeyDown={keyActivate(() => void onToggleClipStar(clip))}

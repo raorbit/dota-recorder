@@ -16,7 +16,15 @@
 // OFF by default — trimming must be verified to not break OBS startup / game capture
 // before it is made the default, so v1 ships the full OBS.
 
-import { createWriteStream, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  createWriteStream,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -24,7 +32,8 @@ import { execFileSync } from 'node:child_process';
 import * as path from 'node:path';
 
 const OBS_VERSION = process.env.OBS_VERSION ?? '32.1.2';
-const OBS_SHA256 = process.env.OBS_SHA256 ?? '8d97e4563bd8d22d03e63042aa7dccede1d555c9bd35ce8a9e5019b0d0201bf6'; // OBS-Studio-32.1.2-Windows-x64.zip
+const OBS_SHA256 =
+  process.env.OBS_SHA256 ?? '8d97e4563bd8d22d03e63042aa7dccede1d555c9bd35ce8a9e5019b0d0201bf6'; // OBS-Studio-32.1.2-Windows-x64.zip
 const TRIM_CEF = process.env.DOTAREC_OBS_TRIM === '1'; // off by default until verified
 
 const repoRoot = path.resolve(import.meta.dirname, '..');
@@ -48,8 +57,10 @@ async function main() {
     console.log(`Downloading ${url}`);
     const res = await fetch(url, { redirect: 'follow' });
     if (!res.ok || !res.body) {
-      throw new Error(`Download failed: ${res.status} ${res.statusText} for ${url}\n` +
-        `(check OBS_VERSION — the release asset URL must exist)`);
+      throw new Error(
+        `Download failed: ${res.status} ${res.statusText} for ${url}\n` +
+          `(check OBS_VERSION — the release asset URL must exist)`,
+      );
     }
     await pipeline(Readable.fromWeb(res.body), createWriteStream(zipPath));
     console.log(`Downloaded ${(statSync(zipPath).size / 1e6).toFixed(1)} MB`);
@@ -59,12 +70,16 @@ async function main() {
 
   const sha = createHash('sha256').update(readFileSync(zipPath)).digest('hex');
   if (!OBS_SHA256) {
-    console.warn(`\n[!] OBS_SHA256 is not pinned. Computed sha256:\n    ${sha}\n` +
-      `    Paste it into OBS_SHA256 in scripts/fetch-obs.mjs to enable strict verification.\n`);
+    console.warn(
+      `\n[!] OBS_SHA256 is not pinned. Computed sha256:\n    ${sha}\n` +
+        `    Paste it into OBS_SHA256 in scripts/fetch-obs.mjs to enable strict verification.\n`,
+    );
   } else if (sha.toLowerCase() !== OBS_SHA256.toLowerCase()) {
     rmSync(zipPath, { force: true });
-    throw new Error(`sha256 mismatch for ${zipName}\n  expected ${OBS_SHA256}\n  got      ${sha}\n` +
-      `(deleted the bad download; re-run)`);
+    throw new Error(
+      `sha256 mismatch for ${zipName}\n  expected ${OBS_SHA256}\n  got      ${sha}\n` +
+        `(deleted the bad download; re-run)`,
+    );
   } else {
     console.log(`sha256 verified.`);
   }
@@ -76,9 +91,19 @@ async function main() {
   // Pass the paths via env vars and read them back with $env: inside the command — never
   // interpolate them into the PowerShell string, so paths containing apostrophes, spaces
   // or other special characters can't produce an unbalanced/invalid command.
-  execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command',
-    'Expand-Archive -LiteralPath $env:DOTAREC_OBS_ZIP -DestinationPath $env:DOTAREC_OBS_DEST -Force'],
-    { stdio: 'inherit', env: { ...process.env, DOTAREC_OBS_ZIP: zipPath, DOTAREC_OBS_DEST: portableDir } });
+  execFileSync(
+    'powershell',
+    [
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      'Expand-Archive -LiteralPath $env:DOTAREC_OBS_ZIP -DestinationPath $env:DOTAREC_OBS_DEST -Force',
+    ],
+    {
+      stdio: 'inherit',
+      env: { ...process.env, DOTAREC_OBS_ZIP: zipPath, DOTAREC_OBS_DEST: portableDir },
+    },
+  );
   if (!existsSync(obs64)) {
     throw new Error(`Extraction did not produce ${obs64} — the OBS zip layout may have changed.`);
   }
@@ -95,20 +120,35 @@ async function main() {
 function trimBrowserSource() {
   const plug = path.join(portableDir, 'obs-plugins', '64bit');
   const targets = [
-    'obs-browser.dll', 'obs-browser.pdb', 'obs-browser-page.exe',
-    'libcef.dll', 'chrome_elf.dll', 'snapshot_blob.bin', 'v8_context_snapshot.bin',
+    'obs-browser.dll',
+    'obs-browser.pdb',
+    'obs-browser-page.exe',
+    'libcef.dll',
+    'chrome_elf.dll',
+    'snapshot_blob.bin',
+    'v8_context_snapshot.bin',
   ];
   let freed = 0;
   for (const t of targets) {
     const p = path.join(plug, t);
-    if (existsSync(p)) { freed += statSync(p).size; rmSync(p, { force: true }); }
+    if (existsSync(p)) {
+      freed += statSync(p).size;
+      rmSync(p, { force: true });
+    }
   }
   for (const d of ['locales', 'swiftshader']) {
     const p = path.join(plug, d);
-    if (existsSync(p)) { rmSync(p, { recursive: true, force: true }); }
+    if (existsSync(p)) {
+      rmSync(p, { recursive: true, force: true });
+    }
   }
   // *.pak CEF resource bundles
-  console.log(`Trimmed browser source (~${(freed / 1e6).toFixed(0)} MB+ of named files; verify OBS still starts).`);
+  console.log(
+    `Trimmed browser source (~${(freed / 1e6).toFixed(0)} MB+ of named files; verify OBS still starts).`,
+  );
 }
 
-main().catch((e) => { console.error(e.message ?? e); process.exit(1); });
+main().catch((e) => {
+  console.error(e.message ?? e);
+  process.exit(1);
+});

@@ -129,14 +129,76 @@ export const COLUMN_META: readonly ColumnMeta[] = [
     fixed: true,
     sortValue: (m) => heroDisplayName(m.hero).toLowerCase(),
   },
-  { key: 'result', headerLabel: 'RESULT', menuLabel: 'Result', width: '0.8fr', defaultVisible: true, sortValue: (m) => m.result ?? null },
-  { key: 'kda', headerLabel: 'K / D / A', menuLabel: 'K / D / A', width: '0.9fr', defaultVisible: true, descFirst: true, sortValue: (m) => m.kills },
-  { key: 'gpm', headerLabel: 'GPM', menuLabel: 'GPM', width: '0.7fr', defaultVisible: true, descFirst: true, sortValue: (m) => m.gpm },
-  { key: 'xpm', headerLabel: 'XPM', menuLabel: 'XPM', width: '0.7fr', defaultVisible: false, descFirst: true, sortValue: (m) => m.xpm },
-  { key: 'netWorth', headerLabel: 'NET WORTH', menuLabel: 'Net worth', width: '1fr', defaultVisible: false, descFirst: true, sortValue: (m) => m.netWorth },
-  { key: 'lastHits', headerLabel: 'LAST HITS', menuLabel: 'Last hits', width: '0.9fr', defaultVisible: false, descFirst: true, sortValue: (m) => m.lastHits },
-  { key: 'duration', headerLabel: 'DURATION', menuLabel: 'Duration', width: '0.8fr', defaultVisible: false, descFirst: true, sortValue: (m) => m.durationS },
-  { key: 'mode', headerLabel: 'MODE', menuLabel: 'Mode', width: '0.9fr', defaultVisible: true, sortValue: (m) => bucketLabelOf(m).toLowerCase() },
+  {
+    key: 'result',
+    headerLabel: 'RESULT',
+    menuLabel: 'Result',
+    width: '0.8fr',
+    defaultVisible: true,
+    sortValue: (m) => m.result ?? null,
+  },
+  {
+    key: 'kda',
+    headerLabel: 'K / D / A',
+    menuLabel: 'K / D / A',
+    width: '0.9fr',
+    defaultVisible: true,
+    descFirst: true,
+    sortValue: (m) => m.kills,
+  },
+  {
+    key: 'gpm',
+    headerLabel: 'GPM',
+    menuLabel: 'GPM',
+    width: '0.7fr',
+    defaultVisible: true,
+    descFirst: true,
+    sortValue: (m) => m.gpm,
+  },
+  {
+    key: 'xpm',
+    headerLabel: 'XPM',
+    menuLabel: 'XPM',
+    width: '0.7fr',
+    defaultVisible: false,
+    descFirst: true,
+    sortValue: (m) => m.xpm,
+  },
+  {
+    key: 'netWorth',
+    headerLabel: 'NET WORTH',
+    menuLabel: 'Net worth',
+    width: '1fr',
+    defaultVisible: false,
+    descFirst: true,
+    sortValue: (m) => m.netWorth,
+  },
+  {
+    key: 'lastHits',
+    headerLabel: 'LAST HITS',
+    menuLabel: 'Last hits',
+    width: '0.9fr',
+    defaultVisible: false,
+    descFirst: true,
+    sortValue: (m) => m.lastHits,
+  },
+  {
+    key: 'duration',
+    headerLabel: 'DURATION',
+    menuLabel: 'Duration',
+    width: '0.8fr',
+    defaultVisible: false,
+    descFirst: true,
+    sortValue: (m) => m.durationS,
+  },
+  {
+    key: 'mode',
+    headerLabel: 'MODE',
+    menuLabel: 'Mode',
+    width: '0.9fr',
+    defaultVisible: true,
+    sortValue: (m) => bucketLabelOf(m).toLowerCase(),
+  },
   {
     key: 'mmr',
     headerLabel: 'MMR',
@@ -164,10 +226,20 @@ export const COLUMN_META: readonly ColumnMeta[] = [
   // null), mirroring the core list order (ORDER BY COALESCE(played_at, created_at) DESC). Without the
   // fallback a freshly-recorded row would sink to the bottom of the default date-desc view instead of
   // appearing on top. (Display still uses formatPlayedAt(playedAt), so an un-enriched row shows "—".)
-  { key: 'date', headerLabel: 'DATE', menuLabel: 'Date', width: '1fr', defaultVisible: true, descFirst: true, sortValue: (m) => m.playedAt ?? m.createdAt },
+  {
+    key: 'date',
+    headerLabel: 'DATE',
+    menuLabel: 'Date',
+    width: '1fr',
+    defaultVisible: true,
+    descFirst: true,
+    sortValue: (m) => m.playedAt ?? m.createdAt,
+  },
 ];
 
-export const COLUMN_META_BY_KEY = new Map<ColumnKey, ColumnMeta>(COLUMN_META.map((c) => [c.key, c]));
+export const COLUMN_META_BY_KEY = new Map<ColumnKey, ColumnMeta>(
+  COLUMN_META.map((c) => [c.key, c]),
+);
 export const DEFAULT_SORT: SortState = { key: 'date', dir: 'desc' };
 
 // localStorage keys for the table's PER-TAB view preferences (each bucket keeps its own column set +
@@ -197,14 +269,18 @@ export function sanitizeKeys(value: unknown): ColumnKey[] | null {
   if (!Array.isArray(value)) return null;
   return value.filter(
     (k): k is ColumnKey =>
-      COLUMN_META_BY_KEY.has(k as ColumnKey) && COLUMN_META_BY_KEY.get(k as ColumnKey)?.fixed !== true,
+      COLUMN_META_BY_KEY.has(k as ColumnKey) &&
+      COLUMN_META_BY_KEY.get(k as ColumnKey)?.fixed !== true,
   );
 }
 
 // Shared parse for the per-bucket pref maps: read the key, JSON-parse, require a plain object (not an
 // array), and keep each entry whose value `parseEntry` accepts (returns non-null). Any failure
 // (missing/corrupt/non-object) yields {} so per-bucket defaults apply.
-function loadBucketMap<T>(key: string, parseEntry: (value: unknown) => T | null): Record<string, T> {
+function loadBucketMap<T>(
+  key: string,
+  parseEntry: (value: unknown) => T | null,
+): Record<string, T> {
   try {
     const raw = localStorage.getItem(key);
     if (raw !== null) {

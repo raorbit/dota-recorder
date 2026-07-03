@@ -107,144 +107,148 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
   };
 
   return {
-  matches: [],
-  clips: [],
-  counts: EMPTY_COUNTS,
-  status: null,
-  loadState: 'idle',
+    matches: [],
+    clips: [],
+    counts: EMPTY_COUNTS,
+    status: null,
+    loadState: 'idle',
 
-  bucket: 'ranked',
-  resultFilter: 'all',
-  search: '',
-  dateFilter: null,
-  selectedMatchId: null,
-  selectedClipId: null,
-  clipPlayToken: 0,
+    bucket: 'ranked',
+    resultFilter: 'all',
+    search: '',
+    dateFilter: null,
+    selectedMatchId: null,
+    selectedClipId: null,
+    clipPlayToken: 0,
 
-  setBucket: (bucket) => set({ bucket }),
-  setResultFilter: (resultFilter) => set({ resultFilter }),
-  setSearch: (search) => set({ search }),
-  setDateFilter: (dateFilter) => set({ dateFilter }),
-  // A plain match selection always plays the full VOD, so clear any clip auto-play.
-  selectMatch: (selectedMatchId) => set({ selectedMatchId, selectedClipId: null }),
-  // Open the clip's parent match in the player and flag the clip for auto-play. Bump clipPlayToken
-  // every call (even for the same clip id) so re-selecting a clip after "Full VOD" replays it.
-  selectClip: (clip) =>
-    set((s) => ({
-      selectedMatchId: clip.parentMatchId,
-      selectedClipId: clip.id,
-      clipPlayToken: s.clipPlayToken + 1,
-    })),
-  setStatus: (status) => set({ status }),
+    setBucket: (bucket) => set({ bucket }),
+    setResultFilter: (resultFilter) => set({ resultFilter }),
+    setSearch: (search) => set({ search }),
+    setDateFilter: (dateFilter) => set({ dateFilter }),
+    // A plain match selection always plays the full VOD, so clear any clip auto-play.
+    selectMatch: (selectedMatchId) => set({ selectedMatchId, selectedClipId: null }),
+    // Open the clip's parent match in the player and flag the clip for auto-play. Bump clipPlayToken
+    // every call (even for the same clip id) so re-selecting a clip after "Full VOD" replays it.
+    selectClip: (clip) =>
+      set((s) => ({
+        selectedMatchId: clip.parentMatchId,
+        selectedClipId: clip.id,
+        clipPlayToken: s.clipPlayToken + 1,
+      })),
+    setStatus: (status) => set({ status }),
 
-  // Star/unstar a match: flip it locally for instant feedback, then persist via
-  // PATCH /matches/{id}. Starred recordings are exempt from the retention sweep, so
-  // this is the lever that copy promises ("oldest unstarred removed first"). Both the
-  // optimistic flip and the on-failure revert are functional per-row updates (not a
-  // whole-array snapshot) so a list reload landing during the in-flight PATCH — a
-  // coalesced match.* event fires load() every ~200ms — isn't clobbered on revert.
-  // Once the PATCH commits, invalidate any in-flight load(): one whose GET ran before the commit
-  // would otherwise resolve afterward with the pre-flip star state and clobber the optimistic flip
-  // via its whole-array replace. (A load that resolves in the brief flip->commit window can still
-  // flicker the flip, but the 200ms coalesced reload reconciles it — inherent to optimistic UI over
-  // polling; deleteMatch's guard is tighter because the server delete completes first.)
-  toggleStar: async (id, starred) => {
-    set((s) => ({ matches: s.matches.map((m) => (m.id === id ? { ...m, starred } : m)) }));
-    try {
-      await setStarred(id, starred);
-      invalidatePendingLoad();
-    } catch {
-      set((s) => ({ matches: s.matches.map((m) => (m.id === id ? { ...m, starred: !starred } : m)) }));
-    }
-  },
-  // Optimistic clip star toggle, mirroring toggleStar: flip locally for instant feedback, persist via
-  // PATCH /clips/{id}, revert on failure. invalidatePendingLoad keeps an in-flight load() from
-  // clobbering the flip with pre-toggle data.
-  toggleClipStar: async (id, starred) => {
-    set((s) => ({ clips: s.clips.map((c) => (c.id === id ? { ...c, starred } : c)) }));
-    try {
-      await setClipStarred(id, starred);
-      invalidatePendingLoad();
-    } catch {
-      set((s) => ({ clips: s.clips.map((c) => (c.id === id ? { ...c, starred: !starred } : c)) }));
-    }
-  },
-
-  // Permanently delete a match (row + markers/pauses + .mp4 + thumbnail). Pessimistic:
-  // delete server-side FIRST, then drop it from the list and clear the selection if it
-  // was open, and refresh the bucket badges. Rethrows so the caller can surface a failure.
-  deleteMatch: async (id) => {
-    await apiDeleteMatch(id);
-    // A coalesced match.* frame fires load() every ~200ms, so a load() that fetched the list BEFORE
-    // this delete committed server-side may still be in flight; invalidate it so it can't resurrect
-    // the just-deleted row (and so it doesn't leave the table wedged on the spinner).
-    invalidatePendingLoad();
-    set((s) => ({
-      matches: s.matches.filter((m) => m.id !== id),
-      // Deleting a match cascades its clips server-side; drop them from the Clips bucket list too, and
-      // clear a clip-auto-play that pointed here.
-      clips: s.clips.filter((c) => c.parentMatchId !== id),
-      selectedMatchId: s.selectedMatchId === id ? null : s.selectedMatchId,
-      selectedClipId: s.selectedMatchId === id ? null : s.selectedClipId,
-    }));
-    try {
-      set({ counts: await fetchBucketCounts() });
-    } catch {
-      /* leave the stale badge; the next load() reconciles */
-    }
-  },
-
-  // Bulk-delete (table multi-select). Deletes each server-side first — sequentially, bounded by the
-  // small selection size — then drops all survivors in ONE state update and refreshes counts once
-  // (rather than the per-row count fetch deleteMatch does). A single failed delete is skipped so the
-  // rest still go; the next load() reconciles any straggler.
-  deleteMatches: async (ids) => {
-    const deleted = new Set<number>();
-    for (const id of ids) {
+    // Star/unstar a match: flip it locally for instant feedback, then persist via
+    // PATCH /matches/{id}. Starred recordings are exempt from the retention sweep, so
+    // this is the lever that copy promises ("oldest unstarred removed first"). Both the
+    // optimistic flip and the on-failure revert are functional per-row updates (not a
+    // whole-array snapshot) so a list reload landing during the in-flight PATCH — a
+    // coalesced match.* event fires load() every ~200ms — isn't clobbered on revert.
+    // Once the PATCH commits, invalidate any in-flight load(): one whose GET ran before the commit
+    // would otherwise resolve afterward with the pre-flip star state and clobber the optimistic flip
+    // via its whole-array replace. (A load that resolves in the brief flip->commit window can still
+    // flicker the flip, but the 200ms coalesced reload reconciles it — inherent to optimistic UI over
+    // polling; deleteMatch's guard is tighter because the server delete completes first.)
+    toggleStar: async (id, starred) => {
+      set((s) => ({ matches: s.matches.map((m) => (m.id === id ? { ...m, starred } : m)) }));
       try {
-        await apiDeleteMatch(id);
-        deleted.add(id);
+        await setStarred(id, starred);
+        invalidatePendingLoad();
       } catch {
-        /* skip this one; the rest still delete and the next load() reconciles */
+        set((s) => ({
+          matches: s.matches.map((m) => (m.id === id ? { ...m, starred: !starred } : m)),
+        }));
       }
-    }
-    if (deleted.size === 0) return;
-    invalidatePendingLoad();
-    set((s) => ({
-      matches: s.matches.filter((m) => !deleted.has(m.id)),
-      clips: s.clips.filter((c) => !deleted.has(c.parentMatchId)),
-      selectedMatchId:
-        s.selectedMatchId !== null && deleted.has(s.selectedMatchId) ? null : s.selectedMatchId,
-      selectedClipId:
-        s.selectedMatchId !== null && deleted.has(s.selectedMatchId) ? null : s.selectedClipId,
-    }));
-    try {
-      set({ counts: await fetchBucketCounts() });
-    } catch {
-      /* leave the stale badge; the next load() reconciles */
-    }
-  },
+    },
+    // Optimistic clip star toggle, mirroring toggleStar: flip locally for instant feedback, persist via
+    // PATCH /clips/{id}, revert on failure. invalidatePendingLoad keeps an in-flight load() from
+    // clobbering the flip with pre-toggle data.
+    toggleClipStar: async (id, starred) => {
+      set((s) => ({ clips: s.clips.map((c) => (c.id === id ? { ...c, starred } : c)) }));
+      try {
+        await setClipStarred(id, starred);
+        invalidatePendingLoad();
+      } catch {
+        set((s) => ({
+          clips: s.clips.map((c) => (c.id === id ? { ...c, starred: !starred } : c)),
+        }));
+      }
+    },
 
-  load: async () => {
-    const token = ++loadToken;
-    set({ loadState: 'loading' });
-    // Matches, counts, and clips are independent; settle all three so one failing
-    // endpoint (e.g. counts not yet implemented) does not blank the whole screen.
-    const [matchesRes, countsRes, clipsRes] = await Promise.allSettled([
-      fetchMatches(),
-      fetchBucketCounts(),
-      fetchAllClips(),
-    ]);
+    // Permanently delete a match (row + markers/pauses + .mp4 + thumbnail). Pessimistic:
+    // delete server-side FIRST, then drop it from the list and clear the selection if it
+    // was open, and refresh the bucket badges. Rethrows so the caller can surface a failure.
+    deleteMatch: async (id) => {
+      await apiDeleteMatch(id);
+      // A coalesced match.* frame fires load() every ~200ms, so a load() that fetched the list BEFORE
+      // this delete committed server-side may still be in flight; invalidate it so it can't resurrect
+      // the just-deleted row (and so it doesn't leave the table wedged on the spinner).
+      invalidatePendingLoad();
+      set((s) => ({
+        matches: s.matches.filter((m) => m.id !== id),
+        // Deleting a match cascades its clips server-side; drop them from the Clips bucket list too, and
+        // clear a clip-auto-play that pointed here.
+        clips: s.clips.filter((c) => c.parentMatchId !== id),
+        selectedMatchId: s.selectedMatchId === id ? null : s.selectedMatchId,
+        selectedClipId: s.selectedMatchId === id ? null : s.selectedClipId,
+      }));
+      try {
+        set({ counts: await fetchBucketCounts() });
+      } catch {
+        /* leave the stale badge; the next load() reconciles */
+      }
+    },
 
-    // A newer load() superseded this one while it was in flight (a burst of match.*
-    // frames each fire load()); drop the stale result so it can't clobber fresher data.
-    if (token !== loadToken) return;
+    // Bulk-delete (table multi-select). Deletes each server-side first — sequentially, bounded by the
+    // small selection size — then drops all survivors in ONE state update and refreshes counts once
+    // (rather than the per-row count fetch deleteMatch does). A single failed delete is skipped so the
+    // rest still go; the next load() reconciles any straggler.
+    deleteMatches: async (ids) => {
+      const deleted = new Set<number>();
+      for (const id of ids) {
+        try {
+          await apiDeleteMatch(id);
+          deleted.add(id);
+        } catch {
+          /* skip this one; the rest still delete and the next load() reconciles */
+        }
+      }
+      if (deleted.size === 0) return;
+      invalidatePendingLoad();
+      set((s) => ({
+        matches: s.matches.filter((m) => !deleted.has(m.id)),
+        clips: s.clips.filter((c) => !deleted.has(c.parentMatchId)),
+        selectedMatchId:
+          s.selectedMatchId !== null && deleted.has(s.selectedMatchId) ? null : s.selectedMatchId,
+        selectedClipId:
+          s.selectedMatchId !== null && deleted.has(s.selectedMatchId) ? null : s.selectedClipId,
+      }));
+      try {
+        set({ counts: await fetchBucketCounts() });
+      } catch {
+        /* leave the stale badge; the next load() reconciles */
+      }
+    },
 
-    // A rejected individual fetch keeps the PREVIOUS slice (not empty) so one failing endpoint —
-    // likeliest right after a match records — can't blank the table and tear down the open video;
-    // selection survival is judged only against a fetch that actually succeeded. See mergeLibraryLoad.
-    set(mergeLibraryLoad(matchesRes, countsRes, clipsRes, get()));
-  },
+    load: async () => {
+      const token = ++loadToken;
+      set({ loadState: 'loading' });
+      // Matches, counts, and clips are independent; settle all three so one failing
+      // endpoint (e.g. counts not yet implemented) does not blank the whole screen.
+      const [matchesRes, countsRes, clipsRes] = await Promise.allSettled([
+        fetchMatches(),
+        fetchBucketCounts(),
+        fetchAllClips(),
+      ]);
+
+      // A newer load() superseded this one while it was in flight (a burst of match.*
+      // frames each fire load()); drop the stale result so it can't clobber fresher data.
+      if (token !== loadToken) return;
+
+      // A rejected individual fetch keeps the PREVIOUS slice (not empty) so one failing endpoint —
+      // likeliest right after a match records — can't blank the table and tear down the open video;
+      // selection survival is judged only against a fetch that actually succeeded. See mergeLibraryLoad.
+      set(mergeLibraryLoad(matchesRes, countsRes, clipsRes, get()));
+    },
   };
 });
 
@@ -344,9 +348,6 @@ export function startLibrary(): () => void {
 // counts. A newly-enriched row thus leaves Unsorted for its real bucket and the
 // badge counts update in one shot. load() replaces (not increments) state, so
 // duplicate frames for the same id are naturally idempotent — no double-counting.
-function subscribeToMatchEvents(
-  socket: StatusSocket,
-  onMatchEvent: () => void,
-): () => void {
+function subscribeToMatchEvents(socket: StatusSocket, onMatchEvent: () => void): () => void {
   return socket.onEvent(() => onMatchEvent());
 }

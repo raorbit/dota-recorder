@@ -87,7 +87,11 @@ describe('storageInfoOf', () => {
   });
   it('returns the folder as the label and the full path as the title', () => {
     const info = storageInfoOf(mk({ id: 1, videoPath: 'D:\\dota-archive\\m.mp4' }));
-    expect(info).toEqual({ label: 'D:\\dota-archive', removed: false, title: 'D:\\dota-archive\\m.mp4' });
+    expect(info).toEqual({
+      label: 'D:\\dota-archive',
+      removed: false,
+      title: 'D:\\dota-archive\\m.mp4',
+    });
   });
 });
 
@@ -195,9 +199,9 @@ describe('sortMatches', () => {
     // sink below older enriched rows under the default date-desc sort — it falls back to createdAt.
     const olderEnriched = mk({ id: 1, playedAt: 1000, createdAt: 1000 });
     const freshUnenriched = mk({ id: 2, playedAt: null, createdAt: 5000 });
-    expect(sortMatches([olderEnriched, freshUnenriched], dateCol, 'desc').map((m) => m.id)).toEqual([
-      2, 1,
-    ]);
+    expect(sortMatches([olderEnriched, freshUnenriched], dateCol, 'desc').map((m) => m.id)).toEqual(
+      [2, 1],
+    );
   });
 });
 
@@ -209,7 +213,14 @@ describe('defaultVisibleKeysFor', () => {
   });
   it('uses the base set for non-ranked tabs and base+mmr for ranked', () => {
     expect(defaultVisibleKeysFor('turbo')).toEqual(['result', 'kda', 'gpm', 'mode', 'date']);
-    expect(defaultVisibleKeysFor('ranked')).toEqual(['result', 'kda', 'gpm', 'mode', 'date', 'mmr']);
+    expect(defaultVisibleKeysFor('ranked')).toEqual([
+      'result',
+      'kda',
+      'gpm',
+      'mode',
+      'date',
+      'mmr',
+    ]);
   });
 });
 

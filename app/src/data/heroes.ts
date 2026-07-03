@@ -12,8 +12,7 @@ const HERO_PREFIX = 'npc_dota_hero_';
 // Valve's dota_react hero portraits (landscape). Same CDN OpenDota links to. Allowed in
 // the renderer CSP img-src; if it's unreachable (offline) the <img> onError degrades to
 // the placeholder chip.
-const HERO_IMG_BASE =
-  'https://cdn.cloudflare.steamstatic.com/apps/dota2/images/dota_react/heroes/';
+const HERO_IMG_BASE = 'https://cdn.cloudflare.steamstatic.com/apps/dota2/images/dota_react/heroes/';
 
 // slug -> localized name. Only slugs whose pretty name differs from a naive title-case
 // MUST be here; the rest are included for completeness/offline-correctness.

@@ -637,7 +637,11 @@ export type ClipEvent =
   | { readonly type: 'clip.created'; readonly payload: Clip }
   | {
       readonly type: 'clip.progress';
-      readonly payload: { readonly clipId: number; readonly parentMatchId: number; readonly percent: number };
+      readonly payload: {
+        readonly clipId: number;
+        readonly parentMatchId: number;
+        readonly percent: number;
+      };
     }
   | {
       readonly type: 'clip.ready';

@@ -209,7 +209,10 @@ describe('JvmSupervisor', () => {
 
   it('scrubs the bridge token from emitted log lines', async () => {
     const lines: string[] = [];
-    const sup = new JvmSupervisor({ bridgeToken: 'secrettoken', onLog: (line) => lines.push(line) });
+    const sup = new JvmSupervisor({
+      bridgeToken: 'secrettoken',
+      onLog: (line) => lines.push(line),
+    });
     await sup.start();
 
     children[0].stdout.emit('data', Buffer.from('before secrettoken after\n'));
@@ -270,11 +273,9 @@ describe('JvmSupervisor.stop — hard-kill escalation', () => {
       // Graceful SIGTERM is attempted FIRST (not a straight SIGKILL)...
       expect(children[0].kill).toHaveBeenCalledWith('SIGTERM');
       // ...then the hard tree-kill via taskkill — the kill-on-quit guarantee that frees :3223/:3224.
-      expect(spawnMock).toHaveBeenCalledWith(
-        'taskkill',
-        ['/PID', '4321', '/T', '/F'],
-        { windowsHide: true },
-      );
+      expect(spawnMock).toHaveBeenCalledWith('taskkill', ['/PID', '4321', '/T', '/F'], {
+        windowsHide: true,
+      });
     } finally {
       Object.defineProperty(process, 'platform', { value: platform, configurable: true });
     }

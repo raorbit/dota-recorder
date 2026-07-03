@@ -17,7 +17,17 @@
 // cache and re-downloads + re-verifies the zip against FFMPEG_SHA256 every time — the
 // supply-chain guarantee rides on that hash, not on the (untracked) cached binary.
 
-import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  createWriteStream,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -30,7 +40,8 @@ const FFMPEG_VERSION = process.env.FFMPEG_VERSION ?? 'release-essentials';
 // printed sha here (or override via the FFMPEG_SHA256 env at build time).
 const FFMPEG_SHA256 =
   process.env.FFMPEG_SHA256 ?? 'db580001caa24ac104c8cb856cd113a87b0a443f7bdf47d8c12b1d740584a2ec';
-const FFMPEG_URL = process.env.FFMPEG_URL ?? 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip';
+const FFMPEG_URL =
+  process.env.FFMPEG_URL ?? 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip';
 
 const repoRoot = path.resolve(import.meta.dirname, '..');
 const outDir = path.join(repoRoot, 'build-resources', 'ffmpeg');
@@ -52,8 +63,10 @@ async function main() {
     console.log(`Downloading ${FFMPEG_URL}`);
     const res = await fetch(FFMPEG_URL, { redirect: 'follow' });
     if (!res.ok || !res.body) {
-      throw new Error(`Download failed: ${res.status} ${res.statusText} for ${FFMPEG_URL}\n` +
-        `(check FFMPEG_URL — the release asset URL must exist)`);
+      throw new Error(
+        `Download failed: ${res.status} ${res.statusText} for ${FFMPEG_URL}\n` +
+          `(check FFMPEG_URL — the release asset URL must exist)`,
+      );
     }
     await pipeline(Readable.fromWeb(res.body), createWriteStream(zipPath));
     console.log(`Downloaded ${(statSync(zipPath).size / 1e6).toFixed(1)} MB`);
@@ -63,12 +76,16 @@ async function main() {
 
   const sha = createHash('sha256').update(readFileSync(zipPath)).digest('hex');
   if (!FFMPEG_SHA256) {
-    console.warn(`\n[!] FFMPEG_SHA256 is not pinned. Computed sha256:\n    ${sha}\n` +
-      `    Paste it into FFMPEG_SHA256 in scripts/fetch-ffmpeg.mjs to enable strict verification.\n`);
+    console.warn(
+      `\n[!] FFMPEG_SHA256 is not pinned. Computed sha256:\n    ${sha}\n` +
+        `    Paste it into FFMPEG_SHA256 in scripts/fetch-ffmpeg.mjs to enable strict verification.\n`,
+    );
   } else if (sha.toLowerCase() !== FFMPEG_SHA256.toLowerCase()) {
     rmSync(zipPath, { force: true });
-    throw new Error(`sha256 mismatch for ${zipName}\n  expected ${FFMPEG_SHA256}\n  got      ${sha}\n` +
-      `(deleted the bad download; re-run)`);
+    throw new Error(
+      `sha256 mismatch for ${zipName}\n  expected ${FFMPEG_SHA256}\n  got      ${sha}\n` +
+        `(deleted the bad download; re-run)`,
+    );
   } else {
     console.log(`sha256 verified.`);
   }
@@ -80,16 +97,25 @@ async function main() {
   // Pass the paths via env vars and read them back with $env: inside the command — never
   // interpolate them into the PowerShell string, so paths containing apostrophes, spaces
   // or other special characters can't produce an unbalanced/invalid command.
-  execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command',
-    'Expand-Archive -LiteralPath $env:DOTAREC_ZIP -DestinationPath $env:DOTAREC_DEST -Force'],
-    { stdio: 'inherit', env: { ...process.env, DOTAREC_ZIP: zipPath, DOTAREC_DEST: extractDir } });
+  execFileSync(
+    'powershell',
+    [
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      'Expand-Archive -LiteralPath $env:DOTAREC_ZIP -DestinationPath $env:DOTAREC_DEST -Force',
+    ],
+    { stdio: 'inherit', env: { ...process.env, DOTAREC_ZIP: zipPath, DOTAREC_DEST: extractDir } },
+  );
 
   // These static zips wrap everything in a versioned top-level dir (e.g.
   // ffmpeg-7.1-essentials_build/bin/ffmpeg.exe). Locate bin/ffmpeg.exe wherever it lands
   // and copy ONLY that one binary out — we don't bundle the rest of the build.
   const found = findFfmpegExe(extractDir);
   if (!found) {
-    throw new Error(`Extraction did not produce a bin/ffmpeg.exe under ${extractDir} — the ffmpeg zip layout may have changed.`);
+    throw new Error(
+      `Extraction did not produce a bin/ffmpeg.exe under ${extractDir} — the ffmpeg zip layout may have changed.`,
+    );
   }
   rmSync(ffmpegExe, { force: true });
   renameSync(found, ffmpegExe);
@@ -110,11 +136,17 @@ function findFfmpegExe(dir) {
     if (entry.isDirectory()) {
       const hit = findFfmpegExe(p);
       if (hit) return hit;
-    } else if (entry.name.toLowerCase() === 'ffmpeg.exe' && path.basename(dir).toLowerCase() === 'bin') {
+    } else if (
+      entry.name.toLowerCase() === 'ffmpeg.exe' &&
+      path.basename(dir).toLowerCase() === 'bin'
+    ) {
       return p;
     }
   }
   return null;
 }
 
-main().catch((e) => { console.error(e.message ?? e); process.exit(1); });
+main().catch((e) => {
+  console.error(e.message ?? e);
+  process.exit(1);
+});

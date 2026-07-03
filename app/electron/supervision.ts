@@ -71,7 +71,9 @@ export class SupervisionController {
     if (this.deps.isShuttingDown()) return;
     this.deps.log(`[obs] crash detected (${formatExit(info)})`);
     if (this.obsRestartAttempts >= this.maxRestarts) {
-      this.deps.log('[obs] exceeded restart attempts; leaving OBS down (recorder will show not ready)');
+      this.deps.log(
+        '[obs] exceeded restart attempts; leaving OBS down (recorder will show not ready)',
+      );
       return;
     }
     this.obsRestartAttempts += 1;
@@ -103,7 +105,9 @@ export class SupervisionController {
       // Best-effort: tearing down the orphaned OBS must never abort the core restart. A flaky
       // stopObs() rejection here would otherwise leave recording dead silently on a tray-hidden app.
       await this.deps.stopObs().catch((err) => {
-        this.deps.log(`[obs] stop during core crash failed: ${err instanceof Error ? err.message : String(err)}`);
+        this.deps.log(
+          `[obs] stop during core crash failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
       });
       // Restart loop: a crash that arrives WHILE startCore() is in flight is captured in
       // corePendingRecrash and re-loops here, so the remaining restart budget is actually consumed
@@ -117,7 +121,9 @@ export class SupervisionController {
           return;
         }
         this.coreRestartAttempts += 1;
-        this.deps.log(`[core] restarting (attempt ${this.coreRestartAttempts}/${this.maxRestarts})`);
+        this.deps.log(
+          `[core] restarting (attempt ${this.coreRestartAttempts}/${this.maxRestarts})`,
+        );
         try {
           await this.deps.startCore();
           if (this.corePendingRecrash) {
@@ -135,7 +141,9 @@ export class SupervisionController {
           void this.launchObs();
           return; // success: leave the loop and the handler
         } catch (err) {
-          this.deps.log(`[core] restart failed: ${err instanceof Error ? err.message : String(err)}`);
+          this.deps.log(
+            `[core] restart failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
           // startCore() does NOT kill its child on a health-timeout, so a restarted-but-unhealthy JVM
           // would linger holding the loopback ports. Reap it before retrying or giving up.
           await this.deps.stopCore().catch(() => {});

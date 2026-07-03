@@ -272,11 +272,24 @@ export class ObsSupervisor {
     const port = String(this.port);
     // Idempotent: drop any prior rule of this name (ignoring "not found"), then add a fresh block.
     await this.runNetsh([
-      'advfirewall', 'firewall', 'delete', 'rule', `name=${name}`, 'protocol=TCP', `localport=${port}`,
+      'advfirewall',
+      'firewall',
+      'delete',
+      'rule',
+      `name=${name}`,
+      'protocol=TCP',
+      `localport=${port}`,
     ]);
     const added = await this.runNetsh([
-      'advfirewall', 'firewall', 'add', 'rule',
-      `name=${name}`, 'dir=in', 'action=block', 'protocol=TCP', `localport=${port}`,
+      'advfirewall',
+      'firewall',
+      'add',
+      'rule',
+      `name=${name}`,
+      'dir=in',
+      'action=block',
+      'protocol=TCP',
+      `localport=${port}`,
     ]);
     this.onLog(
       added

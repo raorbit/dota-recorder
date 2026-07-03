@@ -54,7 +54,8 @@ function resolveToken() {
   if (args['no-token']) return '';
   if (typeof args.token === 'string') return args.token;
   try {
-    const appData = process.env.APPDATA || path.join(process.env.USERPROFILE || '.', 'AppData', 'Roaming');
+    const appData =
+      process.env.APPDATA || path.join(process.env.USERPROFILE || '.', 'AppData', 'Roaming');
     const file = path.join(appData, 'dota-recorder', 'settings.json');
     const json = JSON.parse(readFileSync(file, 'utf8'));
     if (json && typeof json.gsiAuthToken === 'string' && json.gsiAuthToken.trim()) {
@@ -72,7 +73,16 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ── frame builder (shaped like a real Dota Hero-Demo payload) ───────────────────
 let providerTs = 1781827370; // provider.timestamp seconds; advance per frame (no Date.now — keep deterministic-ish)
-function frame({ gameState, activity = 'playing', kills = 0, deaths = 0, assists = 0, alive = true, paused = false, clock = 0 }) {
+function frame({
+  gameState,
+  activity = 'playing',
+  kills = 0,
+  deaths = 0,
+  assists = 0,
+  alive = true,
+  paused = false,
+  clock = 0,
+}) {
   providerTs += 1;
   const body = {
     provider: { name: 'Dota 2', appid: 570, version: 48, timestamp: providerTs },
@@ -146,39 +156,59 @@ async function repeat(label, n, opts) {
 
 // ── scenarios ───────────────────────────────────────────────────────────────────
 async function heartbeat() {
-  console.log(`\nHEARTBEAT scenario → ${URL} @ ${HZ}Hz${TOKEN ? ' (authenticated)' : ' (no token)'}`);
-  console.log('Idle menu frames — the FSM no-ops, so NO recording. Proves ingest + auth + heartbeat.\n');
+  console.log(
+    `\nHEARTBEAT scenario → ${URL} @ ${HZ}Hz${TOKEN ? ' (authenticated)' : ' (no token)'}`,
+  );
+  console.log(
+    'Idle menu frames — the FSM no-ops, so NO recording. Proves ingest + auth + heartbeat.\n',
+  );
   // Non-arming state + activity 'menu' → never arms (isArmState=false, not GAME_IN_PROGRESS+playing).
   await repeat('idle', 15, { gameState: 'DOTA_GAMERULES_STATE_INIT', activity: 'menu' });
   console.log('\nDone. Check: GET http://%s:%d/status → gsi.connected should be true', HOST, 3224);
-  console.log('(give it a few seconds; the heartbeat goes stale after the configured GSI-silence grace).');
+  console.log(
+    '(give it a few seconds; the heartbeat goes stale after the configured GSI-silence grace).',
+  );
 }
 
 async function match() {
   console.log(`\nMATCH scenario → ${URL} @ ${HZ}Hz${TOKEN ? ' (authenticated)' : ' (no token)'}`);
-  console.log('Drives the full recording brain. Needs OBS running (via the app) or you get a loud OBS error.\n');
+  console.log(
+    'Drives the full recording brain. Needs OBS running (via the app) or you get a loud OBS error.\n',
+  );
 
   // 1) Draft → arm + StartRecord early (so OBS warms up before the action).
-  await repeat('hero-selection', 10, { gameState: 'DOTA_GAMERULES_STATE_HERO_SELECTION', clock: -75 });
+  await repeat('hero-selection', 10, {
+    gameState: 'DOTA_GAMERULES_STATE_HERO_SELECTION',
+    clock: -75,
+  });
   await repeat('pre-game', 6, { gameState: 'DOTA_GAMERULES_STATE_PRE_GAME', clock: -15 });
 
   // 2) Game in progress — accumulate clock; tag 2 kills and 1 death.
   const GIP = 'DOTA_GAMERULES_STATE_GAME_IN_PROGRESS';
-  await repeat('playing', 20, { gameState: GIP, clock: 30 });            // settle
+  await repeat('playing', 20, { gameState: GIP, clock: 30 }); // settle
   await repeat('first-kill', 6, { gameState: GIP, kills: 1, clock: 120 }); // kills 0→1 → kill marker
-  await repeat('second-kill', 6, { gameState: GIP, kills: 2, clock: 210 });// kills 1→2 → kill marker
+  await repeat('second-kill', 6, { gameState: GIP, kills: 2, clock: 210 }); // kills 1→2 → kill marker
   // death: alive true → false (falling edge → death marker), deaths 0→1, then respawn.
   await repeat('alive', 4, { gameState: GIP, kills: 2, deaths: 0, alive: true, clock: 300 });
   await repeat('DEATH', 4, { gameState: GIP, kills: 2, deaths: 1, alive: false, clock: 320 });
   await repeat('respawn', 6, { gameState: GIP, kills: 2, deaths: 1, alive: true, clock: 340 });
 
   // 3) POST_GAME → stop + finalize (match row + markers + thumbnail written).
-  await repeat('post-game', 4, { gameState: 'DOTA_GAMERULES_STATE_POST_GAME', kills: 2, deaths: 1, clock: 420 });
+  await repeat('post-game', 4, {
+    gameState: 'DOTA_GAMERULES_STATE_POST_GAME',
+    kills: 2,
+    deaths: 1,
+    clock: 420,
+  });
 
   console.log('\nDone. Expect in core.log:');
-  console.log('  "Recording started (surrogate N), anchor=..."  then  "OBS recording confirmed started (OUTPUT_STARTED)"');
+  console.log(
+    '  "Recording started (surrogate N), anchor=..."  then  "OBS recording confirmed started (OUTPUT_STARTED)"',
+  );
   console.log('Then a finalized match row + ~2 kill markers + ~1 death marker.');
-  console.log('Verify with plans/validation-queries.sql, or open the match in the browse UI and click a marker.');
+  console.log(
+    'Verify with plans/validation-queries.sql, or open the match in the browse UI and click a marker.',
+  );
 }
 
 const scenarios = { heartbeat, match };
