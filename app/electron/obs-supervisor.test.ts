@@ -343,4 +343,38 @@ describe('ObsSupervisor', () => {
     ]);
     expect(opts.cwd).toMatch(/bin[\\/]64bit$/);
   });
+
+  it('scrubs the websocket password from emitted log lines', async () => {
+    // OBS echoes its --websocket_password arg on startup; the password must be masked before it lands
+    // in the durable electron.log. baseOpts.password is 'pw'.
+    const lines: string[] = [];
+    const sup = new ObsSupervisor({ ...baseOpts, onLog: (line) => lines.push(line) });
+    await sup.start();
+
+    children[0].stdout.emit('data', Buffer.from('starting websocket with password pw here\n'));
+
+    expect(lines).toContain('starting websocket with password *** here');
+  });
+
+  it('scrubs the bridge token from emitted log lines', async () => {
+    const lines: string[] = [];
+    const sup = new ObsSupervisor({ ...baseOpts, bridgeToken: 'secrettoken', onLog: (line) => lines.push(line) });
+    await sup.start();
+
+    children[0].stdout.emit('data', Buffer.from('before secrettoken after\n'));
+
+    expect(lines).toContain('before *** after');
+  });
+
+  it('does not corrupt log lines when the password is an empty string', async () => {
+    // Regression guard (mirrors jvm-supervisor): an empty secret must NOT split('') the line into
+    // per-character garbage — the truthiness guard skips the scrub instead.
+    const lines: string[] = [];
+    const sup = new ObsSupervisor({ ...baseOpts, password: '', onLog: (line) => lines.push(line) });
+    await sup.start();
+
+    children[0].stdout.emit('data', Buffer.from('hello world\n'));
+
+    expect(lines).toContain('hello world');
+  });
 });
