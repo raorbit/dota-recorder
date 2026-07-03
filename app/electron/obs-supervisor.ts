@@ -295,7 +295,15 @@ export class ObsSupervisor {
   private emitLines(buf: Buffer): void {
     const text = buf.toString('utf8');
     for (const line of text.split(/\r?\n/)) {
-      if (line.length > 0) this.onLog(line);
+      if (line.length === 0) continue;
+      // Secret hygiene (mirrors JvmSupervisor.emitLines): OBS echoes its --websocket_password arg on
+      // startup and can surface the bridge token if it ever logs the core's env, and electron.log is
+      // durable and often shared in bug reports. Scrub both before writing. Each split is guarded on a
+      // truthy secret — splitting on '' explodes the line into per-character garbage.
+      let safe = line;
+      if (this.password) safe = safe.split(this.password).join('***');
+      if (this.bridgeToken) safe = safe.split(this.bridgeToken).join('***');
+      this.onLog(safe);
     }
   }
 
