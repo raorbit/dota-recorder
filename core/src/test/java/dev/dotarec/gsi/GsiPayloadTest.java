@@ -33,6 +33,10 @@ class GsiPayloadTest {
         assertThat(frame.paused()).isFalse();
         // map.matchid is the STRING "0" (Hero Demo) -> parsed to 0L, not an error.
         assertThat(frame.matchId()).isZero();
+        // map.name is carried through verbatim; "hero_demo_main" is THE Hero Demo signal (matchid 0
+        // alone also covers private lobbies, so isHeroDemo must key off the map name).
+        assertThat(frame.mapName()).isEqualTo("hero_demo_main");
+        assertThat(frame.isHeroDemo()).isTrue();
 
         assertThat(frame.heroPresent()).isTrue();
         assertThat(frame.alive()).isTrue();
@@ -71,6 +75,9 @@ class GsiPayloadTest {
         assertThat(frame.alive()).isFalse();
         assertThat(frame.hero()).isNull();
         assertThat(frame.activity()).isNull();
+        // No map.name in this heartbeat shape -> null, which must read as non-demo (not an NPE).
+        assertThat(frame.mapName()).isNull();
+        assertThat(frame.isHeroDemo()).isFalse();
         // clock_time is negative pre-horn; carried through, not clamped.
         assertThat(frame.gameClock()).isEqualTo(-75);
         assertThat(frame.kills()).isZero();

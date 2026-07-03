@@ -37,6 +37,7 @@ public record GsiFrame(
         boolean alive,
         boolean playerPresent,
         long matchId,
+        String mapName,
         String hero,
         int heroId,
         String activity,
@@ -45,4 +46,16 @@ public record GsiFrame(
         int assists,
         int radiantScore,
         int direScore) {
+
+    /** The {@code map.name} Dota reports for Hero Demo mode (captured live; see the GSI fixture). */
+    public static final String HERO_DEMO_MAP = "hero_demo_main";
+
+    /**
+     * True when this frame comes from Hero Demo mode. Keyed off {@code map.name} rather than
+     * {@code matchId == 0}, which a private lobby also reports and must not be treated as a demo.
+     * {@code mapName} is null on heartbeat/menu frames (no map block), which is safely non-demo.
+     */
+    public boolean isHeroDemo() {
+        return HERO_DEMO_MAP.equals(mapName);
+    }
 }

@@ -80,6 +80,9 @@ public class GsiPayload {
         int gameClock = map != null ? map.clockTime : 0;
         boolean paused = map != null && map.paused;
         long matchId = parseMatchId(map != null ? map.matchid : null);
+        // map.name distinguishes Hero Demo ("hero_demo_main") from a real match; null on
+        // heartbeat/menu frames (no map block), which GsiFrame.isHeroDemo treats as non-demo.
+        String mapName = map != null ? map.name : null;
         int radiantScore = map != null ? map.radiantScore : 0;
         int direScore = map != null ? map.direScore : 0;
 
@@ -104,6 +107,7 @@ public class GsiPayload {
                 alive,
                 playerPresent,
                 matchId,
+                mapName,
                 heroName,
                 heroId,
                 activity,
