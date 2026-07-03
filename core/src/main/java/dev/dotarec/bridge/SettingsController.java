@@ -7,6 +7,7 @@ import dev.dotarec.config.SettingsStore.Settings;
 import dev.dotarec.config.SettingsStore.StorageLocation;
 import dev.dotarec.config.StorageRoots;
 import dev.dotarec.obs.ObsController;
+import dev.dotarec.obs.ObsSceneConfigurer;
 import dev.dotarec.obs.setup.ObsConfigWriter;
 import java.util.List;
 import java.util.Set;
@@ -48,7 +49,9 @@ public class SettingsController {
             Set.of("hybrid_mp4", "fragmented_mp4", "mkv", "mov");
     // Audio sources are also OBS-affecting: an unknown kind makes reconcile skip the source, which can
     // leave isReady() false ("records nothing"). Validate it like the other OBS-affecting fields.
-    private static final Set<String> ALLOWED_AUDIO_KIND = Set.of("application", "output", "input");
+    // Sourced from the same contract-kind set the reconcile/enumeration paths map, so a validated kind
+    // is provably one the reconciler can turn into an OBS input.
+    private static final Set<String> ALLOWED_AUDIO_KIND = ObsSceneConfigurer.CONTRACT_AUDIO_KINDS;
 
     private final SettingsStore store;
     private final ObsController obsController;

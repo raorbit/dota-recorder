@@ -47,10 +47,11 @@ import org.springframework.stereotype.Component;
  * program-scene failures are fatal (throw {@link ObsException}); the audio step degrades to a
  * warning, since a recorder with video but no audio is still useful.
  *
- * <p>The pure decision helpers ({@link #sceneExists}, {@link #inputExists},
- * {@link #kindToObsKind}, {@link #buildSettings}, {@link #ownedInputName}, {@link #inputsToRemove})
- * are package-visible so they can be unit-tested directly, without a live OBS — the
- * network-touching steps wrap them around real obs-websocket calls.
+ * <p>The pure decision helpers ({@link #sceneExists}, {@link #inputExists}, {@link #buildSettings},
+ * {@link #ownedInputName}, {@link #inputsToRemove}) are package-visible so they can be unit-tested
+ * directly, without a live OBS — the network-touching steps wrap them around real obs-websocket
+ * calls. {@link #kindToObsKind} is public because it is the single contract-kind mapping the bridge's
+ * audio paths share.
  */
 @Component
 public class ObsSceneConfigurer {
@@ -78,6 +79,34 @@ public class ObsSceneConfigurer {
     public static final String KIND_APPLICATION = "wasapi_process_output_capture";
     public static final String KIND_OUTPUT = "wasapi_output_capture";
     public static final String KIND_INPUT = "wasapi_input_capture";
+
+    /**
+     * The single mapping from a contract audio kind ({@code application|output|input}) to its OBS
+     * WASAPI input-kind id. Every consumer of this contract derives from this one map so they cannot
+     * drift apart: {@link #kindToObsKind} looks up here, {@link #CONTRACT_AUDIO_KINDS} exposes its
+     * keys for {@code SettingsController}'s allow-list, and {@code AudioController} + {@code
+     * ObsController.expectsLiveAudio} route through {@link #kindToObsKind}. Insertion-ordered so the
+     * exposed key set reads in the contract's documented order.
+     */
+    private static final Map<String, String> CONTRACT_KIND_TO_OBS_KIND;
+
+    static {
+        Map<String, String> m = new LinkedHashMap<>();
+        m.put("application", KIND_APPLICATION);
+        m.put("output", KIND_OUTPUT);
+        m.put("input", KIND_INPUT);
+        CONTRACT_KIND_TO_OBS_KIND = java.util.Collections.unmodifiableMap(m);
+    }
+
+    /**
+     * The contract audio kinds ({@code application|output|input}), backed by {@link
+     * #CONTRACT_KIND_TO_OBS_KIND}'s keys so the settings validator's allow-list and the kind-mapping
+     * switch are provably the same set. Insertion-ordered so an error message listing it reads in the
+     * documented order. Consumed by {@code SettingsController.ALLOWED_AUDIO_KIND}.
+     */
+    public static final Set<String> CONTRACT_AUDIO_KINDS =
+            java.util.Collections.unmodifiableSet(
+                    new LinkedHashSet<>(CONTRACT_KIND_TO_OBS_KIND.keySet()));
 
     /** App-owned prefix for every input we create, so reconcile can diff/clean only our inputs. */
     static final String OWNED_PREFIX = "dotarec:";
@@ -394,22 +423,15 @@ public class ObsSceneConfigurer {
 
     /**
      * Maps a contract kind ({@code application|output|input}) to its OBS WASAPI input-kind id; returns
-     * {@code null} for an unknown kind so the caller can skip it.
+     * {@code null} for an unknown kind so the caller can skip it. Public and the single source: the
+     * bridge's {@code AudioController} (enumeration) and {@code ObsController.expectsLiveAudio}
+     * (readiness gate) both route through it so the mapping can't drift across the three paths.
      */
-    static String kindToObsKind(String kind) {
+    public static String kindToObsKind(String kind) {
         if (kind == null) {
             return null;
         }
-        switch (kind) {
-            case "application":
-                return KIND_APPLICATION;
-            case "output":
-                return KIND_OUTPUT;
-            case "input":
-                return KIND_INPUT;
-            default:
-                return null;
-        }
+        return CONTRACT_KIND_TO_OBS_KIND.get(kind);
     }
 
     /**
