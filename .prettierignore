@@ -7,3 +7,6 @@ logs/
 node_modules/
 *.md
 package-lock.json
+# local-only (git-excluded) working dirs that still exist on disk
+.claude/
+plans/
