@@ -326,9 +326,12 @@ public class ObsController implements ObsRecorder {
      * into a LIVE (effective and un-muted) OBS input. Gating on mere list non-emptiness would wedge
      * isReady() false forever for a muted-only or ineffective-only config (e.g. an application capture
      * with no window picked, or the user's only source muted) and silently disable all recording --
-     * the exact failure the audio gate exists to catch. Mirrors reconcileAudioInputs's create rules
-     * (reuses kindToObsKind + isEffectiveSource, skips muted) so the gate can't drift from what
-     * actually produces a live input -- including a forward-compat/hand-edited unknown kind.
+     * the exact failure the audio gate exists to catch. Reuses reconcileAudioInputs's create
+     * conditions ({@code kindToObsKind != null} + {@code isEffectiveSource}) so the gate can't drift
+     * from what that method actually creates -- including a forward-compat/hand-edited unknown kind.
+     * The {@code !muted} test is an ADDITIONAL gate-only condition, NOT a mirrored create rule:
+     * reconcile still creates a muted input (then mutes it), but a muted input yields no audible track,
+     * so a muted-only config must not satisfy the audio readiness gate.
      */
     private boolean expectsLiveAudio() {
         try {

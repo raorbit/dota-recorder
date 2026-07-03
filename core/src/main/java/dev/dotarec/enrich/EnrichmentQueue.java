@@ -35,7 +35,7 @@ public class EnrichmentQueue {
         this.enricher = enricher;
     }
 
-    /** Polls and dispatches eligible pending rows. Cadence mirrors {@code RetentionSweeper}. */
+    /** Polls and dispatches eligible pending rows every 60s (the same cadence as {@code ClipQueue}). */
     @Scheduled(fixedDelay = 60_000L)
     public void sweep() {
         List<PendingMatch> pending =
