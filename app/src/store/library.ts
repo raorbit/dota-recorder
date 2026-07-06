@@ -28,7 +28,13 @@ import {
 } from '../api/client';
 import type { Bucket } from './buckets';
 import { mergeLibraryLoad } from '../lib/library-load';
-import { applyRecordingsDeleted, applyClipDeleted } from '../lib/library-delete';
+import {
+  applyMatchesDeleted,
+  applyMatchVideosDeleted,
+  applyRecordingsDeleted,
+  applyClipDeleted,
+  type DeleteSlice,
+} from '../lib/library-delete';
 export type { Bucket } from './buckets';
 
 export type ResultFilter = 'all' | 'wins' | 'losses';
@@ -181,16 +187,25 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
     },
 
     // Delete a recording (never its clips — the server leaves a videoless stub row when clips
-    // exist, else drops the row; applyRecordingsDeleted mirrors that rule locally). Pessimistic:
-    // delete server-side FIRST, then apply the local transform (see lib/library-delete) and refresh
-    // the bucket badges. Rethrows so the caller can surface a failure.
+    // exist, else drops the row). Pessimistic: delete server-side FIRST, then mirror the branch the
+    // SERVER reports it took (its decision is made from the clip table under its maintenance lock;
+    // our own clips list can lag it by the ~200ms clip.created reload window, so guessing locally can
+    // drop a row the server stubbed). Only a missing outcome (older core) falls back to the local
+    // guess. Rethrows so the caller can surface a failure.
     deleteMatch: async (id) => {
-      await apiDeleteMatch(id);
+      const outcome = await apiDeleteMatch(id);
       // A coalesced match.* frame fires load() every ~200ms, so a load() that fetched the list BEFORE
       // this delete committed server-side may still be in flight; invalidate it so it can't resurrect
       // the just-deleted row (and so it doesn't leave the table wedged on the spinner).
       invalidatePendingLoad();
-      set((s) => applyRecordingsDeleted(s, new Set([id])));
+      const deleted = new Set([id]);
+      set((s) =>
+        outcome === 'stubbed'
+          ? applyMatchVideosDeleted(s, deleted)
+          : outcome === 'deleted'
+            ? applyMatchesDeleted(s, deleted)
+            : applyRecordingsDeleted(s, deleted),
+      );
       try {
         set({ counts: await fetchBucketCounts() });
       } catch {
@@ -199,22 +214,28 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
     },
 
     // Bulk-delete (table multi-select). Deletes each server-side first — sequentially, bounded by the
-    // small selection size — then applies the transform for all survivors in ONE state update and
-    // refreshes counts once (rather than the per-row count fetch deleteMatch does). A single failed
-    // delete is skipped so the rest still go; the next load() reconciles any straggler.
+    // small selection size — then applies the server-reported branches for all survivors in ONE state
+    // update and refreshes counts once (rather than the per-row count fetch deleteMatch does). A
+    // single failed delete is skipped so the rest still go; the next load() reconciles any straggler.
     deleteMatches: async (ids) => {
-      const deleted = new Set<number>();
+      const removed = new Set<number>();
+      const stubbed = new Set<number>();
+      const unknown = new Set<number>(); // no outcome in the response (older core) -> local guess
       for (const id of ids) {
         try {
-          await apiDeleteMatch(id);
-          deleted.add(id);
+          const outcome = await apiDeleteMatch(id);
+          (outcome === 'deleted' ? removed : outcome === 'stubbed' ? stubbed : unknown).add(id);
         } catch {
           /* skip this one; the rest still delete and the next load() reconciles */
         }
       }
-      if (deleted.size === 0) return;
+      if (removed.size === 0 && stubbed.size === 0 && unknown.size === 0) return;
       invalidatePendingLoad();
-      set((s) => applyRecordingsDeleted(s, deleted));
+      set((s) => {
+        let next: DeleteSlice = applyMatchVideosDeleted(s, stubbed);
+        next = applyMatchesDeleted(next, removed);
+        return applyRecordingsDeleted(next, unknown);
+      });
       try {
         set({ counts: await fetchBucketCounts() });
       } catch {
