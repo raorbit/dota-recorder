@@ -18,6 +18,7 @@ import { heroDisplayName } from '../data/heroes';
 import { clipLabel } from '../lib/clip-format';
 import { shouldShowVodOverlay } from '../lib/marker-overlay';
 import { useLibraryStore } from '../store/library';
+import { PopupMenu } from './PopupMenu';
 import './video-player.css';
 
 interface VideoPlayerProps {
@@ -122,9 +123,6 @@ export function VideoPlayer({
   const [currentTimeS, setCurrentTimeS] = useState(0); // playhead seconds, for the time readout
   const [playing, setPlaying] = useState(false);
   const [muted, setMuted] = useState(false);
-  // Two-step delete: the first click arms a confirm bar so a permanent delete can't fire on one tap.
-  const [confirmDelete, setConfirmDelete] = useState(false);
-  const [deleting, setDeleting] = useState(false);
 
   // Clips cut from this match's VOD, LOCAL to the player (like markers/pauses — not
   // in the zustand store). Fetched per-selection and kept fresh by the clip.* socket.
@@ -135,6 +133,14 @@ export function VideoPlayer({
   // The clip a play action pointed the <video> at, or null while playing the full
   // VOD. Drives which src the media element loads.
   const [activeClipId, setActiveClipId] = useState<number | null>(null);
+  // Mirror of activeClipId for the clip-socket handler: the subscription effect is keyed on matchId
+  // only, so its closure would otherwise see a stale activeClipId when a clip.deleted frame arrives.
+  const activeClipIdRef = useRef<number | null>(null);
+  // Right-click menu over a clip-strip row (null = closed) + its two-step delete arm. Deleting a clip
+  // lives ONLY here (and in the library's right-click menus) — there is deliberately no always-visible
+  // delete control anywhere in the player.
+  const [clipMenu, setClipMenu] = useState<{ clip: Clip; x: number; y: number } | null>(null);
+  const [clipMenuDeleteArmed, setClipMenuDeleteArmed] = useState(false);
   // Clip-range mode: a scissors-armed overlay with draggable in/out handles over the
   // scrub track. inS/outS are video offsets (seconds); null = not arming a clip.
   const [clipRange, setClipRange] = useState<{ inS: number; outS: number } | null>(null);
@@ -152,9 +158,8 @@ export function VideoPlayer({
   // resurrect the just-mutated state. The matchId `cancelled` guard still handles selection changes.
   const clipFetchTokenRef = useRef(0);
 
-  const deleteMatch = useLibraryStore((s) => s.deleteMatch);
   // Refresh the library list/counts after a clip delete so the "Clips" bucket + badge stay in sync
-  // (the player's clip strip is local state; no WS event fires on delete).
+  // immediately (the clip.deleted frame also lands, but the local reload is instant).
   const reloadLibrary = useLibraryStore((s) => s.load);
 
   const matchId = match?.id ?? null;
@@ -176,13 +181,13 @@ export function VideoPlayer({
     setVideoUrl(null);
     setProgress(0);
     setCurrentTimeS(0); // else the readout shows the previous match's position for a video-less row
-    setConfirmDelete(false);
-    setDeleting(false);
     setClips([]);
     setClipProgress({});
     setActiveClipId(null);
     setClipRange(null);
     setCreatingClip(false);
+    setClipMenu(null);
+    setClipMenuDeleteArmed(false);
 
     if (matchId === null) return;
 
@@ -271,8 +276,19 @@ export function VideoPlayer({
         setClipProgress((prev) => ({ ...prev, [clipId]: percent }));
         return;
       }
-      // clip.created / clip.ready: refresh the strip so a new pending row appears and
-      // a finished one flips to ready (or failed) with its playable path.
+      if (evt.type === 'clip.deleted') {
+        // A delete can originate outside this player (the library's Clips bucket). If the deleted
+        // clip is the one PLAYING, fall back to the full VOD — its stream is gone. Same transient as
+        // playFullVod: null the clip's media duration so the parent-VOD overlay waits for the
+        // reloaded VOD's real duration. (activeClipId via ref: this closure is keyed on matchId.)
+        if (activeClipIdRef.current === evt.payload.clipId) {
+          setActiveClipId(null);
+          setMediaDurationS(null);
+        }
+        setClipMenu((prev) => (prev?.clip.id === evt.payload.clipId ? null : prev));
+      }
+      // clip.created / clip.ready / clip.deleted: refresh the strip so a new pending row appears,
+      // a finished one flips to ready (or failed) with its playable path, and a deleted one drops.
       refreshClips();
     });
 
@@ -284,6 +300,11 @@ export function VideoPlayer({
       socket.close();
     };
   }, [matchId]);
+
+  // Mirror activeClipId into its ref for the matchId-keyed socket handler above.
+  useEffect(() => {
+    activeClipIdRef.current = activeClipId;
+  }, [activeClipId]);
 
   // After the <video> src swaps to a selected clip's stream, load + start it. Keyed on
   // activeClipId so it fires once per selection, after React has rendered the new src
@@ -409,19 +430,6 @@ export function VideoPlayer({
       }
     };
 
-  // Confirmed delete: removes the row + .mp4/thumbnail. On success the store clears the
-  // selection, so this view falls back to the library (no local cleanup needed); on failure
-  // the confirm bar stays open so the user can retry.
-  async function onConfirmDelete(): Promise<void> {
-    if (!match) return;
-    setDeleting(true);
-    try {
-      await deleteMatch(match.id);
-    } catch {
-      setDeleting(false);
-    }
-  }
-
   // Click anywhere on the scrub track to seek by fraction. No-op without a finite
   // media duration.
   function handleScrubClick(e: React.MouseEvent<HTMLDivElement>): void {
@@ -523,8 +531,20 @@ export function VideoPlayer({
     setMediaDurationS(null);
   }
 
-  // Delete a clip (unlinks the .mp4, drops the row), then refresh the strip. If the
-  // deleted clip was playing, fall back to the full VOD.
+  // Open the right-click menu for a clip-strip row (disarmed — the delete inside is two-step).
+  function openClipMenu(clip: Clip, x: number, y: number): void {
+    setClipMenuDeleteArmed(false);
+    setClipMenu({ clip, x, y });
+  }
+
+  function closeClipMenu(): void {
+    setClipMenu(null);
+    setClipMenuDeleteArmed(false);
+  }
+
+  // Delete a clip (unlinks the .mp4, drops the row), then refresh the strip. Reached only
+  // through the right-click menu's armed confirm. If the deleted clip was playing, fall
+  // back to the full VOD.
   async function onDeleteClip(clip: Clip): Promise<void> {
     try {
       await deleteClip(clip.id);
@@ -832,26 +852,14 @@ export function VideoPlayer({
           >
             ⛶
           </span>
-          {match && (
-            <span
-              className="vp-icon vp-delete"
-              role="button"
-              tabIndex={0}
-              aria-label="Delete recording"
-              title="Delete recording"
-              onClick={() => setConfirmDelete(true)}
-              onKeyDown={keyActivate(() => setConfirmDelete(true))}
-            >
-              🗑
-            </span>
-          )}
         </div>
       </div>
 
       {/* Per-match clips strip under the player. One row per clip: its label +
           duration, a status indicator (generating spinner / ready / failed), a play
-          action that points the <video> at the clip stream, and a delete action.
-          Hidden when the match has no clips. */}
+          action that points the <video> at the clip stream, and a star toggle.
+          Deleting is right-click only (a two-step confirm in the context menu) — no
+          always-visible delete control. Hidden when the match has no clips. */}
       {match && clips.length > 0 && (
         <div className="vp-clips" aria-label="Clips">
           {activeClipId !== null && (
@@ -874,6 +882,10 @@ export function VideoPlayer({
                 key={clip.id}
                 data-status={clip.status}
                 data-active={activeClipId === clip.id}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  openClipMenu(clip, e.clientX, e.clientY);
+                }}
               >
                 {/* Clip thumbnail (GET /clips/{id}/thumb), only for a ready clip with a
                     rendered thumb. The endpoint 404s on not-ready/missing files, so an
@@ -928,45 +940,36 @@ export function VideoPlayer({
                 >
                   {clip.starred ? '★' : '☆'}
                 </span>
-                <span
-                  className="vp-icon vp-clip-del"
-                  role="button"
-                  tabIndex={0}
-                  aria-label={`Delete clip ${clipLabel(clip)}`}
-                  title="Delete clip"
-                  onClick={() => void onDeleteClip(clip)}
-                  onKeyDown={keyActivate(() => void onDeleteClip(clip))}
-                >
-                  🗑
-                </span>
               </div>
             );
           })}
         </div>
       )}
 
-      {confirmDelete && (
-        <div className="vp-confirm" role="alertdialog" aria-label="Confirm delete recording">
-          <span className="vp-confirm-text">Delete this recording permanently?</span>
-          <div className="vp-confirm-actions">
-            <button
-              type="button"
-              className="vp-confirm-del"
-              onClick={() => void onConfirmDelete()}
-              disabled={deleting}
-            >
-              {deleting ? 'Deleting…' : 'Delete'}
-            </button>
-            <button
-              type="button"
-              className="vp-confirm-cancel"
-              onClick={() => setConfirmDelete(false)}
-              disabled={deleting}
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
+      {clipMenu && (
+        <PopupMenu
+          x={clipMenu.x}
+          y={clipMenu.y}
+          onClose={closeClipMenu}
+          ariaLabel={`Actions for clip ${clipLabel(clipMenu.clip)}`}
+        >
+          <button
+            type="button"
+            className="ctx-item ctx-item-danger"
+            role="menuitem"
+            onClick={() => {
+              if (clipMenuDeleteArmed) {
+                // onDeleteClip swallows its own failure (the strip row stays for a retry).
+                void onDeleteClip(clipMenu.clip);
+                closeClipMenu();
+              } else {
+                setClipMenuDeleteArmed(true);
+              }
+            }}
+          >
+            {clipMenuDeleteArmed ? 'Click to confirm delete' : 'Delete clip'}
+          </button>
+        </PopupMenu>
       )}
     </div>
   );
