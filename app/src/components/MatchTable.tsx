@@ -23,6 +23,7 @@ import {
   type SortState,
 } from '../lib/match-columns';
 import { clipLabel } from '../lib/clip-format';
+import { deleteMenuOptions } from '../lib/delete-labels';
 import './match-table.css';
 
 function matchesResultFilter(match: MatchSummary, filter: ResultFilter): boolean {
@@ -191,9 +192,16 @@ interface ClipRowProps {
   readonly selected: boolean;
   readonly onSelect: (clip: Clip) => void;
   readonly onToggleStar: (id: number, starred: boolean) => void;
+  readonly onOpenMenu: (clip: Clip, x: number, y: number) => void;
 }
 
-function ClipRow({ clip, selected, onSelect, onToggleStar }: ClipRowProps): React.JSX.Element {
+function ClipRow({
+  clip,
+  selected,
+  onSelect,
+  onToggleStar,
+  onOpenMenu,
+}: ClipRowProps): React.JSX.Element {
   return (
     <div
       className="mt-row mt-clip-row"
@@ -201,12 +209,21 @@ function ClipRow({ clip, selected, onSelect, onToggleStar }: ClipRowProps): Reac
       role="button"
       tabIndex={0}
       onClick={() => onSelect(clip)}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        onOpenMenu(clip, e.clientX, e.clientY);
+      }}
       onKeyDown={(e) => {
         // Only the row's OWN Enter/Space selects — not a bubble from the nested star button.
         if (e.target !== e.currentTarget) return;
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
           onSelect(clip);
+        } else if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
+          // Keyboard equivalent of right-click: open the actions menu anchored to the row.
+          e.preventDefault();
+          const r = e.currentTarget.getBoundingClientRect();
+          onOpenMenu(clip, r.left + 16, r.top + r.height - 6);
         }
       }}
     >
@@ -239,7 +256,9 @@ function ClipRow({ clip, selected, onSelect, onToggleStar }: ClipRowProps): Reac
 
 // The Clips bucket view: a flat list of every saved clip (from the clips table, not
 // the matches list). Clicking a clip opens its parent match in the player and
-// auto-plays that clip (selectClip). Mirrors the match table's load/empty states.
+// auto-plays that clip (selectClip). Right-clicking a row opens an actions menu —
+// the ONLY place a clip can be deleted from this view (two-step armed confirm).
+// Mirrors the match table's load/empty states.
 function ClipTable(): React.JSX.Element {
   const clips = useLibraryStore((s) => s.clips);
   const search = useLibraryStore((s) => s.search);
@@ -247,6 +266,21 @@ function ClipTable(): React.JSX.Element {
   const selectedClipId = useLibraryStore((s) => s.selectedClipId);
   const selectClip = useLibraryStore((s) => s.selectClip);
   const toggleClipStar = useLibraryStore((s) => s.toggleClipStar);
+  const deleteClip = useLibraryStore((s) => s.deleteClip);
+
+  // The row context menu (null = closed) + its two-step delete arm.
+  const [rowMenu, setRowMenu] = useState<{ clip: Clip; x: number; y: number } | null>(null);
+  const [menuDeleteArmed, setMenuDeleteArmed] = useState(false);
+
+  const openRowMenu = (clip: Clip, x: number, y: number): void => {
+    setMenuDeleteArmed(false);
+    setRowMenu({ clip, x, y });
+  };
+
+  const closeRowMenu = (): void => {
+    setRowMenu(null);
+    setMenuDeleteArmed(false);
+  };
 
   const visible = useMemo(() => clips.filter((c) => clipMatchesSearch(c, search)), [clips, search]);
 
@@ -287,9 +321,60 @@ function ClipTable(): React.JSX.Element {
               selected={c.id === selectedClipId}
               onSelect={selectClip}
               onToggleStar={(id, starred) => void toggleClipStar(id, starred)}
+              onOpenMenu={openRowMenu}
             />
           ))}
       </div>
+
+      {rowMenu && (
+        <PopupMenu
+          x={rowMenu.x}
+          y={rowMenu.y}
+          onClose={closeRowMenu}
+          ariaLabel={`Actions for clip ${clipLabel(rowMenu.clip)}`}
+        >
+          <button
+            type="button"
+            className="ctx-item"
+            role="menuitem"
+            onClick={() => {
+              selectClip(rowMenu.clip);
+              closeRowMenu();
+            }}
+          >
+            Open in player
+          </button>
+          <button
+            type="button"
+            className="ctx-item"
+            role="menuitem"
+            onClick={() => {
+              void toggleClipStar(rowMenu.clip.id, !rowMenu.clip.starred);
+              closeRowMenu();
+            }}
+          >
+            {rowMenu.clip.starred ? 'Unstar' : 'Star (keep from auto-delete)'}
+          </button>
+          <div className="ctx-sep" role="separator" />
+          <button
+            type="button"
+            className="ctx-item ctx-item-danger"
+            role="menuitem"
+            onClick={() => {
+              if (menuDeleteArmed) {
+                // deleteClip rethrows on a failed API call; swallow it here (a stale row is
+                // reconciled by the next load) so it can't surface as an unhandled rejection.
+                void deleteClip(rowMenu.clip.id).catch(() => {});
+                closeRowMenu();
+              } else {
+                setMenuDeleteArmed(true);
+              }
+            }}
+          >
+            {menuDeleteArmed ? 'Click to confirm delete' : 'Delete clip'}
+          </button>
+        </PopupMenu>
+      )}
     </div>
   );
 }
@@ -362,6 +447,7 @@ function MatchRow({
 // clips from their own table instead (see ClipTable).
 export function MatchTable(): React.JSX.Element {
   const matches = useLibraryStore((s) => s.matches);
+  const clips = useLibraryStore((s) => s.clips);
   const bucket = useLibraryStore((s) => s.bucket);
   const resultFilter = useLibraryStore((s) => s.resultFilter);
   const search = useLibraryStore((s) => s.search);
@@ -395,9 +481,9 @@ export function MatchTable(): React.JSX.Element {
   const [rowMenu, setRowMenu] = useState<{ match: MatchSummary; x: number; y: number } | null>(
     null,
   );
-  // Two-step delete inside the row menu: the first "Delete" click arms the confirm so a
-  // permanent delete can't fire on a single accidental click.
-  const [menuDeleteArmed, setMenuDeleteArmed] = useState(false);
+  // Two-step delete inside the row menu: the first click on a delete option arms it (by kind —
+  // keep-clips vs full) so a permanent delete can't fire on a single accidental click.
+  const [menuDeleteArmed, setMenuDeleteArmed] = useState<'keep' | 'full' | null>(null);
 
   // Skip the persistence writes on the initial mount (they'd just rewrite the values we just
   // loaded); persist only after a real user edit. hydratedRef is flipped true by the effect below,
@@ -534,7 +620,7 @@ export function MatchTable(): React.JSX.Element {
   };
 
   const openRowMenu = (match: MatchSummary, x: number, y: number): void => {
-    setMenuDeleteArmed(false);
+    setMenuDeleteArmed(null);
     // Right-clicking a row OUTSIDE the current multi-selection collapses the selection to just that
     // row, so the menu acts on what was clicked. Right-clicking a row that IS in the selection keeps
     // it, so the menu acts on the whole set.
@@ -544,7 +630,7 @@ export function MatchTable(): React.JSX.Element {
 
   const closeRowMenu = (): void => {
     setRowMenu(null);
-    setMenuDeleteArmed(false);
+    setMenuDeleteArmed(null);
   };
 
   // Reveal is only available inside Electron (the preload exposes it) and only when the row still
@@ -680,6 +766,37 @@ export function MatchTable(): React.JSX.Element {
             .map((id) => matchById.get(id))
             .filter((m): m is MatchSummary => m != null);
           const revealable = targets.filter((m) => canReveal(m));
+          // Clips riding on the targeted recordings decide the delete options: with any, the menu
+          // spells out both fates (keep them / take them too) instead of one ambiguous "Delete".
+          const idSet = new Set(ids);
+          const clipCount = clips.filter((c) => idSet.has(c.parentMatchId)).length;
+          const runDelete = (kind: 'keep' | 'full'): void => {
+            const opts = { keepClips: kind === 'keep' };
+            if (count === 1) {
+              // deleteMatch rethrows on a failed API call; swallow it here (a stale row is
+              // reconciled by the next load) so it can't surface as an unhandled rejection.
+              void deleteMatch(rowMenu.match.id, opts).catch(() => {});
+            } else {
+              // deleteMatches skips any failed delete; the next load() reconciles a straggler.
+              void deleteMatches(ids, opts).catch(() => {});
+              setSelectedIds(new Set<number>());
+            }
+            closeRowMenu();
+          };
+          const deleteItems = deleteMenuOptions(count, clipCount).map((opt) => (
+            <button
+              key={opt.kind}
+              type="button"
+              className="ctx-item ctx-item-danger"
+              role="menuitem"
+              onClick={() => {
+                if (menuDeleteArmed === opt.kind) runDelete(opt.kind);
+                else setMenuDeleteArmed(opt.kind);
+              }}
+            >
+              {menuDeleteArmed === opt.kind ? opt.armedLabel : opt.label}
+            </button>
+          ));
           // Mirror the single-row menu: offer Star only when something is unstarred, Unstar only when
           // something is starred (none starred -> Star only; all starred -> Unstar only; mixed -> both).
           const anyStarred = targets.some((m) => m.starred);
@@ -748,23 +865,7 @@ export function MatchTable(): React.JSX.Element {
                     Copy match ID
                   </button>
                   <div className="ctx-sep" role="separator" />
-                  <button
-                    type="button"
-                    className="ctx-item ctx-item-danger"
-                    role="menuitem"
-                    onClick={() => {
-                      if (menuDeleteArmed) {
-                        // deleteMatch rethrows on a failed API call; swallow it here (a stale row is
-                        // reconciled by the next load) so it can't surface as an unhandled rejection.
-                        void deleteMatch(rowMenu.match.id).catch(() => {});
-                        closeRowMenu();
-                      } else {
-                        setMenuDeleteArmed(true);
-                      }
-                    }}
-                  >
-                    {menuDeleteArmed ? 'Click to confirm delete' : 'Delete recording'}
-                  </button>
+                  {deleteItems}
                 </>
               ) : (
                 <>
@@ -820,25 +921,7 @@ export function MatchTable(): React.JSX.Element {
                     Copy {count} match IDs
                   </button>
                   <div className="ctx-sep" role="separator" />
-                  <button
-                    type="button"
-                    className="ctx-item ctx-item-danger"
-                    role="menuitem"
-                    onClick={() => {
-                      if (menuDeleteArmed) {
-                        // deleteMatches skips any failed delete; the next load() reconciles a straggler.
-                        void deleteMatches(ids).catch(() => {});
-                        setSelectedIds(new Set<number>());
-                        closeRowMenu();
-                      } else {
-                        setMenuDeleteArmed(true);
-                      }
-                    }}
-                  >
-                    {menuDeleteArmed
-                      ? `Click to confirm delete (${count})`
-                      : `Delete ${count} recordings`}
-                  </button>
+                  {deleteItems}
                 </>
               )}
             </PopupMenu>
