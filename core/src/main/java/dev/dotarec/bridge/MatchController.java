@@ -172,6 +172,11 @@ public class MatchController {
      * FK). 404 when the id is unknown. File unlinks are best-effort — a missing or locked file is logged
      * and never blocks the row delete (so a half-pruned recording can still be removed). No undo.
      *
+     * <p>With {@code ?keepClips=true} the child clips SURVIVE: only the match's own {@code .mp4} +
+     * thumbnail are unlinked and the row's paths are nulled ({@link MatchRepository#nullVideoPath}) —
+     * the row itself stays, exactly like a retention-swept recording, so its markers/stats remain
+     * browsable, the clips keep their parent for the player/Clips bucket, and nothing cascades.
+     *
      * <p>Serializes against the storage-maintenance passes ({@link dev.dotarec.retention.RecordingArchiver}
      * archive + {@link dev.dotarec.retention.RetentionSweeper} sweep) via {@link StorageMaintenanceLock}:
      * the archiver copies a VOD cross-store, repoints the row, then deletes the source, so an unguarded
@@ -182,7 +187,8 @@ public class MatchController {
      */
     @DeleteMapping("/matches/{id}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    public void delete(@PathVariable long id) {
+    public void delete(@PathVariable long id,
+                       @RequestParam(name = "keepClips", defaultValue = "false") boolean keepClips) {
         // Existence probe outside the lock so an unknown id is a cheap 404 without serializing on
         // maintenance; the authoritative paths are re-read under the lock below.
         matches.findById(id)
@@ -197,6 +203,12 @@ public class MatchController {
                 deleteFileQuietly(m.videoPath());
                 deleteFileQuietly(m.thumbPath());
             });
+            if (keepClips) {
+                // Keep the row (markers/stats stay browsable) and every clip: just null the recording's
+                // paths, the same end state the retention sweeper leaves behind.
+                matches.nullVideoPath(id);
+                return;
+            }
             // Clip rows cascade-delete with the match (FK ON DELETE CASCADE); their on-disk files do
             // not, so unlink them here to avoid orphaning .mp4/thumb bytes the cascade leaves behind.
             // Re-read under the lock too so a clip the archiver just repointed is unlinked at its
