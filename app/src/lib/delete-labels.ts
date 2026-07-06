@@ -24,3 +24,14 @@ export function deleteMenuLabel(matchCount: number, clipCount: number): DeleteMe
     armedLabel: `Click to confirm delete${suffix}`,
   };
 }
+
+/**
+ * The label shown INSTEAD of the delete item when every targeted recording is already videoless AND
+ * still has clips — a delete would change nothing server-side (the row only remains because its
+ * clips need it), so an armed confirm there would be a silent, feedback-free no-op. Point at the
+ * action that actually frees the entry instead.
+ */
+export function deleteBlockedLabel(matchCount: number, clipCount: number): string {
+  const whose = matchCount === 1 ? 'its' : 'their';
+  return `Delete ${whose} ${clipCount} clip${clipCount === 1 ? '' : 's'} first`;
+}

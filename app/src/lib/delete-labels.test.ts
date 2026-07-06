@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { deleteMenuLabel } from './delete-labels';
+import { deleteMenuLabel, deleteBlockedLabel } from './delete-labels';
 
 describe('deleteMenuLabel', () => {
   it('a clipless recording gets a plain delete label', () => {
@@ -32,5 +32,19 @@ describe('deleteMenuLabel', () => {
       label: 'Delete 2 recordings (keeps 5 clips)',
       armedLabel: 'Click to confirm delete (2)',
     });
+  });
+});
+
+describe('deleteBlockedLabel', () => {
+  it('points a single already-videoless stub at deleting its clips', () => {
+    expect(deleteBlockedLabel(1, 2)).toBe('Delete its 2 clips first');
+  });
+
+  it('a single clip is not pluralized', () => {
+    expect(deleteBlockedLabel(1, 1)).toBe('Delete its 1 clip first');
+  });
+
+  it('a bulk all-stub selection uses their', () => {
+    expect(deleteBlockedLabel(3, 7)).toBe('Delete their 7 clips first');
   });
 });
