@@ -4,47 +4,16 @@
 
 A local-only Windows desktop app that auto-records every Dota 2 match, tags your own
 deaths and kills on a timeline, and lets you click a marker to jump straight to that
-moment in the recorded video. Modeled on [Warcraft Recorder](https://github.com/aza547/wow-recorder),
-adapted to Dota's data reality — there's no on-disk combat log, so live
+moment in the recorded video. It bundles and auto-configures its own OBS instance, so
+there's no manual OBS setup — point it at your Dota install once and it records in the
+background.
+
+<!-- TODO: screenshot of the browse UI + a seek-to-death GIF -->
+
+Modeled on [Warcraft Recorder](https://github.com/aza547/wow-recorder), adapted to Dota's
+data reality: there's no on-disk combat log, so live
 [Game State Integration](https://developer.valvesoftware.com/wiki/Counter-Strike:_Global_Offensive_Game_State_Integration)
-(GSI) is the feed that drives recording and tagging.
-
-It bundles and auto-configures its own OBS instance, so there's no manual OBS setup —
-point it at your Dota install once and it records in the background.
-
-## Status
-
-The full feature surface is built, the core
-**detect → record → tag → store → seek** loop is validated end-to-end against a real Dota
-match, and the packaged Windows installer is confirmed installing and running. Releases
-since v0.1.1 have added a manual stop-recording control, multi-select bulk actions and
-keyboard seek in the browse UI, and a reworked audio mixer.
-
-- [x] Application framework chosen / scaffolded
-- [x] Core implemented (recording brain, GSI, OBS control, storage, browse UI)
-- [x] Live record → tag → seek proven end-to-end
-- [x] Packaged installer end-to-end + tagged release
-- [x] Real-Dota match capture validated at the keyboard
-
-## Features
-
-- **Automatic recording** — detects match start from GSI and records in the background; no
-  manual OBS wrangling. A stop button in the status card force-finalizes the current recording.
-- **Death/kill markers** — diffs your own kills and deaths into timeline markers on a monotonic
-  clock, so a click seeks the video to the right frame.
-- **Browse & review** — filter your match library, multi-select with shift/ctrl-click for bulk
-  actions (star, delete), and seek ±10s with the arrow keys in the player.
-- **Audio mixer** — a single mixer with game, mic, and desktop sources; mic and desktop default
-  off so Discord/system audio don't leak into VODs.
-- **Retention** — a disk-cap sweeper reclaims space by deleting old VODs while keeping each
-  match's metadata and markers.
-
-## Install
-
-Grab the latest `Dota 2 Recorder-Setup-*.exe` from the
-[Releases](https://github.com/raorbit/dota-recorder/releases) page and run it. The installer
-bundles everything it needs — OBS and a trimmed JRE — so there's no separate setup; just point
-it at your Dota install on first run.
+(GSI) — a live HTTP feed the game pushes — is what drives both recording and tagging.
 
 ## How it works
 
@@ -57,22 +26,52 @@ Electron main  ── supervises ──►  JVM core (Spring Boot)
    Dota 2 ── GSI HTTP POST ──►  core
 ```
 
-Electron is the sole supervisor: it spawns and reaps the JVM core and OBS, and the
-renderer talks to the core over loopback only — nothing binds beyond `127.0.0.1`. The
-core parses GSI frames into match state, drives an OBS recording, diffs your kills/deaths
-into timeline markers, and stores VODs + markers in SQLite. Seek offsets are computed on a
-monotonic clock anchored at OBS's record confirmation (never the pausable game clock), so
-clicking a marker lands on the right frame.
+Electron is the sole supervisor: it spawns and reaps both the JVM core and OBS, and the
+renderer talks to the core over loopback only. Nothing binds beyond `127.0.0.1`, and
+there's no server or account — your matches never leave your machine. The core parses GSI
+frames into match state, drives an OBS recording, diffs your kills and deaths into
+timeline markers, and stores VODs plus markers in SQLite.
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design — process lifecycle, clock domains,
-crash recovery, storage, and the security model — and [DEVELOPMENT.md](DEVELOPMENT.md) for how
-the project was built and validated.
+The one design detail worth calling out: seek offsets are computed on a monotonic clock
+anchored at OBS's record-start confirmation, never Dota's `game_clock` (which pauses and
+rewinds). That's what makes clicking a marker land on the right frame instead of drifting.
 
-## Requirements
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design — process lifecycle, clock
+domains, crash recovery, storage, and the security model — and
+[DEVELOPMENT.md](DEVELOPMENT.md) for how the project was built and validated.
+
+## Features
+
+- **Automatic recording** — detects match start from GSI and records in the background;
+  there's a stop button in the status card if you want to cut a recording short.
+- **Death/kill markers** — diffs your own kills and deaths into timeline markers, so a
+  click seeks the video to the right frame.
+- **Browse & review** — filter your match library, multi-select with shift/ctrl-click for
+  bulk actions (star, delete), and seek ±10s with the arrow keys in the player.
+- **Audio mixer** — a single mixer with game, mic, and desktop sources; mic and desktop
+  default off so Discord and system audio don't leak into VODs.
+- **OpenDota enrichment** — fills in match metadata from OpenDota after each game.
+- **Retention** — a disk-cap sweeper reclaims space by deleting old VODs while keeping
+  each match's metadata and markers.
+- **Demo matches** — Hero Demo sessions are skipped by default (real matches only); a
+  *Record demo matches* setting captures them too.
+
+## Install
+
+1. Download the latest `Dota 2 Recorder-Setup-*.exe` from the
+   [Releases](https://github.com/raorbit/dota-recorder/releases) page and run it. The
+   installer bundles everything it needs — OBS, ffmpeg, and a trimmed JRE — so there's
+   no separate setup.
+2. Launch the app and point it at your Dota install when it asks.
+3. Add `-gamestateintegration` to Dota's Steam launch options. The app writes the GSI
+   config file for you and shows you the launch option to paste in.
+
+That's it. Start a match and it records.
+
+### Requirements
 
 - Windows 10/11
-- Dota 2 with `-gamestateintegration` in its Steam launch options (the app writes the GSI
-  config and surfaces the launch option for you)
+- Dota 2 with `-gamestateintegration` in its Steam launch options
 - A GPU/CPU that can record (the app probes for a hardware encoder, falling back to x264)
 
 ## Building from source
@@ -94,7 +93,8 @@ npm run typecheck
 # core unit tests
 cd core && ./gradlew test
 
-# full Windows installer (NSIS): core jar + trimmed JRE + renderer + electron
+# full Windows installer (NSIS): fetches OBS + ffmpeg, then builds
+# core jar + trimmed JRE + renderer + electron
 npm run dist
 ```
 
