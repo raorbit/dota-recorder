@@ -61,6 +61,17 @@
   background: rgba(224, 122, 111, 0.16);
 }
 
+/* A visible-but-inert item (e.g. "Delete its clips first" on an already-videoless stub): explains
+   why the action is unavailable without offering a dead confirm. */
+.ctx-item[data-disabled='true'] {
+  color: var(--text-faint);
+  cursor: default;
+}
+
+.ctx-item[data-disabled='true']:hover {
+  background: transparent;
+}
+
 .ctx-sep {
   height: 1px;
   margin: 4px 6px;

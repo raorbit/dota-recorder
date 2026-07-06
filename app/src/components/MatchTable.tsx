@@ -23,7 +23,7 @@ import {
   type SortState,
 } from '../lib/match-columns';
 import { clipLabel } from '../lib/clip-format';
-import { deleteMenuLabel } from '../lib/delete-labels';
+import { deleteMenuLabel, deleteBlockedLabel } from '../lib/delete-labels';
 import './match-table.css';
 
 function matchesResultFilter(match: MatchSummary, filter: ResultFilter): boolean {
@@ -772,7 +772,25 @@ export function MatchTable(): React.JSX.Element {
           const idSet = new Set(ids);
           const clipCount = clips.filter((c) => idSet.has(c.parentMatchId)).length;
           const deleteLabel = deleteMenuLabel(count, clipCount);
-          const deleteItem = (
+          // A row that is ALREADY videoless and still has clips has nothing left to delete — the
+          // server would 204 and change nothing, so an armed confirm there would be a silent no-op.
+          // When EVERY target is such a stub, swap the delete for a hint at the unblocking action.
+          const hasClips = (id: number): boolean => clips.some((c) => c.parentMatchId === id);
+          const isBlockedStub = (m: MatchSummary): boolean =>
+            (m.videoPath === null || m.videoPath.trim() === '') && hasClips(m.id);
+          const allBlocked = targets.length > 0 && targets.every(isBlockedStub);
+          const deleteItem = allBlocked ? (
+            <div
+              className="ctx-item"
+              role="menuitem"
+              aria-disabled="true"
+              data-disabled="true"
+              tabIndex={-1}
+              title="This entry only remains because its clips need it — delete the clips and it can be removed."
+            >
+              {deleteBlockedLabel(count, clipCount)}
+            </div>
+          ) : (
             <button
               type="button"
               className="ctx-item ctx-item-danger"
