@@ -7,6 +7,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import dev.dotarec.clip.ClipService;
@@ -23,9 +24,11 @@ import java.nio.file.Path;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 import javax.sql.DataSource;
+import org.assertj.core.api.InstanceOfAssertFactories;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.mockito.ArgumentCaptor;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -52,6 +55,7 @@ class ClipControllerTest {
     private ClipRepository clips;
     private MatchRepository matches;
     private ClipService clipService;
+    private EventPublisher events;
     private ClipController controller;
     private SettingsStore settings;
     private Path archiveDir;
@@ -73,7 +77,8 @@ class ClipControllerTest {
         archiveDir = Files.createDirectories(dir.resolve("archive"));
         settings.get().storageLocations = java.util.List.of(
                 new SettingsStore.StorageLocation("archive", archiveDir.toString(), 100));
-        controller = new ClipController(clips, clipService, matches, settings);
+        events = mock(EventPublisher.class);
+        controller = new ClipController(clips, clipService, matches, settings, events);
 
         matchId = matches.insert(
                 new NewMatch(
@@ -261,6 +266,22 @@ class ClipControllerTest {
     }
 
     @Test
+    void delete_publishesClipDeleted_withClipAndParentIds() throws Exception {
+        // Both open views (the player's clip strip, the library's Clips bucket) follow this frame to
+        // drop the row — a delete can originate from either one, and there's no polling on clips.
+        long clipId = insertClip("ready", dir.resolve("evt.mp4").toString(), null);
+
+        controller.delete(clipId);
+
+        ArgumentCaptor<Object> payload = ArgumentCaptor.forClass(Object.class);
+        verify(events).publish(eq("clip.deleted"), payload.capture());
+        assertThat(payload.getValue())
+                .asInstanceOf(InstanceOfAssertFactories.MAP)
+                .containsEntry("clipId", clipId)
+                .containsEntry("parentMatchId", matchId);
+    }
+
+    @Test
     void delete_skipsFilesOutsideStorageRoots_butStillRemovesRow() throws Exception {
         // A real, readable file OUTSIDE videoDir/storageLocations (a tampered DB row / .. escape): the
         // delete must NOT unlink it — the containment guard skips it — yet the row is still removed.
@@ -311,7 +332,7 @@ class ClipControllerTest {
             }
         };
         ClipController c = new ClipController(repointing, clipService, matches, settings,
-                new StorageMaintenanceLock());
+                new StorageMaintenanceLock(), events);
 
         c.delete(clipId);
 
@@ -331,7 +352,7 @@ class ClipControllerTest {
         // also use would deadlock the next pass if the delete leaked a hold. Probe from ANOTHER thread
         // so reentrancy can't mask a leaked hold (a same-thread re-acquire always succeeds).
         StorageMaintenanceLock lock = new StorageMaintenanceLock();
-        ClipController c = new ClipController(clips, clipService, matches, settings, lock);
+        ClipController c = new ClipController(clips, clipService, matches, settings, lock, events);
         long clipId = insertClip("ready", dir.resolve("gone.mp4").toString(), null);
 
         c.delete(clipId);

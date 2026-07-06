@@ -28,7 +28,9 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Clip endpoints consumed by the Electron browse/player UI over the loopback bridge. A clip is a
@@ -68,15 +70,18 @@ public class ClipController {
     private final MatchRepository matches;
     private final SettingsStore settings;
     private final StorageMaintenanceLock maintenanceLock;
+    private final EventPublisher events;
 
     @Autowired
     public ClipController(ClipRepository clips, ClipService clipService, MatchRepository matches,
-                          SettingsStore settings, StorageMaintenanceLock maintenanceLock) {
+                          SettingsStore settings, StorageMaintenanceLock maintenanceLock,
+                          EventPublisher events) {
         this.clips = clips;
         this.clipService = clipService;
         this.matches = matches;
         this.settings = settings;
         this.maintenanceLock = maintenanceLock;
+        this.events = events;
     }
 
     /**
@@ -85,8 +90,8 @@ public class ClipController {
      * when nothing else contends for it).
      */
     public ClipController(ClipRepository clips, ClipService clipService, MatchRepository matches,
-                          SettingsStore settings) {
-        this(clips, clipService, matches, settings, new StorageMaintenanceLock());
+                          SettingsStore settings, EventPublisher events) {
+        this(clips, clipService, matches, settings, new StorageMaintenanceLock(), events);
     }
 
     /** Every clip across all matches, newest first — backs the library "Clips" bucket's flat list. */
@@ -145,7 +150,9 @@ public class ClipController {
     /**
      * Permanently deletes a clip: the rendered {@code .mp4} + thumbnail on disk, then the row. 404 when
      * the id is unknown. File unlinks are best-effort — a missing or locked file is logged and never
-     * blocks the row delete (so a half-rendered clip can still be removed). No undo.
+     * blocks the row delete (so a half-rendered clip can still be removed). No undo. Publishes a
+     * {@code clip.deleted} frame once the row is gone so every open view (player clip strip, Clips
+     * bucket) drops it regardless of where the delete originated.
      *
      * <p>Serializes against the storage-maintenance passes ({@link dev.dotarec.retention.RecordingArchiver}
      * archive + {@link dev.dotarec.retention.RetentionSweeper} sweep) via {@link StorageMaintenanceLock}:
@@ -161,7 +168,7 @@ public class ClipController {
     public void delete(@PathVariable long clipId) {
         // Existence probe outside the lock so an unknown id is a cheap 404 without serializing on
         // maintenance; the authoritative paths are re-read under the lock below.
-        clips.findById(clipId)
+        ClipRow probe = clips.findById(clipId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "No clip " + clipId));
         maintenanceLock.lock();
         try {
@@ -177,6 +184,18 @@ public class ClipController {
         } finally {
             maintenanceLock.unlock();
         }
+        // Tell every UI view the clip is gone — a delete can originate from the player's clip strip OR
+        // the library's Clips bucket, and the other view has no way to notice otherwise (there's no
+        // polling on clips). Mirrors ClipService's clip.created/clip.ready frames.
+        events.publish("clip.deleted", deleted(clipId, probe.parentMatchId()));
+    }
+
+    /** {@code clip.deleted} payload, mirroring {@link ClipService}'s frame helpers. */
+    private static Map<String, Object> deleted(long clipId, long parentMatchId) {
+        Map<String, Object> m = new HashMap<>(2);
+        m.put("clipId", clipId);
+        m.put("parentMatchId", parentMatchId);
+        return m;
     }
 
     /**
