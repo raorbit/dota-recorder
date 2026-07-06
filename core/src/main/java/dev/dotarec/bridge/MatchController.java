@@ -3,7 +3,6 @@ package dev.dotarec.bridge;
 import dev.dotarec.config.SettingsStore;
 import dev.dotarec.data.Bucket;
 import dev.dotarec.data.ClipRepository;
-import dev.dotarec.data.ClipRow;
 import dev.dotarec.data.MarkerRepository;
 import dev.dotarec.data.MarkerRow;
 import dev.dotarec.data.MatchRepository;
@@ -167,15 +166,18 @@ public class MatchController {
     }
 
     /**
-     * Permanently deletes a match: the {@code .mp4} + thumbnail on disk, every child clip's
-     * {@code .mp4}/thumbnail on disk, then the row (its markers, pauses, and clip rows cascade via the
-     * FK). 404 when the id is unknown. File unlinks are best-effort — a missing or locked file is logged
-     * and never blocks the row delete (so a half-pruned recording can still be removed). No undo.
-     *
-     * <p>With {@code ?keepClips=true} the child clips SURVIVE: only the match's own {@code .mp4} +
-     * thumbnail are unlinked and the row's paths are nulled ({@link MatchRepository#nullVideoPath}) —
-     * the row itself stays, exactly like a retention-swept recording, so its markers/stats remain
-     * browsable, the clips keep their parent for the player/Clips bucket, and nothing cascades.
+     * Deletes a recording — and ONLY the recording: clips are their own library objects with their own
+     * delete ({@code DELETE /clips/{clipId}}), so a match delete never touches them. The match's
+     * {@code .mp4} + thumbnail are unlinked, then:
+     * <ul>
+     *   <li><b>no clips</b> — the row goes entirely (markers/pauses cascade via the FK);</li>
+     *   <li><b>clips present</b> — the row SURVIVES with nulled paths
+     *       ({@link MatchRepository#nullVideoPath}, the retention-sweep end state), because the clip
+     *       rows cascade with it (FK {@code ON DELETE CASCADE}) and the player/Clips bucket need the
+     *       parent row to play them. Delete the clips first to make a later match delete drop the row.</li>
+     * </ul>
+     * 404 when the id is unknown. File unlinks are best-effort — a missing or locked file is logged
+     * and never blocks the delete (so a half-pruned recording can still be removed). No undo.
      *
      * <p>Serializes against the storage-maintenance passes ({@link dev.dotarec.retention.RecordingArchiver}
      * archive + {@link dev.dotarec.retention.RetentionSweeper} sweep) via {@link StorageMaintenanceLock}:
@@ -187,8 +189,7 @@ public class MatchController {
      */
     @DeleteMapping("/matches/{id}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    public void delete(@PathVariable long id,
-                       @RequestParam(name = "keepClips", defaultValue = "false") boolean keepClips) {
+    public void delete(@PathVariable long id) {
         // Existence probe outside the lock so an unknown id is a cheap 404 without serializing on
         // maintenance; the authoritative paths are re-read under the lock below.
         matches.findById(id)
@@ -203,21 +204,13 @@ public class MatchController {
                 deleteFileQuietly(m.videoPath());
                 deleteFileQuietly(m.thumbPath());
             });
-            if (keepClips) {
-                // Keep the row (markers/stats stay browsable) and every clip: just null the recording's
-                // paths, the same end state the retention sweeper leaves behind.
+            if (clips.findByParentMatchId(id).isEmpty()) {
+                matches.delete(id);
+            } else {
+                // Clips outlive the recording, and they cascade with the row — so leave the row as a
+                // videoless stub (the same end state the retention sweeper leaves behind).
                 matches.nullVideoPath(id);
-                return;
             }
-            // Clip rows cascade-delete with the match (FK ON DELETE CASCADE); their on-disk files do
-            // not, so unlink them here to avoid orphaning .mp4/thumb bytes the cascade leaves behind.
-            // Re-read under the lock too so a clip the archiver just repointed is unlinked at its
-            // current location.
-            for (ClipRow clip : clips.findByParentMatchId(id)) {
-                deleteFileQuietly(clip.videoPath());
-                deleteFileQuietly(clip.thumbPath());
-            }
-            matches.delete(id);
         } finally {
             maintenanceLock.unlock();
         }

@@ -24,8 +24,11 @@ import org.junit.jupiter.api.io.TempDir;
 import org.springframework.web.server.ResponseStatusException;
 
 /**
- * {@code DELETE /matches/{id}} — removes the row (markers + pauses cascade via the FK) and unlinks the
- * {@code .mp4} + thumbnail. File unlinks are best-effort: a missing file must not block the row delete.
+ * {@code DELETE /matches/{id}} — deletes the RECORDING only, never its clips (those have their own
+ * delete). Clipless: the row goes (markers + pauses cascade via the FK) and the {@code .mp4} +
+ * thumbnail are unlinked. With clips: the files are unlinked but the row survives as a videoless stub
+ * (the clips cascade with it, so it must stay as their parent). File unlinks are best-effort: a
+ * missing file must not block the delete.
  */
 class MatchControllerDeleteTest {
 
@@ -58,7 +61,7 @@ class MatchControllerDeleteTest {
         markers.insert(id, "death", 12.5, null, "died", "gsi");
         assertThat(markers.findByMatchId(id)).hasSize(1);
 
-        controller.delete(id, false);
+        controller.delete(id);
 
         assertThat(repo.findById(id)).isEmpty();
         assertThat(Files.exists(vod)).isFalse();
@@ -68,27 +71,7 @@ class MatchControllerDeleteTest {
     }
 
     @Test
-    void delete_unlinksChildClipFiles_andCascadesClipRows() throws Exception {
-        Path vod = writeFile("match.mp4", new byte[] {1, 2, 3});
-        long id = insert(vod.toString(), null);
-        Path clipVod = writeFile("clip.mp4", new byte[] {7, 8, 9});
-        Path clipThumb = writeFile("clip.jpg", new byte[] {6});
-        clips.insert(id, "manual", null, 10.0, 20.0, "carve",
-                clipVod.toString(), clipThumb.toString(), 3L, "ready", null, 1L);
-        assertThat(clips.findByParentMatchId(id)).hasSize(1);
-
-        controller.delete(id, false);
-
-        assertThat(repo.findById(id)).isEmpty();
-        // The clip's .mp4 + thumbnail are unlinked from disk (not orphaned)...
-        assertThat(Files.exists(clipVod)).isFalse();
-        assertThat(Files.exists(clipThumb)).isFalse();
-        // ...and the clip rows cascade away with the parent match row.
-        assertThat(clips.findByParentMatchId(id)).isEmpty();
-    }
-
-    @Test
-    void deleteKeepClips_removesVideoOnly_keepsRowMarkersAndClips() throws Exception {
+    void delete_withClips_removesVideoOnly_keepsRowMarkersAndClips() throws Exception {
         Path vod = writeFile("match.mp4", new byte[] {1, 2, 3});
         Path thumb = writeFile("match.jpg", new byte[] {4, 5});
         long id = insert(vod.toString(), thumb.toString());
@@ -98,7 +81,7 @@ class MatchControllerDeleteTest {
         clips.insert(id, "manual", null, 10.0, 20.0, "carve",
                 clipVod.toString(), clipThumb.toString(), 3L, "ready", null, 1L);
 
-        controller.delete(id, true);
+        controller.delete(id);
 
         // The recording itself is gone from disk...
         assertThat(Files.exists(vod)).isFalse();
@@ -110,32 +93,44 @@ class MatchControllerDeleteTest {
             assertThat(m.fileSizeBytes()).isNull();
         });
         assertThat(markers.findByMatchId(id)).hasSize(1);
-        // ...and the clips keep their rows AND their files.
+        // ...and the clips keep their rows AND their files (a clip is deleted only via its own
+        // DELETE /clips/{id}).
         assertThat(clips.findByParentMatchId(id)).hasSize(1);
         assertThat(Files.exists(clipVod)).isTrue();
         assertThat(Files.exists(clipThumb)).isTrue();
     }
 
     @Test
-    void deleteKeepClips_unknownId_throws404() {
-        assertThatThrownBy(() -> controller.delete(999_999L, true))
-                .isInstanceOf(ResponseStatusException.class);
+    void delete_ofClipsStub_removesRow_onceClipsAreGone() throws Exception {
+        // The two-step teardown: a with-clips delete leaves a videoless stub; after the clips are
+        // deleted separately, deleting the stub again drops the row entirely.
+        Path vod = writeFile("match.mp4", new byte[] {1, 2, 3});
+        long id = insert(vod.toString(), null);
+        long clipId = clips.insert(id, "manual", null, 10.0, 20.0, "carve",
+                null, null, null, "ready", null, 1L);
+
+        controller.delete(id);
+        assertThat(repo.findById(id)).isPresent();
+
+        clips.delete(clipId);
+        controller.delete(id);
+        assertThat(repo.findById(id)).isEmpty();
     }
 
     @Test
     void delete_unknownId_throws404() {
-        assertThatThrownBy(() -> controller.delete(999_999L, false))
+        assertThatThrownBy(() -> controller.delete(999_999L))
                 .isInstanceOf(ResponseStatusException.class);
     }
 
     @Test
     void delete_withMissingOrNullFiles_stillRemovesRow() {
         long noFiles = insert(null, null);
-        controller.delete(noFiles, false);
+        controller.delete(noFiles);
         assertThat(repo.findById(noFiles)).isEmpty();
 
         long ghostFile = insert(dir.resolve("gone.mp4").toString(), null);
-        controller.delete(ghostFile, false);
+        controller.delete(ghostFile);
         assertThat(repo.findById(ghostFile)).isEmpty();
     }
 
@@ -175,7 +170,7 @@ class MatchControllerDeleteTest {
         MatchController c = new MatchController(repointing, markers, new PauseRepository(ds), clips,
                 settings, new StorageMaintenanceLock());
 
-        c.delete(id, false);
+        c.delete(id);
 
         assertThat(repo.findById(id)).isEmpty();
         // The CURRENT (repointed) files are unlinked...
@@ -197,7 +192,7 @@ class MatchControllerDeleteTest {
                 settings, lock);
         long id = insert(dir.resolve("gone.mp4").toString(), null);
 
-        c.delete(id, false);
+        c.delete(id);
 
         assertThat(repo.findById(id)).isEmpty();
         // A different thread can acquire the lock only if the delete released every hold it took.
@@ -225,7 +220,7 @@ class MatchControllerDeleteTest {
         try {
             long id = insert(outside.toString(), null);
 
-            controller.delete(id, false);
+            controller.delete(id);
 
             assertThat(repo.findById(id)).isEmpty();
             assertThat(Files.exists(outside)).isTrue();
