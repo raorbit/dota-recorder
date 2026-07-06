@@ -621,10 +621,12 @@ export function setClipStarred(clipId: number, starred: boolean): Promise<Clip> 
   return patchJson<{ starred: boolean }, Clip>(`/clips/${clipId}`, { starred });
 }
 
-// Permanently deletes a match (DELETE /matches/{id}): the row + its markers/pauses
-// (FK cascade) and the .mp4 + thumbnail on disk. No undo.
-export function deleteMatch(id: number): Promise<void> {
-  return delVoid(`/matches/${id}`);
+// Permanently deletes a match (DELETE /matches/{id}): the row + its markers/pauses/clips
+// (FK cascade) and the .mp4s + thumbnails on disk. No undo. With keepClips, only the recording's
+// own .mp4 + thumbnail go: the row survives with nulled paths (exactly a retention-swept
+// recording) and every clip keeps its row and file.
+export function deleteMatch(id: number, opts?: { readonly keepClips?: boolean }): Promise<void> {
+  return delVoid(`/matches/${id}${opts?.keepClips ? '?keepClips=true' : ''}`);
 }
 
 export type StatusListener = (status: Status) => void;
@@ -634,14 +636,17 @@ export type StateListener = (connected: boolean) => void;
 // re-fetching the list + counts; the payload shape is intentionally opaque here.
 export type MatchEventListener = (evt: { type: string; payload: unknown }) => void;
 
-// Clip lifecycle frames fanned out to onClipEvent() subscribers. Three kinds:
+// Clip lifecycle frames fanned out to onClipEvent() subscribers. Four kinds:
 //   'clip.created'  — payload is the new Clip (status 'pending')
 //   'clip.progress' — payload is { clipId, parentMatchId, percent }
 //   'clip.ready'    — payload is { clipId, parentMatchId, status, videoPath }
+//   'clip.deleted'  — payload is { clipId, parentMatchId }
 // Every payload carries `parentMatchId`, so a subscription can be scoped to the open
 // match (see StatusSocket.onClipEvent). The renderer reacts by refreshing that match's
-// clip list (clip.created / clip.ready) or updating a progress bar (clip.progress).
-export type ClipEventType = 'clip.created' | 'clip.progress' | 'clip.ready';
+// clip list (clip.created / clip.ready / clip.deleted) or updating a progress bar
+// (clip.progress); the player additionally falls back to the full VOD when the deleted
+// clip was the one playing.
+export type ClipEventType = 'clip.created' | 'clip.progress' | 'clip.ready' | 'clip.deleted';
 
 export type ClipEvent =
   | { readonly type: 'clip.created'; readonly payload: Clip }
@@ -660,6 +665,13 @@ export type ClipEvent =
         readonly parentMatchId: number;
         readonly status: string;
         readonly videoPath: string | null;
+      };
+    }
+  | {
+      readonly type: 'clip.deleted';
+      readonly payload: {
+        readonly clipId: number;
+        readonly parentMatchId: number;
       };
     };
 
@@ -718,16 +730,20 @@ function parseStatusSnapshot(payload: unknown): StatusSnapshot | null {
 // Validate a clip.* frame just enough to route it AND to survive what its listeners dereference.
 // Every clip payload carries a numeric parentMatchId (emitClipEvent scopes on it). clip.created /
 // clip.ready listeners re-fetch the clip list rather than trusting the payload, so parentMatchId is
-// the only field worth checking. clip.progress is the exception: VideoPlayer reads payload.clipId and
-// payload.percent straight off the frame (no re-fetch), so those two must be numeric or the progress
-// bar would render with NaN/undefined. `type` is trusted from the already-narrowed envelope. Returns
-// null when a required field is missing/non-numeric so the frame is dropped.
+// the only field worth checking. clip.progress and clip.deleted are the exceptions: VideoPlayer reads
+// payload.clipId straight off both (plus payload.percent on progress) with no re-fetch, so those must
+// be numeric or the progress bar / playing-clip fallback would act on NaN/undefined. `type` is trusted
+// from the already-narrowed envelope. Returns null when a required field is missing/non-numeric so the
+// frame is dropped.
 function parseClipEvent(type: ClipEventType, payload: unknown): ClipEvent | null {
   if (!isRecord(payload) || typeof payload.parentMatchId !== 'number') return null;
   if (
-    type === 'clip.progress' &&
-    (typeof payload.clipId !== 'number' || typeof payload.percent !== 'number')
+    (type === 'clip.progress' || type === 'clip.deleted') &&
+    typeof payload.clipId !== 'number'
   ) {
+    return null;
+  }
+  if (type === 'clip.progress' && typeof payload.percent !== 'number') {
     return null;
   }
   return { type, payload } as ClipEvent;
@@ -778,10 +794,10 @@ export class StatusSocket {
     return () => this.matchEventListeners.delete(listener);
   }
 
-  // Subscribe to clip lifecycle frames (clip.created / clip.progress / clip.ready),
-  // scoped to one match by its parentMatchId. Pass matchId 0 (or omit) to receive
-  // every clip event. Mirrors onEvent(): returns a detacher that also prunes the
-  // per-match bucket once empty.
+  // Subscribe to clip lifecycle frames (clip.created / clip.progress / clip.ready /
+  // clip.deleted), scoped to one match by its parentMatchId. Pass matchId 0 (or omit)
+  // to receive every clip event. Mirrors onEvent(): returns a detacher that also
+  // prunes the per-match bucket once empty.
   onClipEvent(matchId: number, listener: ClipEventListener): () => void {
     let bucket = this.clipEventListeners.get(matchId);
     if (!bucket) {
@@ -850,7 +866,8 @@ export class StatusSocket {
       } else if (
         envelope.type === 'clip.created' ||
         envelope.type === 'clip.progress' ||
-        envelope.type === 'clip.ready'
+        envelope.type === 'clip.ready' ||
+        envelope.type === 'clip.deleted'
       ) {
         // Clip lifecycle events: validate the payload carries a numeric parentMatchId (the
         // one field routing reads), then fan out to onClipEvent() subscribers scoped by it.
