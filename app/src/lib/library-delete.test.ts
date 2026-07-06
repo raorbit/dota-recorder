@@ -134,13 +134,22 @@ describe('applyMatchVideosDeleted (with-clips delete)', () => {
     expect(next.clips.map((c) => c.id)).toEqual([10, 11, 12]);
   });
 
-  it('clears the selection when the open match loses its video (the player would stream a gone file)', () => {
+  it('clears a full-VOD selection when the open match loses its video (the player would stream a gone file)', () => {
     const next = applyMatchVideosDeleted(
-      slice({ selectedMatchId: 1, selectedClipId: 10 }),
+      slice({ selectedMatchId: 1, selectedClipId: null }),
       new Set([1]),
     );
     expect(next.selectedMatchId).toBeNull();
     expect(next.selectedClipId).toBeNull();
+  });
+
+  it('KEEPS a clip auto-play selection — the clip file is intact and the stub row still parents it', () => {
+    const next = applyMatchVideosDeleted(
+      slice({ selectedMatchId: 1, selectedClipId: 10 }),
+      new Set([1]),
+    );
+    expect(next.selectedMatchId).toBe(1);
+    expect(next.selectedClipId).toBe(10);
   });
 
   it('keeps an unrelated selection', () => {

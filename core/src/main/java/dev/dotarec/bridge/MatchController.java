@@ -20,7 +20,6 @@ import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
-import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -179,6 +178,12 @@ public class MatchController {
      * 404 when the id is unknown. File unlinks are best-effort — a missing or locked file is logged
      * and never blocks the delete (so a half-pruned recording can still be removed). No undo.
      *
+     * <p>The response body reports which branch was taken — {@code {"outcome":"deleted"}} or
+     * {@code {"outcome":"stubbed"}} — because the branch is decided from the clip table read UNDER the
+     * lock. The renderer mirrors the delete locally, and without the outcome it would have to guess
+     * from its own (possibly stale) clip list; a clip created in the ~200ms before its
+     * {@code clip.created} reload lands would make that guess wrong.
+     *
      * <p>Serializes against the storage-maintenance passes ({@link dev.dotarec.retention.RecordingArchiver}
      * archive + {@link dev.dotarec.retention.RetentionSweeper} sweep) via {@link StorageMaintenanceLock}:
      * the archiver copies a VOD cross-store, repoints the row, then deletes the source, so an unguarded
@@ -188,12 +193,12 @@ public class MatchController {
      * files removed are always the row's present locations even if the archiver just repointed them.
      */
     @DeleteMapping("/matches/{id}")
-    @ResponseStatus(HttpStatus.NO_CONTENT)
-    public void delete(@PathVariable long id) {
+    public DeleteOutcome delete(@PathVariable long id) {
         // Existence probe outside the lock so an unknown id is a cheap 404 without serializing on
         // maintenance; the authoritative paths are re-read under the lock below.
         matches.findById(id)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "No match " + id));
+        boolean stubbed;
         maintenanceLock.lock();
         try {
             // Re-read the CURRENT row inside the lock: the archiver may have repointed video_path/
@@ -206,15 +211,25 @@ public class MatchController {
             });
             if (clips.findByParentMatchId(id).isEmpty()) {
                 matches.delete(id);
+                stubbed = false;
             } else {
                 // Clips outlive the recording, and they cascade with the row — so leave the row as a
                 // videoless stub (the same end state the retention sweeper leaves behind).
                 matches.nullVideoPath(id);
+                stubbed = true;
             }
         } finally {
             maintenanceLock.unlock();
         }
+        return new DeleteOutcome(stubbed ? "stubbed" : "deleted");
     }
+
+    /**
+     * {@code DELETE /matches/{id}} response: {@code outcome} is {@code "deleted"} (the row went
+     * entirely — it had no clips) or {@code "stubbed"} (the row survives videoless because its clips
+     * still need it).
+     */
+    public record DeleteOutcome(String outcome) {}
 
     /**
      * Best-effort unlink: ignores a null/blank/missing path; logs (never throws) on an I/O failure.

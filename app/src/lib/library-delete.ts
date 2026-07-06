@@ -37,14 +37,21 @@ export function applyMatchesDeleted(s: DeleteSlice, deleted: ReadonlySet<number>
 }
 
 // With-clips delete: the recordings' videos are gone but the rows SURVIVE with nulled paths (the
-// retention-sweep end state the server leaves), and every clip is untouched.
+// retention-sweep end state the server leaves), and every clip is untouched. A clip auto-play
+// selection therefore stays live — the clip's file is intact and the stub row still parents it, so
+// tearing the player down mid-clip would be gratuitous. Only a full-VOD selection (selectedClipId
+// null) clears, since the player would otherwise keep streaming the unlinked .mp4.
 export function applyMatchVideosDeleted(s: DeleteSlice, deleted: ReadonlySet<number>): DeleteSlice {
+  const selection =
+    s.selectedClipId !== null
+      ? { selectedMatchId: s.selectedMatchId, selectedClipId: s.selectedClipId }
+      : selectionCleared(s, deleted);
   return {
     matches: s.matches.map((m) =>
       deleted.has(m.id) ? { ...m, videoPath: null, thumbPath: null, fileSizeBytes: null } : m,
     ),
     clips: s.clips,
-    ...selectionCleared(s, deleted),
+    ...selection,
   };
 }
 

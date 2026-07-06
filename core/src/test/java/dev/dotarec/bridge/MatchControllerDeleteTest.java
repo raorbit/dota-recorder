@@ -61,8 +61,10 @@ class MatchControllerDeleteTest {
         markers.insert(id, "death", 12.5, null, "died", "gsi");
         assertThat(markers.findByMatchId(id)).hasSize(1);
 
-        controller.delete(id);
+        MatchController.DeleteOutcome outcome = controller.delete(id);
 
+        // The response tells the renderer which branch was taken so its local mirror never guesses.
+        assertThat(outcome.outcome()).isEqualTo("deleted");
         assertThat(repo.findById(id)).isEmpty();
         assertThat(Files.exists(vod)).isFalse();
         assertThat(Files.exists(thumb)).isFalse();
@@ -81,8 +83,9 @@ class MatchControllerDeleteTest {
         clips.insert(id, "manual", null, 10.0, 20.0, "carve",
                 clipVod.toString(), clipThumb.toString(), 3L, "ready", null, 1L);
 
-        controller.delete(id);
+        MatchController.DeleteOutcome outcome = controller.delete(id);
 
+        assertThat(outcome.outcome()).isEqualTo("stubbed");
         // The recording itself is gone from disk...
         assertThat(Files.exists(vod)).isFalse();
         assertThat(Files.exists(thumb)).isFalse();
@@ -109,11 +112,11 @@ class MatchControllerDeleteTest {
         long clipId = clips.insert(id, "manual", null, 10.0, 20.0, "carve",
                 null, null, null, "ready", null, 1L);
 
-        controller.delete(id);
+        assertThat(controller.delete(id).outcome()).isEqualTo("stubbed");
         assertThat(repo.findById(id)).isPresent();
 
         clips.delete(clipId);
-        controller.delete(id);
+        assertThat(controller.delete(id).outcome()).isEqualTo("deleted");
         assertThat(repo.findById(id)).isEmpty();
     }
 

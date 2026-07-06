@@ -621,12 +621,35 @@ export function setClipStarred(clipId: number, starred: boolean): Promise<Clip> 
   return patchJson<{ starred: boolean }, Clip>(`/clips/${clipId}`, { starred });
 }
 
+// Which branch DELETE /matches/{id} took: 'deleted' = the row went entirely (it had no clips);
+// 'stubbed' = the row survives videoless because its clips still need it.
+export type MatchDeleteOutcome = 'deleted' | 'stubbed';
+
 // Permanently deletes a recording (DELETE /matches/{id}) — and only the recording; clips are their
 // own objects with their own delete. Clipless: the row + markers/pauses (FK cascade) and the .mp4 +
 // thumbnail go. With clips: the files go but the row survives with nulled paths (exactly a
 // retention-swept recording) so the clips keep their parent. No undo.
-export function deleteMatch(id: number): Promise<void> {
-  return delVoid(`/matches/${id}`);
+//
+// Returns the server's outcome so the store can mirror the AUTHORITATIVE branch: the server decides
+// stub-vs-delete from the clip table under its maintenance lock, and the store's own clip list can
+// lag it (a clip created in the ~200ms before its clip.created reload lands). Null when the body is
+// missing/unrecognized (an older core) — the caller then falls back to its local guess.
+export async function deleteMatch(id: number): Promise<MatchDeleteOutcome | null> {
+  const res = await fetch(`${bridgeBase()}/matches/${id}`, {
+    method: 'DELETE',
+    headers: { Accept: 'application/json', ...authHeaders() },
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!res.ok) {
+    throw new Error(`DELETE /matches/${id} failed: ${res.status} ${res.statusText}`);
+  }
+  try {
+    const body: unknown = await res.json();
+    const outcome = isRecord(body) ? body.outcome : null;
+    return outcome === 'deleted' || outcome === 'stubbed' ? outcome : null;
+  } catch {
+    return null; // no/invalid body (older core) — the caller falls back to its local mirror
+  }
 }
 
 export type StatusListener = (status: Status) => void;
