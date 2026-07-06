@@ -560,7 +560,8 @@ export function VideoPlayer({
       clipFetchTokenRef.current++;
       setClips((prev) => prev.filter((c) => c.id !== clip.id));
       // The strip above is player-local; refresh the store so the library "Clips" bucket list and the
-      // sidebar badge drop the deleted clip too (no clip.* socket event fires on delete).
+      // sidebar badge drop the deleted clip immediately (the core also publishes a clip.deleted frame,
+      // which the store follows too, but this local reload doesn't wait for the round-trip).
       void reloadLibrary();
     } catch {
       /* leave the row; the next clip.* frame / re-select reconciles */
@@ -882,9 +883,21 @@ export function VideoPlayer({
                 key={clip.id}
                 data-status={clip.status}
                 data-active={activeClipId === clip.id}
+                // Focusable so a keyboard user can reach the row's context menu (the ONLY delete
+                // path in the player) without a mouse; ContextMenu / Shift+F10 mirror MatchTable's
+                // rows. The label names the clip for screen readers since the row itself has focus.
+                tabIndex={0}
+                aria-label={`Clip ${clipLabel(clip)}`}
                 onContextMenu={(e) => {
                   e.preventDefault();
                   openClipMenu(clip, e.clientX, e.clientY);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
+                    e.preventDefault();
+                    const r = e.currentTarget.getBoundingClientRect();
+                    openClipMenu(clip, r.left + 16, r.top + r.height - 6);
+                  }
                 }}
               >
                 {/* Clip thumbnail (GET /clips/{id}/thumb), only for a ready clip with a

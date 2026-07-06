@@ -356,3 +356,9 @@
   color: var(--gold);
   opacity: 1;
 }
+/* The clip row itself is focusable (its context menu is the player's only delete path, so keyboard
+   users need to land on it); make that focus visible. */
+.vp-clip-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
