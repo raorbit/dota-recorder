@@ -23,7 +23,7 @@ import {
   type SortState,
 } from '../lib/match-columns';
 import { clipLabel } from '../lib/clip-format';
-import { deleteMenuOptions } from '../lib/delete-labels';
+import { deleteMenuLabel } from '../lib/delete-labels';
 import './match-table.css';
 
 function matchesResultFilter(match: MatchSummary, filter: ResultFilter): boolean {
@@ -481,9 +481,9 @@ export function MatchTable(): React.JSX.Element {
   const [rowMenu, setRowMenu] = useState<{ match: MatchSummary; x: number; y: number } | null>(
     null,
   );
-  // Two-step delete inside the row menu: the first click on a delete option arms it (by kind —
-  // keep-clips vs full) so a permanent delete can't fire on a single accidental click.
-  const [menuDeleteArmed, setMenuDeleteArmed] = useState<'keep' | 'full' | null>(null);
+  // Two-step delete inside the row menu: the first "Delete" click arms the confirm so a
+  // permanent delete can't fire on a single accidental click.
+  const [menuDeleteArmed, setMenuDeleteArmed] = useState(false);
 
   // Skip the persistence writes on the initial mount (they'd just rewrite the values we just
   // loaded); persist only after a real user edit. hydratedRef is flipped true by the effect below,
@@ -620,7 +620,7 @@ export function MatchTable(): React.JSX.Element {
   };
 
   const openRowMenu = (match: MatchSummary, x: number, y: number): void => {
-    setMenuDeleteArmed(null);
+    setMenuDeleteArmed(false);
     // Right-clicking a row OUTSIDE the current multi-selection collapses the selection to just that
     // row, so the menu acts on what was clicked. Right-clicking a row that IS in the selection keeps
     // it, so the menu acts on the whole set.
@@ -630,7 +630,7 @@ export function MatchTable(): React.JSX.Element {
 
   const closeRowMenu = (): void => {
     setRowMenu(null);
-    setMenuDeleteArmed(null);
+    setMenuDeleteArmed(false);
   };
 
   // Reveal is only available inside Electron (the preload exposes it) and only when the row still
@@ -766,37 +766,37 @@ export function MatchTable(): React.JSX.Element {
             .map((id) => matchById.get(id))
             .filter((m): m is MatchSummary => m != null);
           const revealable = targets.filter((m) => canReveal(m));
-          // Clips riding on the targeted recordings decide the delete options: with any, the menu
-          // spells out both fates (keep them / take them too) instead of one ambiguous "Delete".
+          // A recording delete never touches clips (they're deleted separately, from their own
+          // right-click menus) — but when the targets carry clips, say so: the row will visibly
+          // survive as a videoless stub, and the label explains why.
           const idSet = new Set(ids);
           const clipCount = clips.filter((c) => idSet.has(c.parentMatchId)).length;
-          const runDelete = (kind: 'keep' | 'full'): void => {
-            const opts = { keepClips: kind === 'keep' };
-            if (count === 1) {
-              // deleteMatch rethrows on a failed API call; swallow it here (a stale row is
-              // reconciled by the next load) so it can't surface as an unhandled rejection.
-              void deleteMatch(rowMenu.match.id, opts).catch(() => {});
-            } else {
-              // deleteMatches skips any failed delete; the next load() reconciles a straggler.
-              void deleteMatches(ids, opts).catch(() => {});
-              setSelectedIds(new Set<number>());
-            }
-            closeRowMenu();
-          };
-          const deleteItems = deleteMenuOptions(count, clipCount).map((opt) => (
+          const deleteLabel = deleteMenuLabel(count, clipCount);
+          const deleteItem = (
             <button
-              key={opt.kind}
               type="button"
               className="ctx-item ctx-item-danger"
               role="menuitem"
               onClick={() => {
-                if (menuDeleteArmed === opt.kind) runDelete(opt.kind);
-                else setMenuDeleteArmed(opt.kind);
+                if (!menuDeleteArmed) {
+                  setMenuDeleteArmed(true);
+                  return;
+                }
+                if (count === 1) {
+                  // deleteMatch rethrows on a failed API call; swallow it here (a stale row is
+                  // reconciled by the next load) so it can't surface as an unhandled rejection.
+                  void deleteMatch(rowMenu.match.id).catch(() => {});
+                } else {
+                  // deleteMatches skips any failed delete; the next load() reconciles a straggler.
+                  void deleteMatches(ids).catch(() => {});
+                  setSelectedIds(new Set<number>());
+                }
+                closeRowMenu();
               }}
             >
-              {menuDeleteArmed === opt.kind ? opt.armedLabel : opt.label}
+              {menuDeleteArmed ? deleteLabel.armedLabel : deleteLabel.label}
             </button>
-          ));
+          );
           // Mirror the single-row menu: offer Star only when something is unstarred, Unstar only when
           // something is starred (none starred -> Star only; all starred -> Unstar only; mixed -> both).
           const anyStarred = targets.some((m) => m.starred);
@@ -865,7 +865,7 @@ export function MatchTable(): React.JSX.Element {
                     Copy match ID
                   </button>
                   <div className="ctx-sep" role="separator" />
-                  {deleteItems}
+                  {deleteItem}
                 </>
               ) : (
                 <>
@@ -921,7 +921,7 @@ export function MatchTable(): React.JSX.Element {
                     Copy {count} match IDs
                   </button>
                   <div className="ctx-sep" role="separator" />
-                  {deleteItems}
+                  {deleteItem}
                 </>
               )}
             </PopupMenu>

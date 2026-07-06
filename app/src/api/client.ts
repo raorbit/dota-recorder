@@ -621,12 +621,12 @@ export function setClipStarred(clipId: number, starred: boolean): Promise<Clip> 
   return patchJson<{ starred: boolean }, Clip>(`/clips/${clipId}`, { starred });
 }
 
-// Permanently deletes a match (DELETE /matches/{id}): the row + its markers/pauses/clips
-// (FK cascade) and the .mp4s + thumbnails on disk. No undo. With keepClips, only the recording's
-// own .mp4 + thumbnail go: the row survives with nulled paths (exactly a retention-swept
-// recording) and every clip keeps its row and file.
-export function deleteMatch(id: number, opts?: { readonly keepClips?: boolean }): Promise<void> {
-  return delVoid(`/matches/${id}${opts?.keepClips ? '?keepClips=true' : ''}`);
+// Permanently deletes a recording (DELETE /matches/{id}) — and only the recording; clips are their
+// own objects with their own delete. Clipless: the row + markers/pauses (FK cascade) and the .mp4 +
+// thumbnail go. With clips: the files go but the row survives with nulled paths (exactly a
+// retention-swept recording) so the clips keep their parent. No undo.
+export function deleteMatch(id: number): Promise<void> {
+  return delVoid(`/matches/${id}`);
 }
 
 export type StatusListener = (status: Status) => void;

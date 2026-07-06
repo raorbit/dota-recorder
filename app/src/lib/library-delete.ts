@@ -12,7 +12,7 @@ export interface DeleteSlice {
 }
 
 // Whether the current player selection points at one of the deleted matches (in which case it must
-// clear — for a full delete the match is gone; for a keep-clips delete its video file is gone, and a
+// clear — for a full delete the match is gone; for a with-clips delete its video file is gone, and a
 // stale selection would leave the player streaming the unlinked .mp4).
 function selectionCleared(s: DeleteSlice, deleted: ReadonlySet<number>): {
   readonly selectedMatchId: number | null;
@@ -25,8 +25,9 @@ function selectionCleared(s: DeleteSlice, deleted: ReadonlySet<number>): {
   };
 }
 
-// Full delete: the match rows go, and their clips go with them (the server cascades the rows and
-// unlinks the clip files).
+// Full delete (a clipless recording): the match rows go entirely. Any clip still pointing at a
+// dropped row is pruned defensively — with a fresh clips list there are none (the server only fully
+// deletes clipless rows), but a stale local list must not keep entries whose parent is gone.
 export function applyMatchesDeleted(s: DeleteSlice, deleted: ReadonlySet<number>): DeleteSlice {
   return {
     matches: s.matches.filter((m) => !deleted.has(m.id)),
@@ -35,7 +36,7 @@ export function applyMatchesDeleted(s: DeleteSlice, deleted: ReadonlySet<number>
   };
 }
 
-// Keep-clips delete: the recordings' videos are gone but the rows SURVIVE with nulled paths (the
+// With-clips delete: the recordings' videos are gone but the rows SURVIVE with nulled paths (the
 // retention-sweep end state the server leaves), and every clip is untouched.
 export function applyMatchVideosDeleted(s: DeleteSlice, deleted: ReadonlySet<number>): DeleteSlice {
   return {
@@ -45,6 +46,17 @@ export function applyMatchVideosDeleted(s: DeleteSlice, deleted: ReadonlySet<num
     clips: s.clips,
     ...selectionCleared(s, deleted),
   };
+}
+
+// Mirror of the server's DELETE /matches/{id} rule — a recording delete never touches clips: a
+// recording WITH clips becomes a videoless stub row (the clips need their parent), a clipless one
+// drops entirely.
+export function applyRecordingsDeleted(s: DeleteSlice, deleted: ReadonlySet<number>): DeleteSlice {
+  const withClips = new Set(
+    s.clips.filter((c) => deleted.has(c.parentMatchId)).map((c) => c.parentMatchId),
+  );
+  const fully = new Set([...deleted].filter((id) => !withClips.has(id)));
+  return applyMatchesDeleted(applyMatchVideosDeleted(s, withClips), fully);
 }
 
 // Clip delete: drop the clip row; clear a clip auto-play selection that pointed at it (the parent
