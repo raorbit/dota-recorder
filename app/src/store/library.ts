@@ -28,11 +28,7 @@ import {
 } from '../api/client';
 import type { Bucket } from './buckets';
 import { mergeLibraryLoad } from '../lib/library-load';
-import {
-  applyMatchesDeleted,
-  applyMatchVideosDeleted,
-  applyClipDeleted,
-} from '../lib/library-delete';
+import { applyRecordingsDeleted, applyClipDeleted } from '../lib/library-delete';
 export type { Bucket } from './buckets';
 
 export type ResultFilter = 'all' | 'wins' | 'losses';
@@ -87,15 +83,12 @@ export interface LibraryState {
   readonly toggleStar: (id: number, starred: boolean) => Promise<void>;
   // Star/unstar a clip (exempts it from the retention sweep), mirroring toggleStar for matches.
   readonly toggleClipStar: (id: number, starred: boolean) => Promise<void>;
-  // Delete a match. With keepClips, only the recording's video goes: the row survives with nulled
-  // paths (a retention-swept recording) and every clip keeps its row and file.
-  readonly deleteMatch: (id: number, opts?: { readonly keepClips?: boolean }) => Promise<void>;
-  // Bulk-delete several matches at once (the table's multi-select). Deletes each server-side,
-  // then drops the survivors and refreshes counts in one shot. Same keepClips semantics per match.
-  readonly deleteMatches: (
-    ids: readonly number[],
-    opts?: { readonly keepClips?: boolean },
-  ) => Promise<void>;
+  // Delete a recording — never its clips (they have their own delete). A recording with clips
+  // survives as a videoless stub row (the clips need their parent); a clipless one drops entirely.
+  readonly deleteMatch: (id: number) => Promise<void>;
+  // Bulk-delete several recordings at once (the table's multi-select). Deletes each server-side,
+  // then applies the same rule to all survivors and refreshes counts in one shot.
+  readonly deleteMatches: (ids: readonly number[]) => Promise<void>;
   // Permanently delete one clip (the Clips bucket's right-click delete).
   readonly deleteClip: (id: number) => Promise<void>;
   readonly load: () => Promise<void>;
@@ -187,19 +180,17 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
       }
     },
 
-    // Delete a match (row + markers/pauses + clips + files; with keepClips just the recording's
-    // video, per the API comment). Pessimistic: delete server-side FIRST, then apply the matching
-    // local transform (see lib/library-delete) and refresh the bucket badges. Rethrows so the caller
-    // can surface a failure.
-    deleteMatch: async (id, opts) => {
-      const keepClips = opts?.keepClips === true;
-      await apiDeleteMatch(id, { keepClips });
+    // Delete a recording (never its clips — the server leaves a videoless stub row when clips
+    // exist, else drops the row; applyRecordingsDeleted mirrors that rule locally). Pessimistic:
+    // delete server-side FIRST, then apply the local transform (see lib/library-delete) and refresh
+    // the bucket badges. Rethrows so the caller can surface a failure.
+    deleteMatch: async (id) => {
+      await apiDeleteMatch(id);
       // A coalesced match.* frame fires load() every ~200ms, so a load() that fetched the list BEFORE
       // this delete committed server-side may still be in flight; invalidate it so it can't resurrect
       // the just-deleted row (and so it doesn't leave the table wedged on the spinner).
       invalidatePendingLoad();
-      const deleted = new Set([id]);
-      set((s) => (keepClips ? applyMatchVideosDeleted(s, deleted) : applyMatchesDeleted(s, deleted)));
+      set((s) => applyRecordingsDeleted(s, new Set([id])));
       try {
         set({ counts: await fetchBucketCounts() });
       } catch {
@@ -211,12 +202,11 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
     // small selection size — then applies the transform for all survivors in ONE state update and
     // refreshes counts once (rather than the per-row count fetch deleteMatch does). A single failed
     // delete is skipped so the rest still go; the next load() reconciles any straggler.
-    deleteMatches: async (ids, opts) => {
-      const keepClips = opts?.keepClips === true;
+    deleteMatches: async (ids) => {
       const deleted = new Set<number>();
       for (const id of ids) {
         try {
-          await apiDeleteMatch(id, { keepClips });
+          await apiDeleteMatch(id);
           deleted.add(id);
         } catch {
           /* skip this one; the rest still delete and the next load() reconciles */
@@ -224,7 +214,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
       }
       if (deleted.size === 0) return;
       invalidatePendingLoad();
-      set((s) => (keepClips ? applyMatchVideosDeleted(s, deleted) : applyMatchesDeleted(s, deleted)));
+      set((s) => applyRecordingsDeleted(s, deleted));
       try {
         set({ counts: await fetchBucketCounts() });
       } catch {
