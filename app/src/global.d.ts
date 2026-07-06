@@ -7,6 +7,9 @@ declare global {
   interface Window {
     readonly dotarec?: DotaRecBridge;
   }
+
+  // Inlined by Vite at build time from app/package.json (see vite.config.ts `define`).
+  const __APP_VERSION__: string;
 }
 
 export {};

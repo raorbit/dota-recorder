@@ -218,7 +218,7 @@ export function Sidebar({
         ))}
       </div>
 
-      <div className="sb-version">v0.1.5</div>
+      <div className="sb-version">v{__APP_VERSION__}</div>
     </aside>
   );
 }
