@@ -124,6 +124,26 @@ describe('JvmSupervisor', () => {
     expect(children[0].kill).toHaveBeenCalledWith('SIGTERM');
   });
 
+  it('still fires onUnexpectedExit for a crash AFTER a stop()/start() cycle (stopping flag resets)', async () => {
+    // SupervisionController reuses one supervisor instance: a failed restart attempt stop()s it and a
+    // later attempt start()s it again. If start() did not reset the latched `stopping` flag, every
+    // crash of the new child would read as a requested stop — crash recovery permanently muted.
+    const onUnexpectedExit = vi.fn();
+    const sup = new JvmSupervisor({ onLog: () => {}, onUnexpectedExit });
+    await sup.start();
+
+    const stopped = sup.stop();
+    children[0].emit('exit', 0, 'SIGTERM');
+    await stopped;
+    expect(onUnexpectedExit).not.toHaveBeenCalled();
+
+    await sup.start(); // same instance, second generation
+    children[1].emit('exit', 1, null); // a REAL crash of the new core
+
+    expect(onUnexpectedExit).toHaveBeenCalledTimes(1);
+    expect(onUnexpectedExit).toHaveBeenCalledWith({ code: 1, signal: null });
+  });
+
   it('aborts the health poll promptly when the child crashes during startup (generation guard)', async () => {
     healthOk = false; // /health never ok, so without the guard waitForHealth would poll to the deadline
     const sup = new JvmSupervisor({ onLog: () => {}, healthTimeoutMs: 5_000 });
@@ -317,6 +337,37 @@ describe('JvmSupervisor.stop — hard-kill escalation', () => {
       expect(children[0].kill).toHaveBeenNthCalledWith(1, 'SIGTERM');
       expect(children[0].kill).toHaveBeenCalledWith('SIGKILL');
       expect(spawnMock).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(process, 'platform', { value: platform, configurable: true });
+    }
+  });
+
+  it("ignores a superseded child's late exit after a new start(), but still reports the new child's crash", async () => {
+    // The failed-restart path: stop() escalates to taskkill (child never exits in the grace window),
+    // then the next restart attempt start()s a new child — which resets `stopping`. When the OLD
+    // child's kill-induced exit finally lands, it must NOT read as a crash of the new core (that
+    // spurious callback would restart onto — and kill — a healthy core).
+    const platform = process.platform;
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+    try {
+      const onUnexpectedExit = vi.fn();
+      const sup = new JvmSupervisor({ onLog: () => {}, onUnexpectedExit });
+      await sup.start();
+      const oldCore = children[0];
+
+      const stopped = sup.stop();
+      await vi.advanceTimersByTimeAsync(4_000); // grace window elapses -> taskkill path, child not yet exited
+      await stopped;
+
+      await sup.start(); // next restart attempt: new generation, `stopping` resets
+      // The taskkill spawn also lands in `children`, so grab the new core off the end, not by index.
+      const newCore = children[children.length - 1];
+
+      oldCore.emit('exit', 1, null); // the OLD child's taskkill-induced exit lands late
+      expect(onUnexpectedExit).not.toHaveBeenCalled();
+
+      newCore.emit('exit', 1, null); // a real crash of the CURRENT child is still detected
+      expect(onUnexpectedExit).toHaveBeenCalledTimes(1);
     } finally {
       Object.defineProperty(process, 'platform', { value: platform, configurable: true });
     }
