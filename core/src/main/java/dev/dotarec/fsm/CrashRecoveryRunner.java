@@ -351,7 +351,8 @@ public class CrashRecoveryRunner implements ApplicationRunner {
             String fileName = file.getFileName().toString();
             // Clip leftovers carry a "clip-<clipId>-" prefix (a separate id space from match files); route
             // them to clip recovery so a stranded clip copy is re-linked/dropped, never adopted as a bogus
-            // match. A false return (no such clip row) falls through to a plain orphan import below.
+            // match. A false return (no such clip row, or a prefix collision that isn't attributable move
+            // residue) falls through to a plain orphan import below.
             Long clipId = leadingClipId(fileName);
             if (clipId != null && recoverArchivedClipLeftover(file, clipId)) {
                 return;
@@ -374,7 +375,8 @@ public class CrashRecoveryRunner implements ApplicationRunner {
                     // archiver's exact naming AND be attributable before reclaiming it; otherwise fall
                     // through to import (mirrors the clip path's policy of never destroying an
                     // unattributable file).
-                    if (isGenuineMoveResidue(file, matchId, row.get())) {
+                    if (isGenuineMoveResidue(
+                            file, matchId + "-", row.get().videoPath(), "match " + matchId)) {
                         deleteQuietly(file);
                         log.warn("Removed redundant archive move-leftover {} (match {} already intact)",
                                 file, matchId);
@@ -396,14 +398,15 @@ public class CrashRecoveryRunner implements ApplicationRunner {
     }
 
     /**
-     * True when {@code file} on an archive drive is provably this intact match's move residue, so it is
+     * True when {@code file} on an archive drive is provably an intact row's move residue, so it is
      * safe to delete. The archiver ({@link dev.dotarec.retention.RecordingArchiver}) names a relocated
-     * VOD {@code <matchId>-<original file name>} and, on the cross-store copy path, verifies the copy's
-     * byte count equals the source's. We mirror both:
+     * file {@code <prefix><original file name>} ({@code <matchId>-} for VODs, {@code clip-<clipId>-}
+     * for clips) and, on the cross-store copy path, verifies the copy's byte count equals the
+     * source's. We mirror both:
      *
      * <ul>
-     *   <li><b>naming</b> — the remainder after the {@code <matchId>-} prefix must equal the intact
-     *       row's own video file name (the {@code src.getFileName()} the archiver prefixed);</li>
+     *   <li><b>naming</b> — the remainder after {@code prefix} must equal the intact row's own video
+     *       file name (the {@code src.getFileName()} the archiver prefixed);</li>
      *   <li><b>attribution</b> — the leftover's on-disk size must equal the intact row's current file
      *       size (an interrupted move leaves a full-size duplicate of the same bytes).</li>
      * </ul>
@@ -411,9 +414,9 @@ public class CrashRecoveryRunner implements ApplicationRunner {
      * Both must hold. A coincidental id-prefix collision (a user-placed file whose name/size differs)
      * fails one of these and is imported rather than destroyed.
      */
-    private boolean isGenuineMoveResidue(Path file, long matchId, MatchSummary intactRow) {
-        String remainder = leftoverRemainder(file.getFileName().toString(), matchId);
-        Path rowVideo = safePath(intactRow.videoPath());
+    private boolean isGenuineMoveResidue(Path file, String prefix, String rowVideoPath, String owner) {
+        String remainder = leftoverRemainder(file.getFileName().toString(), prefix);
+        Path rowVideo = safePath(rowVideoPath);
         if (remainder == null || rowVideo == null) {
             return false;
         }
@@ -426,19 +429,19 @@ public class CrashRecoveryRunner implements ApplicationRunner {
             return Files.size(file) == Files.size(rowVideo);
         } catch (Exception e) {
             // Can't confirm the sizes match -> don't destroy the file; let it be imported.
-            log.warn("Could not compare sizes for archive leftover {} vs match {}: {}",
-                    file, matchId, e.toString());
+            log.warn("Could not compare sizes for archive leftover {} vs {}: {}",
+                    file, owner, e.toString());
             return false;
         }
     }
 
     /**
-     * The part of {@code fileName} after the archiver's {@code <matchId>-} prefix, or null when the name
-     * doesn't carry exactly that prefix (a defensive re-check even though the caller already parsed the
-     * id — this ties the delete decision to the exact prefix string, not just a leading-digit match).
+     * The part of {@code fileName} after the archiver's owner prefix ({@code <matchId>-} or
+     * {@code clip-<clipId>-}), or null when the name doesn't carry exactly that prefix (a defensive
+     * re-check even though the caller already parsed the id — this ties the delete decision to the
+     * exact prefix string, not just a leading-digit match).
      */
-    private static String leftoverRemainder(String fileName, long matchId) {
-        String prefix = matchId + "-";
+    private static String leftoverRemainder(String fileName, String prefix) {
         if (!fileName.startsWith(prefix) || fileName.length() == prefix.length()) {
             return null;
         }
@@ -452,12 +455,15 @@ public class CrashRecoveryRunner implements ApplicationRunner {
      * <ul>
      *   <li>if the clip row lost its file (a same-filesystem rename consumed the source before the
      *       repoint committed), RE-LINK the row to this recovered copy;</li>
-     *   <li>if the clip is already intact, this is a redundant copy from the interrupted move — DELETE it
-     *       to reclaim the space.</li>
+     *   <li>if the clip is already intact AND the file is provably its move residue (same
+     *       basename/size attribution as the match path), this is a redundant copy from the
+     *       interrupted move — DELETE it to reclaim the space.</li>
      * </ul>
      *
-     * <p>Returns {@code false} when no such clip row exists (e.g. the clip was deleted), so the caller
-     * adopts the loose file as a standalone gsi_only row rather than deleting a file it can't attribute.
+     * <p>Returns {@code false} when no such clip row exists (e.g. the clip was deleted) or when the
+     * intact clip's prefix collides with a file that isn't attributable as its residue (e.g. a
+     * user-placed {@code clip-12-something.mp4}), so the caller adopts the loose file as a standalone
+     * gsi_only row rather than deleting a file it can't attribute.
      */
     private boolean recoverArchivedClipLeftover(Path file, long clipId) {
         Optional<ClipRow> row = clips.findById(clipId);
@@ -469,11 +475,21 @@ public class CrashRecoveryRunner implements ApplicationRunner {
                     recoverArchivedThumb(file.getParent(), "clip-" + clipId + "-", row.get().thumbPath());
             clips.updateVideoPath(clipId, file.toString(), thumb);
             log.warn("Re-linked stranded archive clip {} to clip row {} (interrupted move)", file, clipId);
-        } else {
+            return true;
+        }
+        // The row is intact, so this clip-prefixed file is only redundant if it is genuinely the
+        // clip's move residue — the same attribution the match path requires before deleting.
+        if (isGenuineMoveResidue(file, "clip-" + clipId + "-", row.get().videoPath(), "clip " + clipId)) {
             deleteQuietly(file);
             log.warn("Removed redundant archive clip move-leftover {} (clip {} already intact)", file, clipId);
+            return true;
         }
-        return true;
+        log.warn(
+                "Archive file {} shares clip {}'s id prefix but isn't attributable move residue;"
+                    + " importing rather than deleting",
+                file,
+                clipId);
+        return false;
     }
 
     /**

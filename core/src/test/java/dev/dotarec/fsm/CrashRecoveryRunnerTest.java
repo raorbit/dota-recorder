@@ -539,12 +539,14 @@ class CrashRecoveryRunnerTest {
         Path archiveDir = configureArchive("hdd");
         long parentId = insertMatch(videoDir.resolve("parent.mp4").toString(), null, 4_096L);
         // The clip row still points at an existing source (interrupted move copied across but crashed
-        // before repointing), so the archive-drive copy is a redundant duplicate to reclaim.
+        // before repointing), so the archive-drive copy is a redundant duplicate to reclaim. Genuine
+        // move residue is a full, byte-identical duplicate: same name after the "clip-<id>-" prefix
+        // AND same size as the intact copy — the same attribution the match path requires.
         Path clipSource = Files.createDirectories(videoDir.resolve("clips")).resolve("1-clip-1.mp4");
         Files.writeString(clipSource, "the live clip");
         long clipId = insertClip(parentId, clipSource.toString());
         Path leftover = archiveDir.resolve("clip-" + clipId + "-1-clip-1.mp4");
-        Files.writeString(leftover, "redundant copy");
+        Files.writeString(leftover, "the live clip");
 
         runner.run(null);
 
@@ -552,6 +554,59 @@ class CrashRecoveryRunnerTest {
         assertThat(Files.exists(leftover)).isFalse();
         assertThat(clips.findById(clipId).orElseThrow().videoPath()).isEqualTo(clipSource.toString());
         assertThat(matches.findAll()).hasSize(1);
+    }
+
+    @Test
+    void doesNotDeleteClipPrefixedArchiveFileThatIsNotGenuineResidue() throws Exception {
+        Path archiveDir = configureArchive("hdd");
+        long parentId = insertMatch(videoDir.resolve("parent.mp4").toString(), null, 4_096L);
+        // The clip row is intact on the active drive under a specific name...
+        Path clipSource = Files.createDirectories(videoDir.resolve("clips")).resolve("1-clip-1.mp4");
+        Files.writeString(clipSource, "the live clip");
+        long clipId = insertClip(parentId, clipSource.toString());
+        // ...but a user-placed file merely COLLIDES with clip <id>'s prefix: its remainder is a
+        // different name ("something.mp4", not "1-clip-1.mp4") and its size differs. It is NOT this
+        // clip's move residue, so it must be imported (never deleted) — before the attribution guard,
+        // the intact-row branch deleted any "clip-<id>-" file outright.
+        Path notResidue = archiveDir.resolve("clip-" + clipId + "-something.mp4");
+        Files.writeString(notResidue, "an unrelated user-placed recording");
+        makeStale(notResidue);
+
+        runner.run(null);
+
+        // The unattributable file survives...
+        assertThat(Files.exists(notResidue)).isTrue();
+        // ...and is adopted as a standalone gsi_only row rather than deleted.
+        assertThat(matches.findAll())
+                .filteredOn(row -> notResidue.toString().equals(row.videoPath()))
+                .singleElement()
+                .satisfies(row -> assertThat(row.enrichmentState()).isEqualTo("gsi_only"));
+        // The intact clip row is untouched.
+        assertThat(clips.findById(clipId).orElseThrow().videoPath()).isEqualTo(clipSource.toString());
+    }
+
+    @Test
+    void doesNotDeleteClipPrefixedArchiveFileWithMatchingNameButDifferentSize() throws Exception {
+        Path archiveDir = configureArchive("hdd");
+        long parentId = insertMatch(videoDir.resolve("parent.mp4").toString(), null, 4_096L);
+        // The trickier collision: the remainder DOES match the intact clip's name, but the on-disk
+        // sizes differ (a truncated partial copy, or a same-named unrelated file). Not provably
+        // residue -> kept and imported, mirroring the match path's size guard.
+        Path clipSource = Files.createDirectories(videoDir.resolve("clips")).resolve("1-clip-1.mp4");
+        Files.writeString(clipSource, "the live clip");
+        long clipId = insertClip(parentId, clipSource.toString());
+        Path sameNameDifferentBytes = archiveDir.resolve("clip-" + clipId + "-1-clip-1.mp4");
+        Files.writeString(sameNameDifferentBytes, "a longer, different set of bytes entirely");
+        makeStale(sameNameDifferentBytes);
+
+        runner.run(null);
+
+        assertThat(Files.exists(sameNameDifferentBytes)).isTrue();
+        assertThat(matches.findAll())
+                .filteredOn(row -> sameNameDifferentBytes.toString().equals(row.videoPath()))
+                .singleElement()
+                .satisfies(row -> assertThat(row.enrichmentState()).isEqualTo("gsi_only"));
+        assertThat(clips.findById(clipId).orElseThrow().videoPath()).isEqualTo(clipSource.toString());
     }
 
     @Test
