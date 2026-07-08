@@ -387,7 +387,9 @@ export interface StopRecordingResult {
 // thumbnail, stop OBS, persist the match row + buffered markers, reset to IDLE — the
 // same path the GSI-silence watchdog uses. The user's escape hatch for a match that
 // never sent POST_GAME (bot/custom/abandoned), where the recorder would otherwise stay
-// stuck in RECORDING. Idempotent server-side: a no-op when nothing is recording.
+// stuck in RECORDING. Also stops an OBS output the recorder lost track of (a finalize
+// whose StopRecord failed while OBS kept writing) — that too reports wasRecording=true.
+// Idempotent server-side: a no-op when nothing is recording.
 export function stopRecording(): Promise<StopRecordingResult> {
   return postJson<StopRecordingResult>('/recording/stop');
 }
