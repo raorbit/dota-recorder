@@ -644,6 +644,17 @@ public class ObsController implements ObsRecorder {
             } catch (Exception e) {
                 log.debug("Ignoring error during OBS disconnect: {}", e.toString());
             }
+            // disconnect() only closes the websocket SESSION; stop() is the library's sole call that
+            // stops the underlying Jetty WebSocketClient/HttpClient. connect() starts that client
+            // (and its thread pool) even when OBS is unreachable, and each connect() builds a fresh
+            // controller — so without stop() here, every 5s reconnect tick against a down OBS leaks
+            // ~9 live threads that pin the whole client graph (measured: OOM "unable to create native
+            // thread" after ~30-90min of sustained OBS-down).
+            try {
+                c.stop();
+            } catch (Exception e) {
+                log.debug("Ignoring error stopping OBS websocket client: {}", e.toString());
+            }
         }
     }
 }

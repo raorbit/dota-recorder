@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.nullable;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -402,6 +403,83 @@ class ObsControllerTest {
         assertThat(connectRebuilt.get())
                 .as("connect() runs once the start releases the lock")
                 .isTrue();
+    }
+
+    @Test
+    void connect_stopsThePriorControllersWebsocketClient_soReconnectTicksCannotLeakThreads() {
+        // disconnect() only closes the websocket SESSION; stop() is the library's only call that
+        // stops the underlying Jetty WebSocketClient/HttpClient (whose thread pool connect() starts
+        // even against a down OBS). The 5s reconnect tick builds a fresh controller per attempt, so a
+        // teardown that skips stop() leaks ~9 live threads per tick during sustained OBS-down until
+        // "unable to create native thread". Prove the teardown issues BOTH, session-close first.
+        ObsHealth health = new ObsHealth();
+        SettingsStore settings = mock(SettingsStore.class);
+        when(settings.get()).thenReturn(new SettingsStore.Settings());
+        ObsController controller =
+                new ObsController(settings, health, new ObsEvents(health), sceneConfigurer()) {
+                    @Override
+                    OBSRemoteController buildController(SettingsStore.Settings s, CountDownLatch latch) {
+                        latch.countDown();
+                        return mock(OBSRemoteController.class); // the fresh attempt; inert
+                    }
+                };
+        OBSRemoteController prior = mock(OBSRemoteController.class);
+        ReflectionTestUtils.setField(controller, "controller", prior);
+
+        controller.connect();
+
+        InOrder order = inOrder(prior);
+        order.verify(prior).disconnect();
+        order.verify(prior).stop();
+    }
+
+    @Test
+    void connect_stillStopsThePriorClientWhenDisconnectThrows() {
+        // The two teardown steps are independently guarded: a session-close failure (already-dead
+        // socket) must not skip the stop() that actually releases the client's threads.
+        ObsHealth health = new ObsHealth();
+        SettingsStore settings = mock(SettingsStore.class);
+        when(settings.get()).thenReturn(new SettingsStore.Settings());
+        ObsController controller =
+                new ObsController(settings, health, new ObsEvents(health), sceneConfigurer()) {
+                    @Override
+                    OBSRemoteController buildController(SettingsStore.Settings s, CountDownLatch latch) {
+                        latch.countDown();
+                        return mock(OBSRemoteController.class);
+                    }
+                };
+        OBSRemoteController prior = mock(OBSRemoteController.class);
+        doThrow(new RuntimeException("session already closed")).when(prior).disconnect();
+        ReflectionTestUtils.setField(controller, "controller", prior);
+
+        controller.connect();
+
+        verify(prior).stop();
+    }
+
+    @Test
+    void connect_swallowsAThrowingStopSoTeardownCannotBreakTheReconnectTick() {
+        // The other direction: stop() joins Jetty threads and can itself throw on a wedged client.
+        // Teardown must swallow that too, or a reconnect tick would die mid-teardown and never rebuild.
+        ObsHealth health = new ObsHealth();
+        SettingsStore settings = mock(SettingsStore.class);
+        when(settings.get()).thenReturn(new SettingsStore.Settings());
+        ObsController controller =
+                new ObsController(settings, health, new ObsEvents(health), sceneConfigurer()) {
+                    @Override
+                    OBSRemoteController buildController(SettingsStore.Settings s, CountDownLatch latch) {
+                        latch.countDown();
+                        return mock(OBSRemoteController.class);
+                    }
+                };
+        OBSRemoteController prior = mock(OBSRemoteController.class);
+        doThrow(new RuntimeException("client wedged")).when(prior).stop();
+        ReflectionTestUtils.setField(controller, "controller", prior);
+
+        controller.connect(); // must not throw
+
+        verify(prior).disconnect();
+        verify(prior).stop();
     }
 
     @Test
