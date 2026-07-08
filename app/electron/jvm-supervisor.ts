@@ -80,6 +80,12 @@ export class JvmSupervisor {
 
   /** Spawn the JVM core and resolve once GET /health reports ok. */
   async start(): Promise<void> {
+    // A prior stop() latches `stopping` true — including the failed-restart reap in
+    // SupervisionController.handleCoreCrash, which stop()s and then start()s this SAME instance.
+    // Without resetting it here, every later crash of the new child would read as a requested stop
+    // and never reach onUnexpectedExit — permanently muting crash recovery (recording would just
+    // silently stop on a tray-hidden app).
+    this.stopping = false;
     const jar = resolveCoreJar();
     if (!jar) {
       throw new Error(
@@ -135,10 +141,14 @@ export class JvmSupervisor {
     child.on('exit', (code, signal) => {
       // Only clear the handle if THIS child is still current — a newer start() (e.g. a crash-triggered
       // restart) may already have replaced it. Clearing it FIRST lets onUnexpectedExit restart cleanly.
-      if (this.child === child) {
+      const isCurrent = this.child === child;
+      if (isCurrent) {
         this.child = null;
       }
-      if (!this.stopping) {
+      // Gate on isCurrent too: a superseded child's late exit (stop()'s taskkill landing after the
+      // next start() already reset `stopping`) is not a crash of the NEW core — reporting it would
+      // trigger a restart cycle that kills a healthy core.
+      if (isCurrent && !this.stopping) {
         this.onLog(`core exited unexpectedly (code=${code ?? 'null'} signal=${signal ?? 'null'})`);
         this.onUnexpectedExit?.({ code, signal });
       }
