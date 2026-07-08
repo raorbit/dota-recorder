@@ -8,7 +8,9 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell, Tray } f
 import { randomBytes } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { JvmSupervisor } from './jvm-supervisor';
+import { isAllowedNavigation, type AllowedNavigation } from './navigation-guard';
 import { ObsSupervisor } from './obs-supervisor';
 import { SupervisionController } from './supervision';
 import { pathIsAccessible, revealablePath } from './reveal-path-guard';
@@ -385,11 +387,15 @@ function createWindow(): void {
   });
 
   // Lock the window to its own bundled content: deny popups and block any navigation away from the
-  // expected origin, so an injected/accidental external page can never inherit the bridge token.
+  // expected page, so an injected/accidental external page can never inherit the bridge token.
+  // Packaged builds allow ONLY the bundled index.html — a bare `file://` prefix would admit any
+  // local file page (policy + tests live in navigation-guard.ts).
+  const allowedNav: AllowedNavigation = isDev
+    ? { devServerUrl: DEV_SERVER_URL }
+    : { packagedIndexUrl: pathToFileURL(packagedIndexHtml()).href };
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   mainWindow.webContents.on('will-navigate', (event, url) => {
-    const allowedPrefix = isDev ? DEV_SERVER_URL : 'file://';
-    if (!url.startsWith(allowedPrefix)) {
+    if (!isAllowedNavigation(url, allowedNav)) {
       event.preventDefault();
       logLine(`blocked navigation to ${url}`);
     }
