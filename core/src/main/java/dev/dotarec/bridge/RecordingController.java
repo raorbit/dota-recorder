@@ -25,6 +25,12 @@ import org.springframework.web.bind.annotation.RestController;
  * RECORDING, and it can never interleave with a concurrent GSI-frame finalize. {@code wasRecording}
  * is read just before the call (a best-effort flag) so the UI can distinguish "stopped your
  * recording" from "nothing was recording".
+ *
+ * <p>It also covers the FSM-orphaned case via {@link MatchFsm#stopOrphanedRecording()}: a finalize
+ * whose StopRecord failed twice resets the FSM to IDLE while OBS keeps writing. The status card
+ * renders {@code ObsHealth.recording}, so the user still sees "Recording" and clicks stop — but
+ * {@code forceFinalize()} alone would no-op there, leaving the visible button dead and the runaway
+ * output stoppable only by a new match's corrective StopRecord or quitting the app.
  */
 @RestController
 public class RecordingController {
@@ -48,6 +54,10 @@ public class RecordingController {
         // forceFinalize is itself idempotent (a no-op off RECORDING), so the controller need not gate
         // it -- the wasRecording flag above is purely for the UI message.
         fsm.forceFinalize();
+        // OBS may hold an output the FSM no longer tracks (a finalize whose StopRecord failed twice).
+        // A stopped orphan counts as wasRecording: from the user's view a recording WAS in flight —
+        // the status card said so — and it is now stopped.
+        boolean stoppedOrphan = fsm.stopOrphanedRecording();
         // Push the new state immediately so the status card flips off "Recording" without waiting for
         // the 5s OBS-scheduler status heartbeat. Best-effort: a broadcast hiccup must not fail the stop.
         try {
@@ -55,7 +65,7 @@ public class RecordingController {
         } catch (RuntimeException e) {
             log.debug("Status push after manual stop failed (best-effort): {}", e.toString());
         }
-        return new StopResult(wasRecording);
+        return new StopResult(wasRecording || stoppedOrphan);
     }
 
     /** {@code POST /recording/stop} response: whether a recording was in flight when the call landed. */

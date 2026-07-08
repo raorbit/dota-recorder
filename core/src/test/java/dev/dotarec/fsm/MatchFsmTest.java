@@ -157,6 +157,50 @@ class MatchFsmTest {
     }
 
     @Test
+    void stopOrphanedRecording_whileIdleWithObsStillRecording_stopsIt() {
+        // The FSM-orphaned state: a finalize gave up on a failed double StopRecord and reset to IDLE
+        // while OBS kept writing (modeled by flipping the fake's flag directly). The manual stop path
+        // must be able to cut that output — forceFinalize alone is a no-op here, which used to leave
+        // the visible stop button dead while the card showed "Recording".
+        obs.recording = true;
+        assertThat(fsm.getState()).isEqualTo(MatchState.IDLE);
+
+        assertThat(fsm.stopOrphanedRecording()).isTrue();
+
+        assertThat(obs.stopCalls).isEqualTo(1);
+        assertThat(obs.recording).isFalse();
+    }
+
+    @Test
+    void stopOrphanedRecording_isANoOpWhileRecordingNormally() {
+        fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
+        assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
+
+        // A tracked recording is the FSM's to finalize (thumbnail-before-stop, persist, markers) —
+        // the orphan path must never cut it out from under the live session.
+        assertThat(fsm.stopOrphanedRecording()).isFalse();
+        assertThat(obs.stopCalls).isZero();
+        assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
+    }
+
+    @Test
+    void stopOrphanedRecording_isANoOpWhenObsIsNotRecording() {
+        assertThat(fsm.stopOrphanedRecording()).isFalse();
+        assertThat(obs.stopCalls).isZero();
+    }
+
+    @Test
+    void stopOrphanedRecording_reportsFalseAndSwallowsWhenTheStopFails() {
+        obs.recording = true;
+        obs.stopThrowsRuntime = true;
+
+        // The failure must be swallowed (the bridge endpoint must not 500) and reported as
+        // not-stopped, so the UI keeps showing the still-recording truth and the user can retry.
+        assertThat(fsm.stopOrphanedRecording()).isFalse();
+        assertThat(obs.recording).isTrue();
+    }
+
+    @Test
     void heroSelection_armsAndStartsEarly_evenWithoutPlayerBlock() {
         // Hero-select frame: no player/hero block -> activity null. Early-arm must still start.
         fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_HERO_SELECTION").noHero().activity(null).build());

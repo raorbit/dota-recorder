@@ -212,6 +212,41 @@ public class MatchFsm {
         }
     }
 
+    /**
+     * Stops an OBS output the FSM no longer tracks: {@code state != RECORDING} yet OBS still reports
+     * an active record output. Reachable when a finalize's StopRecord failed twice
+     * ({@link #stopRecordingWithRetry} gives up and the FSM resets to IDLE while OBS keeps writing).
+     * In that state the status card still shows "Recording" (it renders {@code ObsHealth.recording}),
+     * but {@link #forceFinalize()} is a no-op — without this, the stop button the user sees cannot
+     * actually stop OBS; only a new match's corrective StopRecord or quitting the app would.
+     *
+     * <p>{@code synchronized} so it cannot interleave with a concurrent arm: without the monitor, a
+     * hero-select arm landing between the caller's state check and the StopRecord would get its fresh
+     * recording killed. Deliberately user-initiated only (never scheduled): OBS reporting an active
+     * output while the FSM is idle is also what a recording started by hand in the managed OBS window
+     * looks like, and an automatic sweep would keep killing it.
+     *
+     * <p>The stopped file is intentionally not imported here — the next boot's orphan scan
+     * ({@link CrashRecoveryRunner}) adopts it with the usual quiescence guard.
+     *
+     * @return true when an orphaned output was confirmed stopped
+     */
+    public synchronized boolean stopOrphanedRecording() {
+        if (state == MatchState.RECORDING || !obs.isRecording()) {
+            return false;
+        }
+        try {
+            String path = obs.stopRecording();
+            log.warn("Stopped FSM-orphaned OBS recording {}; the orphan scan adopts it on next boot", path);
+            return true;
+        } catch (RuntimeException e) {
+            // Couldn't confirm the stop: leave ObsHealth.recording as-is so the UI keeps showing the
+            // truth and another click (or the next match's corrective StopRecord) can retry.
+            log.warn("Could not stop orphaned OBS recording: {}", e.toString());
+            return false;
+        }
+    }
+
     private boolean isArmState(String gs) {
         return HERO_SELECTION.equals(gs) || STRATEGY_TIME.equals(gs) || PRE_GAME.equals(gs);
     }

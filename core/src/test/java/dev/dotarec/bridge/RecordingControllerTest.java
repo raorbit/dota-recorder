@@ -46,6 +46,25 @@ class RecordingControllerTest {
     }
 
     @Test
+    void stop_whenObsHoldsAnOrphanedOutput_stopsItAndReportsTrue() {
+        // The FSM-orphaned state: a finalize's double StopRecord failed, the FSM reset to IDLE, and
+        // OBS kept writing. The status card (driven by ObsHealth) still shows "Recording", so the stop
+        // button is visible — the endpoint must actually stop that output and report "stopped", not
+        // no-op through forceFinalize and claim nothing was recording.
+        MatchFsm fsm = mock(MatchFsm.class);
+        EventPublisher events = mock(EventPublisher.class);
+        when(fsm.getState()).thenReturn(MatchState.IDLE);
+        when(fsm.stopOrphanedRecording()).thenReturn(true);
+
+        StopResult result = new RecordingController(fsm, events).stop();
+
+        assertThat(result.wasRecording()).isTrue();
+        verify(fsm).forceFinalize();
+        verify(fsm).stopOrphanedRecording();
+        verify(events).publishStatus();
+    }
+
+    @Test
     void stop_whenStatusPushThrows_swallowsAndStillReturns() {
         MatchFsm fsm = mock(MatchFsm.class);
         EventPublisher events = mock(EventPublisher.class);
