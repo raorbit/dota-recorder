@@ -632,7 +632,8 @@ public class RetentionSweeper {
         }
         // Containment guard: never unlink a file that sits outside every configured storage root (a
         // tampered/hand-edited video_path, a `..` escape). Use the SAME allow-list the bridge streams
-        // with (StorageRoots — videoDir + archive drives + previousVideoDirs), so a legitimately
+        // with (StorageRoots — videoDir + archive drives + previousVideoDirs + previousArchiveDirs),
+        // so a legitimately
         // archived or moved-off-of VOD is still deletable and only a genuinely misrooted file is
         // refused. Return false WITHOUT nulling the row: an orphaned misrooted file must stay visible in
         // the library (row preserved, no freed-bytes credit) rather than be silently pruned as if evicted.
