@@ -1,0 +1,77 @@
+/* Low-disk warning bar: a calm amber (--gold) strip across the top of the main column. Mirrors the
+   filter-row's full-width bar chrome (padding + bottom border) and the settings "note" warning tone
+   (gold circular `!` badge), deliberately not the error-red accent. Uses shared tokens. */
+
+.dwb-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+  padding: 11px 18px;
+  background: rgba(217, 164, 65, 0.1);
+  border-bottom: 1px solid rgba(217, 164, 65, 0.28);
+  color: var(--text-secondary);
+  font-family: var(--font-body);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.dwb-icon {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: rgba(217, 164, 65, 0.18);
+  border: 1px solid rgba(217, 164, 65, 0.45);
+  color: var(--gold);
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 12px;
+}
+
+.dwb-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+}
+
+.dwb-label {
+  font-weight: 600;
+  color: var(--gold);
+}
+
+.dwb-free {
+  font-family: var(--font-mono);
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.dwb-dismiss {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.dwb-dismiss:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+}
+
+.dwb-dismiss:focus-visible {
+  outline: 2px solid var(--gold);
+  outline-offset: 1px;
+}
