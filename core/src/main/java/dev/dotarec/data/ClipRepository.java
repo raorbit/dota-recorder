@@ -367,6 +367,53 @@ public class ClipRepository {
     }
 
     /**
+     * Atomically claims a sweep candidate for eviction: nulls the clip's file columns ONLY while it
+     * is still non-starred AND still points at the video the sweeper snapshotted. Both guards live
+     * in the WHERE so the starred re-check and the prune are one statement, not a read-then-write: a
+     * star PATCH that commits between the sweeper's candidate snapshot and this clip's eviction turn
+     * wins — the claim matches nothing and the file is never unlinked. Mirrors
+     * {@link MatchRepository#claimForSweep}. After a successful claim the caller unlinks the file
+     * and {@link #delete}s the row, or {@link #restoreVideoPath}s it when the unlink fails.
+     *
+     * @return true only if THIS call claimed the row; the caller may then unlink the file
+     */
+    public boolean claimForSweep(long id, String videoPath) {
+        String sql = "UPDATE clips SET video_path = NULL, thumb_path = NULL, file_size_bytes = NULL "
+                + "WHERE id = ? AND starred = 0 AND video_path = ?";
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, id);
+            ps.setString(2, videoPath);
+            return ps.executeUpdate() == 1;
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to claim clip " + id + " for sweep", e);
+        }
+    }
+
+    /**
+     * Undoes {@link #claimForSweep} after the file unlink FAILED: restores the snapshotted paths and
+     * size so the row keeps referencing its intact on-disk .mp4 and the next sweep can retry — the
+     * alternative is an invisibly orphaned file that the non-recursive orphan scan never reclaims
+     * from clips/. Unconditional on purpose: it only runs moments after this pass's own successful
+     * claim, under the storage maintenance lock. Mirrors {@link MatchRepository#restoreVideoPath}.
+     *
+     * @return rows updated (0 if no such clip)
+     */
+    public int restoreVideoPath(long id, String videoPath, String thumbPath, Long fileSizeBytes) {
+        String sql = "UPDATE clips SET video_path = ?, thumb_path = ?, file_size_bytes = ? WHERE id = ?";
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, videoPath);
+            ps.setString(2, thumbPath);
+            setNullableLong(ps, 3, fileSizeBytes);
+            ps.setLong(4, id);
+            return ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to restore video path for clip " + id, e);
+        }
+    }
+
+    /**
      * Sets the starred flag on a clip. A starred clip is exempt from the retention sweep — kept until
      * manually deleted, independently of its parent match's star. Mirrors
      * {@link MatchRepository#setStarred}.

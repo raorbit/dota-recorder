@@ -208,8 +208,8 @@ class RetentionSweeperTest {
         // was already unlinked (file-then-row order). That single failure must NOT abort the pass: the
         // remaining clips still get evicted until under cap. Crucially the failed clip leaks NO FILE (the
         // .mp4 is gone -- a leftover under clips/ could never be reclaimed by the non-recursive orphan
-        // scan); its ROW survives as a transient orphan that the next sweep re-deletes (deleteFileQuietly
-        // treats the now-gone file as removed). freed does not credit the failed clip.
+        // scan); its ROW survives with its sweep claim UNDONE (path restored), so it re-enters the
+        // missing-file flow and a later sweep drops it. freed does not credit the failed clip.
         settings.get().retentionCapGb = 1;
         long gib = 1024L * 1024 * 1024;
         long unit = 6 * gib / 10;
@@ -235,8 +235,10 @@ class RetentionSweeperTest {
 
         // No permanent file leak: the failed clip's .mp4 was unlinked before the row delete threw.
         assertThat(Files.exists(videoDir.resolve("c-boom.mp4"))).isFalse();
-        // Its row survives as a transient orphan (the row delete threw); the next sweep reclaims it.
-        assertThat(clips.findById(boom)).isPresent();
+        // Its row survives with its claim UNDONE (path restored), so it re-enters the missing-file
+        // flow — a later sweep confirms the miss and drops the row — instead of lingering pathless.
+        assertThat(clips.findById(boom).orElseThrow().videoPath())
+                .isEqualTo(videoDir.resolve("c-boom.mp4").toString());
         // The pass was not aborted: the next clips are evicted (file AND row gone) to reach the cap.
         assertThat(clips.findById(second)).isEmpty();
         assertThat(Files.exists(videoDir.resolve("c-second.mp4"))).isFalse();
@@ -276,9 +278,12 @@ class RetentionSweeperTest {
 
         RetentionSweeper.SweepResult result = sweeper.sweep(null);
 
-        // The undeletable clip's row is KEPT (its file is still referenced, not orphaned) and its
+        // The undeletable clip's row is KEPT with its sweep claim UNDONE — the restore puts the
+        // snapshotted path back so the row still references the intact file (not orphaned) — and its
         // undeletable .mp4 directory survives on disk.
-        assertThat(clips.findById(undeletable)).isPresent();
+        assertThat(clips.findById(undeletable).orElseThrow().videoPath())
+                .as("a failed unlink must undo the claim so the row keeps referencing its file")
+                .isEqualTo(videoDir.resolve("c-undeletable.mp4").toString());
         assertThat(Files.isDirectory(videoDir.resolve("c-undeletable.mp4"))).isTrue();
         // The pass was not aborted: the next real clip is evicted (file AND row gone), bringing the 1.2 GiB
         // budget under the 1 GiB cap. The undeletable clip contributed nothing to that budget (its dir
@@ -596,12 +601,14 @@ class RetentionSweeperTest {
     }
 
     @Test
-    void missingVideoOnReachableDriveCountsZeroAndReconcilesTheRow() throws Exception {
+    void missingVideoOnReachableDriveCountsZeroAndReconcilesTheRowOnTheSecondSweep() throws Exception {
         // The oldest row's .mp4 is GONE from the (present) video dir — deleted outside the app — but
         // its stale 2 GiB DB size remains. Counted at DB size those phantom bytes would put the
         // 0.5 GiB real VOD over the 1 GiB cap and evict it to offset bytes that don't exist. The
-        // sweep must count the missing file as 0, reconcile its row to the post-sweep shape (kept,
-        // paths/size nulled, markers intact), and delete nothing.
+        // sweep must count the missing file as 0 from the FIRST miss, but the destructive row
+        // reconcile waits for a SECOND sweep's confirmation (a transiently-missing file must keep
+        // its row): pass 1 leaves the row intact, pass 2 catches it up to the post-sweep shape
+        // (kept, paths/size nulled, markers intact). Nothing is ever deleted.
         settings.get().retentionCapGb = 1;
         long gib = 1024L * 1024 * 1024;
 
@@ -614,16 +621,26 @@ class RetentionSweeperTest {
         markers.insert(phantomId, "death", 42.0, 60, null, "gsi");
         long realId = seedWithFiles("real.mp4", "real.jpg", gib / 2, 2_000L, false);
 
-        RetentionSweeper.SweepResult result = sweeper.sweep(null);
+        RetentionSweeper.SweepResult first = sweeper.sweep(null);
 
         // Nothing evicted: without the phantom bytes the real 0.5 GiB VOD is under the 1 GiB cap.
-        assertThat(result.deletedIds()).isEmpty();
-        assertThat(result.freedBytes()).isZero();
+        assertThat(first.deletedIds()).isEmpty();
+        assertThat(first.freedBytes()).isZero();
         assertThat(Files.exists(videoDir.resolve("real.mp4")))
                 .as("a real VOD must never be evicted to offset phantom bytes")
                 .isTrue();
+        // First miss: the row is NOT yet mutated — a transiently-missing file could still return.
+        assertThat(matches.findById(phantomId).orElseThrow().videoPath())
+                .as("a single miss must not strip the row's path")
+                .isEqualTo(phantomFile.toString());
+
+        RetentionSweeper.SweepResult second = sweeper.sweep(null);
+
+        // Second consecutive miss: the row is reconciled like a swept row — kept, with markers,
+        // paths/size nulled. Still nothing evicted.
+        assertThat(second.deletedIds()).isEmpty();
+        assertThat(second.freedBytes()).isZero();
         assertThat(matches.findById(realId).orElseThrow().videoPath()).isNotNull();
-        // The phantom row is reconciled like a swept row: kept, with markers, paths/size nulled.
         var reconciled = matches.findById(phantomId).orElseThrow();
         assertThat(reconciled.videoPath()).isNull();
         assertThat(reconciled.thumbPath()).isNull();
@@ -632,11 +649,13 @@ class RetentionSweeperTest {
     }
 
     @Test
-    void missingStarredVideoAlsoReconcilesWithoutAnyDeletion() throws Exception {
+    void missingStarredVideoAlsoReconcilesOnTheSecondSweepWithoutAnyDeletion() throws Exception {
         // A STARRED row whose file is gone is never a sweep candidate, so without reconciliation its
         // stale DB bytes would shrink the budget FOREVER — every sweep would evict real unstarred
         // VODs to offset them. The measurement pass must reconcile it too (the star protects the
-        // file, but the file is already gone) while deleting nothing.
+        // file, but the file is already gone) while deleting nothing — but only on the SECOND
+        // consecutive miss, so a starred VOD the user temporarily moved out keeps its row (and its
+        // star) across a single sweep.
         settings.get().retentionCapGb = 1;
         long gib = 1024L * 1024 * 1024;
 
@@ -648,13 +667,22 @@ class RetentionSweeperTest {
                 1_000L, phantomFile.toString(), null, 2 * gib, true, 1_000L, null));
         long realId = seedWithFiles("real.mp4", "real.jpg", gib / 2, 2_000L, false);
 
-        RetentionSweeper.SweepResult result = sweeper.sweep(null);
+        RetentionSweeper.SweepResult first = sweeper.sweep(null);
 
-        assertThat(result.deletedIds()).isEmpty();
-        assertThat(result.freedBytes()).isZero();
+        assertThat(first.deletedIds()).isEmpty();
+        assertThat(first.freedBytes()).isZero();
+        // First miss: the starred row keeps its path — its 2 GiB already count 0 in the budget.
+        assertThat(matches.findById(starredId).orElseThrow().videoPath())
+                .isEqualTo(phantomFile.toString());
+
+        RetentionSweeper.SweepResult second = sweeper.sweep(null);
+
+        assertThat(second.deletedIds()).isEmpty();
+        assertThat(second.freedBytes()).isZero();
         assertThat(Files.exists(videoDir.resolve("real.mp4"))).isTrue();
         assertThat(matches.findById(realId).orElseThrow().videoPath()).isNotNull();
-        // The starred row is reconciled (paths nulled) but kept, still starred.
+        // Confirmed on the second sweep: the starred row is reconciled (paths nulled) but kept,
+        // still starred.
         var reconciled = matches.findById(starredId).orElseThrow();
         assertThat(reconciled.videoPath()).isNull();
         assertThat(reconciled.fileSizeBytes()).isNull();
@@ -662,10 +690,11 @@ class RetentionSweeperTest {
     }
 
     @Test
-    void missingClipOnReachableDriveCountsZeroAndDropsItsRow() throws Exception {
+    void missingClipOnReachableDriveCountsZeroAndDropsItsRowOnTheSecondSweep() throws Exception {
         // A clip row whose .mp4 is gone from the (present) video dir but whose stale 2 GiB DB size
-        // remains. Phantom clip bytes must not evict the real under-cap VOD; the clip row (which has
-        // nothing left to reference) is dropped, matching the eviction phase's file-gone semantics.
+        // remains. Phantom clip bytes must not evict the real under-cap VOD from the FIRST miss; the
+        // clip row (which has nothing left to reference) is dropped on the SECOND consecutive miss,
+        // matching the match rows' two-pass confirmed-missing rule.
         settings.get().retentionCapGb = 1;
         long gib = 1024L * 1024 * 1024;
 
@@ -674,14 +703,23 @@ class RetentionSweeperTest {
         long phantomClip = clips.insert(realVod, "manual", null, 0.0, 10.0, null,
                 phantomClipFile.toString(), null, 2 * gib, "ready", null, 100L);
 
-        RetentionSweeper.SweepResult result = sweeper.sweep(null);
+        RetentionSweeper.SweepResult first = sweeper.sweep(null);
 
-        assertThat(result.deletedIds()).isEmpty();
-        assertThat(result.freedBytes()).isZero();
+        assertThat(first.deletedIds()).isEmpty();
+        assertThat(first.freedBytes()).isZero();
         assertThat(Files.exists(videoDir.resolve("keep.mp4")))
                 .as("a real VOD must not be evicted to offset a phantom clip's bytes")
                 .isTrue();
+        // First miss: the clip row survives with its path — the file could still come back.
+        assertThat(clips.findById(phantomClip).orElseThrow().videoPath())
+                .isEqualTo(phantomClipFile.toString());
+
+        RetentionSweeper.SweepResult second = sweeper.sweep(null);
+
+        assertThat(second.deletedIds()).isEmpty();
+        assertThat(second.freedBytes()).isZero();
         assertThat(matches.findById(realVod).orElseThrow().videoPath()).isNotNull();
+        // Confirmed on the second sweep: the pointless row is dropped.
         assertThat(clips.findById(phantomClip)).isEmpty();
     }
 
@@ -718,6 +756,160 @@ class RetentionSweeperTest {
         assertThat(result.deletedIds()).containsExactly(newer);
         assertThat(result.freedBytes()).isEqualTo(gib);
         assertThat(Files.exists(videoDir.resolve("new.mp4"))).isFalse();
+    }
+
+    @Test
+    void clipStarredAfterCandidateSnapshotIsNeverDeleted() throws Exception {
+        // Clip twin of the match test above: the user stars the oldest clip in the instant between
+        // the sweeper's one-time candidate snapshot and that clip's eviction turn (the star PATCH
+        // commits outside the maintenance lock). The clip loop's atomic claim re-checks starred
+        // INSIDE the path-nulling UPDATE, so the claim fails, the file survives, and eviction moves
+        // on to the next candidate.
+        settings.get().retentionCapGb = 1;
+        long gib = 1024L * 1024 * 1024;
+
+        long match = matches.insert(new NewMatch(
+                null, "match", "enriched", "puck",
+                1, 2, 3, 400, 500, 10000, 120,
+                "win", 7, 22, null, null, 1800,
+                1_000L, null, null, null, false, 1_000L, null));
+        long oldest = seedClip(match, "c-old.mp4", "c-old.jpg", 2 * gib, 100L, false);
+        long newer = seedClip(match, "c-new.mp4", "c-new.jpg", gib, 200L, false);
+
+        ClipRepository racingClips = spy(clips);
+        doAnswer(inv -> {
+            Object candidates = inv.callRealMethod();
+            clips.setStarred(oldest, true); // the star lands right after the snapshot
+            return candidates;
+        }).when(racingClips).findSweepCandidates();
+        RetentionSweeper racy = new RetentionSweeper(matches, racingClips, settings, events);
+
+        RetentionSweeper.SweepResult result = racy.sweep(null);
+
+        // The freshly-starred oldest clip survives: file intact, row untouched (path kept, starred).
+        assertThat(Files.exists(videoDir.resolve("c-old.mp4")))
+                .as("a clip starred after the candidate snapshot must never be deleted")
+                .isTrue();
+        var survivor = clips.findById(oldest).orElseThrow();
+        assertThat(survivor.videoPath()).isNotNull();
+        assertThat(survivor.starred()).isTrue();
+        // The pass still evicted the next (non-starred) clip, and freed credits ONLY that one.
+        assertThat(clips.findById(newer)).isEmpty();
+        assertThat(Files.exists(videoDir.resolve("c-new.mp4"))).isFalse();
+        assertThat(result.freedBytes()).isEqualTo(gib);
+    }
+
+    @Test
+    void matchCandidateVanishingMidPassCreditsTotalSoTheNextVictimSurvives() throws Exception {
+        // The oldest VOD is measured into the budget (2 GiB on disk) but is deleted EXTERNALLY in
+        // the instant between the measurement and its eviction turn. The loop must credit those
+        // 2 GiB back when it finds the file missing — otherwise it keeps evicting the NEWER VOD to
+        // offset bytes that are already gone (over-eviction). With the credit, total drops to the
+        // 1 GiB cap and the pass ends with the newer VOD intact. The vanished row keeps its path
+        // too: a single miss never mutates the row.
+        settings.get().retentionCapGb = 1;
+        long gib = 1024L * 1024 * 1024;
+
+        long vanishing = seedWithFiles("vanish.mp4", "vanish.jpg", 2 * gib, 1_000L, false);
+        long newer = seedWithFiles("new.mp4", "new.jpg", gib, 2_000L, false);
+
+        MatchRepository racingMatches = spy(matches);
+        doAnswer(inv -> {
+            Object candidates = inv.callRealMethod();
+            Files.delete(videoDir.resolve("vanish.mp4")); // external delete, after measurement
+            return candidates;
+        }).when(racingMatches).findSweepCandidates();
+        RetentionSweeper racy = new RetentionSweeper(racingMatches, clips, settings, events);
+
+        RetentionSweeper.SweepResult result = racy.sweep(null);
+
+        assertThat(result.deletedIds()).isEmpty();
+        assertThat(result.freedBytes()).isZero();
+        assertThat(Files.exists(videoDir.resolve("new.mp4")))
+                .as("the next victim must not be evicted to offset already-gone bytes")
+                .isTrue();
+        assertThat(matches.findById(newer).orElseThrow().videoPath()).isNotNull();
+        // First miss for the vanished row: path kept until a second sweep confirms.
+        assertThat(matches.findById(vanishing).orElseThrow().videoPath()).isNotNull();
+        // total reflects the refund: only the newer VOD's 1 GiB remains on the books.
+        assertThat(result.totalAfterBytes()).isEqualTo(gib);
+    }
+
+    @Test
+    void clipCandidateVanishingMidPassCreditsTotalSoTheNextVictimSurvives() throws Exception {
+        // Clip-loop twin of the test above: the oldest clip's measured 2 GiB vanish externally
+        // between the measurement and the clip phase. The missing branch must refund the counted
+        // bytes so the newer clip is not evicted to offset them.
+        settings.get().retentionCapGb = 1;
+        long gib = 1024L * 1024 * 1024;
+
+        long match = matches.insert(new NewMatch(
+                null, "match", "enriched", "puck",
+                1, 2, 3, 400, 500, 10000, 120,
+                "win", 7, 22, null, null, 1800,
+                1_000L, null, null, null, false, 1_000L, null));
+        long vanishing = seedClip(match, "c-vanish.mp4", "c-vanish.jpg", 2 * gib, 100L, false);
+        long survivor = seedClip(match, "c-keep.mp4", "c-keep.jpg", gib, 200L, false);
+
+        ClipRepository racingClips = spy(clips);
+        doAnswer(inv -> {
+            Object candidates = inv.callRealMethod();
+            Files.delete(videoDir.resolve("c-vanish.mp4")); // external delete, after measurement
+            return candidates;
+        }).when(racingClips).findSweepCandidates();
+        RetentionSweeper racy = new RetentionSweeper(matches, racingClips, settings, events);
+
+        RetentionSweeper.SweepResult result = racy.sweep(null);
+
+        assertThat(result.freedBytes()).isZero();
+        assertThat(Files.exists(videoDir.resolve("c-keep.mp4")))
+                .as("the next clip must not be evicted to offset already-gone bytes")
+                .isTrue();
+        assertThat(clips.findById(survivor)).isPresent();
+        // First miss: the vanished clip's row survives with its path until a second sweep confirms.
+        assertThat(clips.findById(vanishing).orElseThrow().videoPath()).isNotNull();
+        assertThat(result.totalAfterBytes()).isEqualTo(gib);
+    }
+
+    @Test
+    void transientlyMissingStarredVideoKeepsItsRowAndReappearanceResetsTheMissClock() throws Exception {
+        // The cut-paste round trip: the user moves a STARRED VOD out of videoDir while the app
+        // runs, a sweep observes the miss, and the user later moves the file back. The single
+        // observation must NOT strip the row (a nulled row can never re-link the returning file —
+        // attribution requires the recorded basename — and the orphan scan would re-adopt it as a
+        // NEW unstarred row at the front of the eviction queue). A reappearance in between must
+        // RESET the miss clock, and only two CONSECUTIVE misses reconcile the row.
+        settings.get().retentionCapGb = 50; // roomy: no eviction pressure in this test
+        Path vod = videoDir.resolve("starred.mp4");
+        long starredId = seedWithFiles("starred.mp4", "starred.jpg", 1024L, 1_000L, true);
+        Path elsewhere = Files.createDirectories(videoDir.getParent().resolve("elsewhere"));
+
+        // Cut-pasted out; one sweep observes the miss but must leave the row alone.
+        Files.move(vod, elsewhere.resolve("starred.mp4"));
+        sweeper.sweep(null);
+        assertThat(matches.findById(starredId).orElseThrow().videoPath())
+                .as("a single miss must not strip the row")
+                .isEqualTo(vod.toString());
+
+        // The file comes back; the sweep sees it present and resets the miss clock.
+        Files.move(elsewhere.resolve("starred.mp4"), vod);
+        sweeper.sweep(null);
+        assertThat(matches.findById(starredId).orElseThrow().videoPath()).isEqualTo(vod.toString());
+
+        // Gone again: a FIRST miss once more (the round trip reset the clock), so the row still
+        // keeps its path...
+        Files.move(vod, elsewhere.resolve("starred.mp4"));
+        sweeper.sweep(null);
+        assertThat(matches.findById(starredId).orElseThrow().videoPath())
+                .as("a presence in between must reset the two-pass miss clock")
+                .isEqualTo(vod.toString());
+
+        // ...and only the second CONSECUTIVE miss reconciles it: row kept, still starred, paths
+        // nulled.
+        sweeper.sweep(null);
+        var reconciled = matches.findById(starredId).orElseThrow();
+        assertThat(reconciled.videoPath()).isNull();
+        assertThat(reconciled.starred()).isTrue();
     }
 
     @Test
