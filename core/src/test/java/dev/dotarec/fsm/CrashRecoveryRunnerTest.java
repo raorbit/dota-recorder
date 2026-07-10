@@ -172,7 +172,8 @@ class CrashRecoveryRunnerTest {
     @Test
     void importsUnreferencedMp4FilesAsGsiOnlyRows() throws Exception {
         Path referenced = videoDir.resolve("known.mp4");
-        Path orphan = videoDir.resolve("orphan.mp4");
+        // Orphans must carry a recorder-produced name (OBS's default FilenameFormatting) to be adopted.
+        Path orphan = videoDir.resolve("2026-06-28 14-30-15.mp4");
         Path ignoredThumb = Files.createDirectories(videoDir.resolve("thumbs")).resolve("orphan.jpg");
         Files.writeString(referenced, "known");
         Files.writeString(orphan, "orphan bytes");
@@ -225,8 +226,8 @@ class CrashRecoveryRunnerTest {
     void importsUnreferencedMkvAndMovFilesAsGsiOnlyRows() throws Exception {
         // A crash mid-record on a non-mp4 container (RecFormat2=mkv/mov) leaves an orphan file. The
         // scan recognizes the recording-extension allow-list, not just .mp4, so these are adopted.
-        Path orphanMkv = videoDir.resolve("orphan.mkv");
-        Path orphanMov = videoDir.resolve("orphan.mov");
+        Path orphanMkv = videoDir.resolve("2026-06-28 14-30-15.mkv");
+        Path orphanMov = videoDir.resolve("2026-06-28 15-40-16.mov");
         Files.writeString(orphanMkv, "mkv bytes");
         Files.writeString(orphanMov, "mov bytes");
         makeStale(orphanMkv);
@@ -256,8 +257,8 @@ class CrashRecoveryRunnerTest {
         // unreferenced). Adopting that live file would steal it from MatchFsm and later duplicate it. A
         // file being written by a live recorder has a FRESH mtime; a genuine crash orphan is STALE. The
         // scan must skip the fresh one and still import the stale one.
-        Path live = videoDir.resolve("live.mp4");
-        Path crashed = videoDir.resolve("crashed.mp4");
+        Path live = videoDir.resolve("2026-06-28 20-00-00.mp4");
+        Path crashed = videoDir.resolve("2026-06-28 14-30-15.mp4");
         Files.writeString(live, "still being written");
         Files.writeString(crashed, "crash orphan bytes");
         // live keeps its just-now mtime (Files.writeString stamps ~now); crashed is aged out.
@@ -274,6 +275,63 @@ class CrashRecoveryRunnerTest {
                 .filteredOn(row -> crashed.toString().equals(row.videoPath()))
                 .singleElement()
                 .satisfies(row -> assertThat(row.enrichmentState()).isEqualTo("gsi_only"));
+    }
+
+    @Test
+    void foreignNamedFileInVideoDirIsLeftUntouched() throws Exception {
+        // videoDir is user-configurable: pointing it at a folder of personal videos must never adopt
+        // them (an adopted row hands the file to retention's oldest-first delete). Only basenames this
+        // recorder produces (OBS's "%CCYY-%MM-%DD %hh-%mm-%ss" names, the archiver's/clipper's prefixed
+        // forms) are adopted; anything else is left completely untouched.
+        Path foreign = videoDir.resolve("family-vacation.mp4");
+        Files.writeString(foreign, "the user's own video");
+        makeStale(foreign); // stale enough to pass the quiescence guard — provenance alone must block
+
+        runner.run(null);
+
+        assertThat(matches.findAll()).isEmpty();
+        assertThat(Files.exists(foreign)).isTrue();
+    }
+
+    @Test
+    void linkOrphanVideoNeverCapturesAFileWrittenByTheCurrentBoot() throws Exception {
+        // Double-fault shape: a crashed null-path journal row whose ±5-min link window reaches into
+        // THIS boot, while OBS (started by the current boot) is already writing a fresh recording.
+        // The freshness guard must keep the old journal from capturing the live file: anything last
+        // modified at/after this process started is excluded from linking.
+        long now = System.currentTimeMillis();
+        Path live = videoDir.resolve("2026-07-10 12-00-00.mp4");
+        Files.writeString(live, "the current boot's in-flight recording"); // mtime ~now, after boot
+
+        journal.open(
+                new RecordingSessionRow(
+                        "session-live",
+                        "surrogate-live",
+                        "recording",
+                        4321L,
+                        "npc_dota_hero_puck",
+                        now - 60_000L,
+                        now - 60_000L,
+                        now,
+                        "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS",
+                        1,
+                        1,
+                        1,
+                        null,
+                        null,
+                        now - 61_000L,
+                        now));
+
+        runner.run(null);
+
+        // The session is recovered WITHOUT a video (better a pathless row than stealing the live file)...
+        assertThat(matches.findAll())
+                .filteredOn(row -> Long.valueOf(4321L).equals(row.dotaMatchId()))
+                .singleElement()
+                .satisfies(row -> assertThat(row.videoPath()).isNull());
+        // ...and the fresh file is neither linked nor adopted (quiescence) — left for MatchFsm.
+        assertThat(matches.findAll()).noneMatch(row -> live.toString().equals(row.videoPath()));
+        assertThat(Files.exists(live)).isTrue();
     }
 
     @Test
@@ -299,7 +357,7 @@ class CrashRecoveryRunnerTest {
 
     @Test
     void malformedVideoPathInDbDoesNotCrashOrphanScan() throws Exception {
-        Path orphan = videoDir.resolve("orphan.mp4");
+        Path orphan = videoDir.resolve("2026-06-28 14-30-15.mp4");
         Files.writeString(orphan, "orphan bytes");
         makeStale(orphan);
 
@@ -387,11 +445,16 @@ class CrashRecoveryRunnerTest {
     void relinksStrandedArchiveFileToOriginalRowWhenItsVideoIsMissing() throws Exception {
         Path archiveDir = configureArchive("hdd");
         // The row's recorded path no longer exists on disk: an interrupted cross-store move consumed the
-        // source (atomic rename) before the repoint committed, so the row points at nothing.
-        long id = insertMatch(videoDir.resolve("gone.mp4").toString(), null, 2_048L);
+        // source (atomic rename) before the repoint committed, so the row points at nothing. Re-linking
+        // requires attribution — the remainder after "<id>-" must equal the row's recorded basename and
+        // the on-disk size must equal the row's recorded size (genuine residue is the same file).
+        String recordingBytes = "the real recording bytes";
+        long id =
+                insertMatch(
+                        videoDir.resolve("gone.mp4").toString(), null, (long) recordingBytes.length());
         // The relocated copy survived on the archive drive under its id-prefixed name, unreferenced.
         Path stranded = archiveDir.resolve(id + "-gone.mp4");
-        Files.writeString(stranded, "the real recording bytes");
+        Files.writeString(stranded, recordingBytes);
 
         runner.run(null);
 
@@ -404,9 +467,12 @@ class CrashRecoveryRunnerTest {
     @Test
     void relinkAlsoRecoversTheArchivedThumbnail() throws Exception {
         Path archiveDir = configureArchive("hdd");
-        long id = insertMatch(videoDir.resolve("gone.mp4").toString(), null, 2_048L);
+        String recordingBytes = "bytes";
+        long id =
+                insertMatch(
+                        videoDir.resolve("gone.mp4").toString(), null, (long) recordingBytes.length());
         Path stranded = archiveDir.resolve(id + "-gone.mp4");
-        Files.writeString(stranded, "bytes");
+        Files.writeString(stranded, recordingBytes);
         // The move also relocated the thumbnail under <archive>/thumbs/<id>-...; recovery finds it.
         Path strandedThumb =
                 Files.createDirectories(archiveDir.resolve("thumbs")).resolve(id + "-gone.jpg");
@@ -417,6 +483,65 @@ class CrashRecoveryRunnerTest {
         MatchSummary row = matches.findById(id).orElseThrow();
         assertThat(row.videoPath()).isEqualTo(stranded.toString());
         assertThat(row.thumbPath()).isEqualTo(strandedThumb.toString());
+    }
+
+    @Test
+    void doesNotRelinkIdPrefixedArchiveFileWithMismatchedBasename() throws Exception {
+        Path archiveDir = configureArchive("hdd");
+        // The row LOST its video (missing path), which used to make ANY "<id>-..." file its new VOD. A
+        // user-placed "12-family.mp4" must not be captured that way: re-linking requires the remainder
+        // after the prefix to equal the row's recorded basename.
+        long id = insertMatch(videoDir.resolve("gone.mp4").toString(), null, 2_048L);
+        Path foreign = archiveDir.resolve(id + "-family.mp4");
+        Files.writeString(foreign, "the user's own video");
+        makeStale(foreign);
+
+        runner.run(null);
+
+        // Not re-linked, not adopted (foreign name), not deleted.
+        assertThat(matches.findById(id).orElseThrow().videoPath())
+                .isEqualTo(videoDir.resolve("gone.mp4").toString());
+        assertThat(matches.findAll()).hasSize(1);
+        assertThat(Files.exists(foreign)).isTrue();
+    }
+
+    @Test
+    void doesNotRelinkIdPrefixedArchiveFileWhoseSizeMismatchesTheStoredSize() throws Exception {
+        Path archiveDir = configureArchive("hdd");
+        // The remainder matches the lost video's basename, but the on-disk size differs from the size
+        // the row recorded at finalize — not provably the row's own bytes, so no re-link (and the
+        // foreign-shaped name keeps it from being adopted either).
+        long id = insertMatch(videoDir.resolve("gone.mp4").toString(), null, 2_048L);
+        Path wrongSize = archiveDir.resolve(id + "-gone.mp4");
+        Files.writeString(wrongSize, "not 2048 bytes");
+        makeStale(wrongSize);
+
+        runner.run(null);
+
+        assertThat(matches.findById(id).orElseThrow().videoPath())
+                .isEqualTo(videoDir.resolve("gone.mp4").toString());
+        assertThat(matches.findAll()).hasSize(1);
+        assertThat(Files.exists(wrongSize)).isTrue();
+    }
+
+    @Test
+    void doesNotRelinkWhenRowHasNoRecordedBasenameToAttribute() throws Exception {
+        Path archiveDir = configureArchive("hdd");
+        // A row whose video_path is already NULL (e.g. swept) has no basename/size to attribute an
+        // "<id>-" file with, so it must NOT be re-linked; the provenance rule then decides adoption —
+        // this one is recorder-named, so it is imported as a STANDALONE row, never as match <id>'s VOD.
+        long id = insertMatch(null, null, null);
+        Path stray = archiveDir.resolve(id + "-2026-06-28 14-30-15.mp4");
+        Files.writeString(stray, "an old recording");
+        makeStale(stray);
+
+        runner.run(null);
+
+        assertThat(matches.findById(id).orElseThrow().videoPath()).isNull();
+        assertThat(matches.findAll())
+                .filteredOn(row -> stray.toString().equals(row.videoPath()))
+                .singleElement()
+                .satisfies(row -> assertThat(row.enrichmentState()).isEqualTo("gsi_only"));
     }
 
     @Test
@@ -450,21 +575,17 @@ class CrashRecoveryRunnerTest {
         long id = insertMatch(keep.toString(), null, Files.size(keep));
         // ...but a user-placed file merely COLLIDES with match <id>'s numeric prefix: its remainder is a
         // different name ("grand-final.mp4", not "keep.mp4") and its size differs. It is NOT this match's
-        // move residue, so it must be imported (never deleted), mirroring the clip path's policy of never
-        // destroying an unattributable file.
+        // move residue, and its basename isn't a recorder-produced shape either, so it must be left
+        // completely untouched — never deleted, never adopted into retention's delete authority.
         Path notResidue = archiveDir.resolve(id + "-grand-final.mp4");
         Files.writeString(notResidue, "a completely unrelated user recording");
         makeStale(notResidue);
 
         runner.run(null);
 
-        // The unattributable file survives...
+        // The unattributable file survives untouched — no delete, no adopted row.
         assertThat(Files.exists(notResidue)).isTrue();
-        // ...and is adopted as a standalone gsi_only row rather than deleted.
-        assertThat(matches.findAll())
-                .filteredOn(row -> notResidue.toString().equals(row.videoPath()))
-                .singleElement()
-                .satisfies(row -> assertThat(row.enrichmentState()).isEqualTo("gsi_only"));
+        assertThat(matches.findAll()).hasSize(1);
         // The intact row is untouched.
         assertThat(matches.findById(id).orElseThrow().videoPath()).isEqualTo(keep.toString());
     }
@@ -474,7 +595,8 @@ class CrashRecoveryRunnerTest {
         Path archiveDir = configureArchive("hdd");
         // A trickier collision: the remainder DOES match the intact row's name, but the on-disk sizes
         // differ (e.g. a truncated partial copy, or a coincidental same-named unrelated file). Without
-        // the size check this would be wrongly deleted; the attribution guard keeps it.
+        // the size check this would be wrongly deleted; the attribution guard keeps it, and the
+        // provenance gate ("keep.mp4" isn't a recorder-produced shape) declines to adopt it.
         Path keep = videoDir.resolve("keep.mp4");
         Files.writeString(keep, "intact recording");
         long id = insertMatch(keep.toString(), null, Files.size(keep));
@@ -484,21 +606,18 @@ class CrashRecoveryRunnerTest {
 
         runner.run(null);
 
-        // Not provably residue (size mismatch) -> imported, not deleted.
+        // Not provably residue (size mismatch) -> untouched: not deleted, not adopted.
         assertThat(Files.exists(sameNameDifferentBytes)).isTrue();
-        assertThat(matches.findAll())
-                .filteredOn(row -> sameNameDifferentBytes.toString().equals(row.videoPath()))
-                .singleElement()
-                .satisfies(row -> assertThat(row.enrichmentState()).isEqualTo("gsi_only"));
+        assertThat(matches.findAll()).hasSize(1);
         assertThat(matches.findById(id).orElseThrow().videoPath()).isEqualTo(keep.toString());
     }
 
     @Test
     void importsUnprefixedArchiveOrphanAsGsiOnlyRow() throws Exception {
         Path archiveDir = configureArchive("hdd");
-        // A recording on the archive drive with no id prefix (a user-placed file, or one whose row was
-        // deleted) has nothing to re-link to, so it is adopted as a standalone gsi_only row.
-        Path orphan = archiveDir.resolve("manual.mp4");
+        // An OBS-named recording on the archive drive with no id prefix (e.g. moved there by hand)
+        // has nothing to re-link to, so it is adopted as a standalone gsi_only row.
+        Path orphan = archiveDir.resolve("2026-06-28 14-30-15.mp4");
         Files.writeString(orphan, "loose recording");
         makeStale(orphan);
 
@@ -566,21 +685,18 @@ class CrashRecoveryRunnerTest {
         long clipId = insertClip(parentId, clipSource.toString());
         // ...but a user-placed file merely COLLIDES with clip <id>'s prefix: its remainder is a
         // different name ("something.mp4", not "1-clip-1.mp4") and its size differs. It is NOT this
-        // clip's move residue, so it must be imported (never deleted) — before the attribution guard,
-        // the intact-row branch deleted any "clip-<id>-" file outright.
+        // clip's move residue, and its basename isn't a recorder-produced shape, so it must be left
+        // completely untouched — before the attribution guard, the intact-row branch deleted any
+        // "clip-<id>-" file outright.
         Path notResidue = archiveDir.resolve("clip-" + clipId + "-something.mp4");
         Files.writeString(notResidue, "an unrelated user-placed recording");
         makeStale(notResidue);
 
         runner.run(null);
 
-        // The unattributable file survives...
+        // The unattributable file survives untouched — no delete, no adopted row.
         assertThat(Files.exists(notResidue)).isTrue();
-        // ...and is adopted as a standalone gsi_only row rather than deleted.
-        assertThat(matches.findAll())
-                .filteredOn(row -> notResidue.toString().equals(row.videoPath()))
-                .singleElement()
-                .satisfies(row -> assertThat(row.enrichmentState()).isEqualTo("gsi_only"));
+        assertThat(matches.findAll()).hasSize(1); // only the parent match
         // The intact clip row is untouched.
         assertThat(clips.findById(clipId).orElseThrow().videoPath()).isEqualTo(clipSource.toString());
     }
@@ -591,7 +707,8 @@ class CrashRecoveryRunnerTest {
         long parentId = insertMatch(videoDir.resolve("parent.mp4").toString(), null, 4_096L);
         // The trickier collision: the remainder DOES match the intact clip's name, but the on-disk
         // sizes differ (a truncated partial copy, or a same-named unrelated file). Not provably
-        // residue -> kept and imported, mirroring the match path's size guard.
+        // residue -> never deleted; its name IS a recorder-produced clip shape, so the
+        // provenance-gated import still adopts it as a standalone row.
         Path clipSource = Files.createDirectories(videoDir.resolve("clips")).resolve("1-clip-1.mp4");
         Files.writeString(clipSource, "the live clip");
         long clipId = insertClip(parentId, clipSource.toString());
@@ -650,10 +767,10 @@ class CrashRecoveryRunnerTest {
     @Test
     void importsClipPrefixedArchiveFileAsGsiOnlyWhenNoClipRowExists() throws Exception {
         Path archiveDir = configureArchive("hdd");
-        // A "clip-<id>-" file on the archive drive whose clip row no longer exists (the clip was
-        // deleted). leadingClipId parses it, recoverArchivedClipLeftover finds no row and returns false,
-        // so it falls through to a standalone gsi_only import rather than being deleted.
-        Path orphan = archiveDir.resolve("clip-99-x.mp4");
+        // An archived-clip-named file whose clip row no longer exists (the clip was deleted).
+        // leadingClipId parses it, recoverArchivedClipLeftover finds no row and returns false, so it
+        // falls through to a standalone gsi_only import rather than being deleted.
+        Path orphan = archiveDir.resolve("clip-99-5-clip-99.mp4");
         Files.writeString(orphan, "loose clip residue");
         makeStale(orphan);
 
@@ -674,7 +791,7 @@ class CrashRecoveryRunnerTest {
         // cross-store copy is referenced by no row yet, so an UNLOCKED scan would delete it as move
         // residue right before the repoint lands. The runner must block on the shared lock instead of
         // scanning past an in-flight pass.
-        Path orphan = videoDir.resolve("orphan.mp4");
+        Path orphan = videoDir.resolve("2026-06-28 14-30-15.mp4");
         Files.writeString(orphan, "orphan bytes");
         makeStale(orphan);
 
@@ -723,7 +840,7 @@ class CrashRecoveryRunnerTest {
     }
 
     /** Inserts a minimal finalized match row pointing at {@code videoPath} and returns its id. */
-    private long insertMatch(String videoPath, String thumbPath, long fileSizeBytes) {
+    private long insertMatch(String videoPath, String thumbPath, Long fileSizeBytes) {
         return matches.insert(
                 new NewMatch(
                         null, "match", "enriched", "npc_dota_hero_puck",

@@ -26,6 +26,7 @@ import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Consumer;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import javax.sql.DataSource;
 import org.slf4j.Logger;
@@ -63,6 +64,14 @@ public class CrashRecoveryRunner implements ApplicationRunner {
      * orphans on the next boot. Self-contained (mtime only), resolution/OBS-state agnostic.
      */
     private static final long QUIESCENCE_MS = 2L * 60_000L;
+
+    /**
+     * Wall clock at construction (context refresh, before GSI ingest/OBS can arm a recording). A file
+     * last modified at/after this was written by the CURRENT boot, so {@link #linkOrphanVideo} must
+     * never capture it for a PRE-crash journal row — a genuine crash leftover was last written before
+     * this process existed.
+     */
+    private final long bootWallMs = System.currentTimeMillis();
 
     private final RecordingSessionRepository journal;
     private final MatchRepository matches;
@@ -298,7 +307,8 @@ public class CrashRecoveryRunner implements ApplicationRunner {
     private void reconcileOrphanVods() {
         Set<String> referenced = referencedVideoPaths();
         // Active drive: an unreferenced recording here is a crash that lost its journaled path; adopt it
-        // as a standalone gsi_only row (its OBS name carries no match id to tie it back to).
+        // as a standalone gsi_only row (its OBS name carries no match id to tie it back to). Adoption is
+        // provenance-gated (recorder-produced basenames only) so a user's own videos are never claimed.
         scanOrphans(videoDir(), referenced, this::importOrphanVod);
         // Archive drives: an unreferenced recording here is the residue of an interrupted cross-store
         // move (copied across, but the row's repoint or the source delete didn't finish before a crash).
@@ -339,11 +349,14 @@ public class CrashRecoveryRunner implements ApplicationRunner {
      * <ul>
      *   <li>if that match lost its file (the move repoint never committed, e.g. an atomic rename
      *       consumed the source before the crash), RE-LINK the row to this recovered copy instead of
-     *       importing a detached duplicate;</li>
+     *       importing a detached duplicate — but only when the file is ATTRIBUTABLE to the row
+     *       ({@link #isAttributableToLostVideo}: original basename and, when recorded, size), so a
+     *       user-placed prefix collision never becomes the row's VOD;</li>
      *   <li>if the match is already intact (its row still points at a file that exists), this is a
      *       redundant leftover/partial copy from the move — DELETE it to reclaim the space;</li>
-     *   <li>if there is no id prefix or no such match (the row was deleted), fall back to importing it
-     *       as a standalone gsi_only row, exactly as the active-drive scan does.</li>
+     *   <li>if there is no id prefix, no such match (the row was deleted), or the file couldn't be
+     *       attributed, fall back to the provenance-gated import, exactly as the active-drive scan
+     *       does.</li>
      * </ul>
      */
     private void recoverArchiveLeftover(Path file) {
@@ -352,7 +365,7 @@ public class CrashRecoveryRunner implements ApplicationRunner {
             // Clip leftovers carry a "clip-<clipId>-" prefix (a separate id space from match files); route
             // them to clip recovery so a stranded clip copy is re-linked/dropped, never adopted as a bogus
             // match. A false return (no such clip row, or a prefix collision that isn't attributable move
-            // residue) falls through to a plain orphan import below.
+            // residue) falls through to the provenance-gated orphan import below.
             Long clipId = leadingClipId(fileName);
             if (clipId != null && recoverArchivedClipLeftover(file, clipId)) {
                 return;
@@ -362,32 +375,46 @@ public class CrashRecoveryRunner implements ApplicationRunner {
                 Optional<MatchSummary> row = matches.findById(matchId);
                 if (row.isPresent()) {
                     if (videoFileMissing(row.get().videoPath())) {
-                        String thumb =
-                                recoverArchivedThumb(file.getParent(), matchId + "-", row.get().thumbPath());
-                        matches.updateVideoPath(matchId, file.toString(), thumb);
-                        log.warn("Re-linked stranded archive recording {} to match {} (interrupted move)",
-                                file, matchId);
-                        return;
+                        // A lost video is re-linked only to what is provably its own relocated copy —
+                        // the same attribution the delete branch demands. A bare numeric-prefix match
+                        // would let a user-placed "12-family.mp4" become match 12's VOD (and thereby
+                        // retention-deletable).
+                        if (isAttributableToLostVideo(file, matchId + "-", row.get())) {
+                            String thumb =
+                                    recoverArchivedThumb(
+                                            file.getParent(), matchId + "-", row.get().thumbPath());
+                            matches.updateVideoPath(matchId, file.toString(), thumb);
+                            log.warn("Re-linked stranded archive recording {} to match {} (interrupted move)",
+                                    file, matchId);
+                            return;
+                        }
+                        log.warn(
+                                "Archive file {} shares match {}'s id prefix but isn't attributable to"
+                                    + " its missing video; not re-linking",
+                                file,
+                                matchId);
+                        // fall through to the provenance-gated importOrphanVod below
+                    } else {
+                        // The row is intact, so this id-prefixed file is only redundant if it is genuinely
+                        // this match's move residue — never delete a coincidental prefix collision (e.g. a
+                        // user-placed "12-grand-final.mp4" against match 12). Require it to match the
+                        // archiver's exact naming AND be attributable before reclaiming it; otherwise fall
+                        // through to import (mirrors the clip path's policy of never destroying an
+                        // unattributable file).
+                        if (isGenuineMoveResidue(
+                                file, matchId + "-", row.get().videoPath(), "match " + matchId)) {
+                            deleteQuietly(file);
+                            log.warn("Removed redundant archive move-leftover {} (match {} already intact)",
+                                    file, matchId);
+                            return;
+                        }
+                        log.warn(
+                                "Archive file {} shares match {}'s id prefix but isn't attributable move"
+                                    + " residue; not deleting",
+                                file,
+                                matchId);
+                        // fall through to the provenance-gated importOrphanVod below
                     }
-                    // The row is intact, so this id-prefixed file is only redundant if it is genuinely
-                    // this match's move residue — never delete a coincidental prefix collision (e.g. a
-                    // user-placed "12-grand-final.mp4" against match 12). Require it to match the
-                    // archiver's exact naming AND be attributable before reclaiming it; otherwise fall
-                    // through to import (mirrors the clip path's policy of never destroying an
-                    // unattributable file).
-                    if (isGenuineMoveResidue(
-                            file, matchId + "-", row.get().videoPath(), "match " + matchId)) {
-                        deleteQuietly(file);
-                        log.warn("Removed redundant archive move-leftover {} (match {} already intact)",
-                                file, matchId);
-                        return;
-                    }
-                    log.warn(
-                            "Archive file {} shares match {}'s id prefix but isn't attributable move"
-                                + " residue; importing rather than deleting",
-                            file,
-                            matchId);
-                    // fall through to importOrphanVod below
                 }
             }
             importOrphanVod(file);
@@ -436,6 +463,46 @@ public class CrashRecoveryRunner implements ApplicationRunner {
     }
 
     /**
+     * True when {@code file} on an archive drive is provably {@code row}'s own relocated recording, so
+     * a row whose video went MISSING may be re-linked to it. The re-link analogue of
+     * {@link #isGenuineMoveResidue}: the row's file is gone, so its stored fields stand in for it —
+     *
+     * <ul>
+     *   <li><b>naming</b> — the remainder after the {@code <matchId>-} prefix must equal the basename
+     *       of the row's recorded {@code video_path} (the {@code src.getFileName()} the archiver
+     *       prefixed when it staged the move);</li>
+     *   <li><b>attribution</b> — when the row recorded a file size, the leftover's on-disk size must
+     *       equal it (the move never rewrites bytes).</li>
+     * </ul>
+     *
+     * <p>A row with no recorded basename to compare (e.g. {@code video_path} already NULL) can never
+     * attribute the file, so it is NOT re-linked — the provenance-gated orphan import then decides
+     * whether the file is adopted as a standalone row instead.
+     */
+    private boolean isAttributableToLostVideo(Path file, String prefix, MatchSummary row) {
+        String remainder = leftoverRemainder(file.getFileName().toString(), prefix);
+        Path rowVideo = safePath(row.videoPath());
+        if (remainder == null || rowVideo == null || rowVideo.getFileName() == null) {
+            return false;
+        }
+        // Naming: the archiver prefixed the row's own basename; anything else isn't its file.
+        if (!remainder.equals(rowVideo.getFileName().toString())) {
+            return false;
+        }
+        Long storedSize = row.fileSizeBytes();
+        if (storedSize == null) {
+            return true; // no recorded size to compare; the basename match is the best attribution left
+        }
+        try {
+            return Files.size(file) == storedSize;
+        } catch (Exception e) {
+            // Can't confirm the size matches -> don't claim the file for the row.
+            log.warn("Could not stat archive leftover {} for match {}: {}", file, row.id(), e.toString());
+            return false;
+        }
+    }
+
+    /**
      * The part of {@code fileName} after the archiver's owner prefix ({@code <matchId>-} or
      * {@code clip-<clipId>-}), or null when the name doesn't carry exactly that prefix (a defensive
      * re-check even though the caller already parsed the id — this ties the delete decision to the
@@ -462,8 +529,8 @@ public class CrashRecoveryRunner implements ApplicationRunner {
      *
      * <p>Returns {@code false} when no such clip row exists (e.g. the clip was deleted) or when the
      * intact clip's prefix collides with a file that isn't attributable as its residue (e.g. a
-     * user-placed {@code clip-12-something.mp4}), so the caller adopts the loose file as a standalone
-     * gsi_only row rather than deleting a file it can't attribute.
+     * user-placed {@code clip-12-something.mp4}), so the caller falls back to the provenance-gated
+     * import rather than deleting a file it can't attribute.
      */
     private boolean recoverArchivedClipLeftover(Path file, long clipId) {
         Optional<ClipRow> row = clips.findById(clipId);
@@ -637,6 +704,11 @@ public class CrashRecoveryRunner implements ApplicationRunner {
      * newest unreferenced {@code .mp4} in the video dir whose last-modified time falls within the
      * session's recording window. The recorder is single-user/sequential, so at most one in-flight
      * file exists and the match is unambiguous. Returns null if none qualifies.
+     *
+     * <p>Files last modified at/after {@link #bootWallMs} are excluded: recovery runs concurrently
+     * with GSI ingest/OBS, so when the crash was within the ±5-min window a recording armed by the
+     * CURRENT boot (path unknown until StopRecord, so unreferenced) could otherwise be captured and
+     * attached to the old journal, stealing the live file from {@code MatchFsm}.
      */
     private String linkOrphanVideo(RecordingSessionRow session) {
         Path videoDir = videoDir();
@@ -651,6 +723,7 @@ public class CrashRecoveryRunner implements ApplicationRunner {
                     .filter(this::isRecordingFile)
                     .filter(path -> !referenced.contains(normalize(path)))
                     .filter(path -> withinWindow(path, fromMs, toMs))
+                    .filter(path -> lastModifiedMs(path) < bootWallMs)
                     .max(java.util.Comparator.comparingLong(CrashRecoveryRunner::lastModifiedMs))
                     .map(Path::toString)
                     .orElse(null);
@@ -678,6 +751,14 @@ public class CrashRecoveryRunner implements ApplicationRunner {
 
     private void importOrphanVod(Path path) {
         try {
+            // Provenance gate: adopt only basenames this recorder writes. videoDir/archive roots are
+            // user-configurable, so an arbitrary-named unreferenced .mp4 here may simply be the user's
+            // own video — importing it as a match row would hand it to retention's oldest-first delete.
+            // Leave anything foreign completely untouched.
+            if (!hasRecorderProvenance(path)) {
+                log.debug("Leaving unreferenced file {} untouched (not a recorder-produced name)", path);
+                return;
+            }
             long size = Files.size(path);
             if (size <= 0) {
                 return;
@@ -736,6 +817,27 @@ public class CrashRecoveryRunner implements ApplicationRunner {
      * recording was written, and the scan must still adopt files of any historical container.
      */
     private static final Set<String> RECORDING_EXTENSIONS = Set.of(".mp4", ".mkv", ".mov");
+
+    /**
+     * Basenames this recorder actually writes — the ONLY shapes the orphan scan may adopt as new
+     * rows. OBS records under its default {@code FilenameFormatting}
+     * ({@code %CCYY-%MM-%DD %hh-%mm-%ss}, plus the {@code " (N)"} suffix OBS appends on a name
+     * collision; the written profile never overrides it) with a {@link #RECORDING_EXTENSIONS}
+     * container; the archiver prefixes relocated copies with {@code <matchId>-}; and the clip
+     * renderer writes {@code <matchId>-clip-<clipId>.mp4} (archived as
+     * {@code clip-<clipId>-<matchId>-clip-<clipId>.mp4}). Anything else is a foreign file: adopting
+     * it would create a row whose "VOD" is the user's own video, which retention would then delete
+     * oldest-first — so foreign names are never imported (and never deleted), only debug-logged.
+     */
+    private static final Pattern RECORDER_BASENAME =
+            Pattern.compile(
+                    "(?:\\d+-)?\\d{4}-\\d{2}-\\d{2} \\d{2}-\\d{2}-\\d{2}(?: \\(\\d+\\))?\\.(?:mp4|mkv|mov)"
+                            + "|(?:clip-\\d+-)?\\d+-clip-\\d+\\.mp4");
+
+    /** True when {@code path}'s basename is a name this recorder (OBS, archiver, or clipper) produces. */
+    private static boolean hasRecorderProvenance(Path path) {
+        return RECORDER_BASENAME.matcher(path.getFileName().toString()).matches();
+    }
 
     private boolean isRecordingFile(Path path) {
         String name = path.getFileName().toString().toLowerCase(Locale.ROOT);
