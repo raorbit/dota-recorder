@@ -284,6 +284,78 @@ public class MatchRepository {
     }
 
     /**
+     * Atomically claims a sweep candidate for eviction: prunes the row exactly like
+     * {@link #nullVideoPath} but ONLY while it is still non-starred AND still points at the video the
+     * sweeper snapshotted. Both guards live in the WHERE so the starred re-check and the prune are
+     * one statement, not a read-then-write: a star PATCH that commits between the sweeper's candidate
+     * snapshot and this row's eviction turn wins — the claim matches nothing and the file is never
+     * unlinked. The {@code video_path} guard likewise refuses a row that was repointed or already
+     * pruned since the snapshot.
+     *
+     * @return true only if THIS call claimed (pruned) the row; the caller may then unlink the file
+     */
+    public boolean claimForSweep(long id, String videoPath) {
+        String sql = "UPDATE matches "
+                + "SET video_path = NULL, thumb_path = NULL, file_size_bytes = NULL "
+                + "WHERE id = ? AND starred = 0 AND video_path = ?";
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, id);
+            ps.setString(2, videoPath);
+            return ps.executeUpdate() == 1;
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to claim match " + id + " for sweep", e);
+        }
+    }
+
+    /**
+     * Reconciles a row whose video file is confirmed GONE from a reachable drive (deleted outside
+     * the app): prunes the path columns like {@link #nullVideoPath}, guarded on the row still
+     * pointing at the vanished file so a concurrent repoint is never clobbered. Unlike
+     * {@link #claimForSweep} this applies to STARRED rows too — a star protects the file from the
+     * sweeper, but this file is already gone; the row just catches up to reality (kept, with its
+     * markers/stats, like any post-sweep row).
+     *
+     * @return rows updated (0 if the row was repointed or already reconciled)
+     */
+    public int reconcileMissingVideo(long id, String videoPath) {
+        String sql = "UPDATE matches "
+                + "SET video_path = NULL, thumb_path = NULL, file_size_bytes = NULL "
+                + "WHERE id = ? AND video_path = ?";
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, id);
+            ps.setString(2, videoPath);
+            return ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to reconcile missing video for match " + id, e);
+        }
+    }
+
+    /**
+     * Undoes {@link #claimForSweep} after the file unlink FAILED: restores the snapshotted paths and
+     * size so the row keeps referencing its intact on-disk VOD and the next sweep can retry — the
+     * alternative is an invisibly orphaned file. Unconditional on purpose: it only runs moments
+     * after this pass's own successful claim, under the storage maintenance lock.
+     *
+     * @return rows updated (0 if no such match)
+     */
+    public int restoreVideoPath(long id, String videoPath, String thumbPath, Long fileSizeBytes) {
+        String sql = "UPDATE matches SET video_path = ?, thumb_path = ?, file_size_bytes = ? "
+                + "WHERE id = ?";
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, videoPath);
+            ps.setString(2, thumbPath);
+            setNullableLong(ps, 3, fileSizeBytes);
+            ps.setLong(4, id);
+            return ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to restore video path for match " + id, e);
+        }
+    }
+
+    /**
      * Repoints a row's {@code video_path}/{@code thumb_path} after the archiver relocates the files
      * to another drive. Unlike {@link #nullVideoPath} this KEEPS {@code file_size_bytes} (the bytes
      * didn't change, only the location), so retention accounting stays correct post-move.

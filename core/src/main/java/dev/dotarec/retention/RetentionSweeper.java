@@ -14,6 +14,7 @@ import org.springframework.stereotype.Component;
 
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -34,8 +35,8 @@ import java.util.Map;
  * the {@link #sweep()} entry point). TODO: wire the FSM's active session id here once it exists.
  *
  * <p>Events: a completed sweep publishes {@code retention.swept} with {@code {freedBytes, deletedIds}};
- * a pre-record low-disk warning publishes an error frame {@code {scope:"disk", ...}}. The free-space
- * check WARNS only -- it never blocks a recording.
+ * a low-disk warning (checked on every scheduled pass) publishes an error frame
+ * {@code {scope:"disk", ...}}. The free-space check WARNS only -- it never blocks a recording.
  */
 @Component
 public class RetentionSweeper {
@@ -69,6 +70,16 @@ public class RetentionSweeper {
         long usableBytes(Path dir) throws IOException;
     }
 
+    /**
+     * Probes one stored file's on-disk size ({@link Files#size}). Pulled behind an interface
+     * (mirroring the space probes above) so a test can drive {@link #statFileBytes}'s
+     * confirmed-missing and ambiguous-failure branches deterministically.
+     */
+    @FunctionalInterface
+    public interface FileSizeProbe {
+        long sizeBytes(Path file) throws IOException;
+    }
+
     private final MatchRepository matches;
     private final ClipRepository clips;
     private final SettingsStore settings;
@@ -76,6 +87,7 @@ public class RetentionSweeper {
     private final StorageMaintenanceLock maintenanceLock;
     private final TotalSpaceProbe totalSpace;
     private final UsableSpaceProbe usableSpace;
+    private final FileSizeProbe fileSize;
 
     @org.springframework.beans.factory.annotation.Autowired
     public RetentionSweeper(
@@ -122,6 +134,19 @@ public class RetentionSweeper {
             StorageMaintenanceLock maintenanceLock,
             TotalSpaceProbe totalSpace,
             UsableSpaceProbe usableSpace) {
+        this(matches, clips, settings, events, maintenanceLock, totalSpace, usableSpace, Files::size);
+    }
+
+    /** Test seam: additionally inject a deterministic per-file size probe. */
+    RetentionSweeper(
+            MatchRepository matches,
+            ClipRepository clips,
+            SettingsStore settings,
+            EventPublisher events,
+            StorageMaintenanceLock maintenanceLock,
+            TotalSpaceProbe totalSpace,
+            UsableSpaceProbe usableSpace,
+            FileSizeProbe fileSize) {
         this.matches = matches;
         this.clips = clips;
         this.settings = settings;
@@ -129,6 +154,7 @@ public class RetentionSweeper {
         this.maintenanceLock = maintenanceLock;
         this.totalSpace = totalSpace;
         this.usableSpace = usableSpace;
+        this.fileSize = fileSize;
     }
 
     /**
@@ -140,7 +166,19 @@ public class RetentionSweeper {
      */
     @Scheduled(initialDelay = 60_000L, fixedDelay = 3_600_000L)
     public void sweep() {
-        sweep(null);
+        try {
+            sweep(null);
+        } finally {
+            // Surface the low-disk warning on the same cadence, AFTER the sweep so it reflects the
+            // post-eviction disk state — this is what actually delivers the check's {scope:"disk"}
+            // frame to the bridge WS. Cheap and non-fatal by design: a failed probe must never look
+            // like a failed sweep (and a failed sweep must not suppress the warning).
+            try {
+                checkFreeSpaceWarning();
+            } catch (RuntimeException e) {
+                log.warn("Scheduled free-space check failed: {}", e.toString());
+            }
+        }
     }
 
     /**
@@ -148,6 +186,13 @@ public class RetentionSweeper {
      * non-starred recording's files and nulls its path columns, until under cap or no candidate
      * remains. The {@code protectedId} (e.g. the actively-recording match) is skipped even if it is
      * the oldest, so an in-progress .mp4 is never deleted.
+     *
+     * <p>Files confirmed GONE from a reachable drive (deleted outside the app) are reconciled during
+     * the budget measurement: they count 0 bytes and their row is caught up to the post-sweep shape
+     * (a clip's row is dropped), so a stale DB size can never linger as phantom budget that evicts
+     * real recordings to offset bytes that don't exist. When any reachable file's size can't be
+     * measured at all, the pass measures but does NOT evict — deleting real VODs against guessed
+     * bytes is worse than sweeping an hour late.
      *
      * @param protectedId match id to never delete, or null for none
      * @return result describing freed bytes and the swept ids
@@ -161,8 +206,18 @@ public class RetentionSweeper {
         maintenanceLock.lock();
         try {
             long capBytes = capBytes();
-            long total = totalStoredVideoBytes();
+            StoredBytes stored = measureStoredBytes();
+            long total = stored.totalBytes();
             if (total <= capBytes) {
+                return SweepResult.empty(total, capBytes);
+            }
+            if (stored.ambiguous()) {
+                // Over cap, but at least one reachable file's size is only a DB-snapshot guess (its
+                // stat failed for a reason other than the file being gone). Evicting real recordings
+                // against guessed bytes is worse than sweeping late: skip this cycle's eviction and
+                // let the next scheduled pass retry with a clean measurement.
+                log.warn("Retention sweep skipped this cycle: stored-bytes measurement was ambiguous "
+                        + "({} bytes measured vs cap {})", total, capBytes);
                 return SweepResult.empty(total, capBytes);
             }
 
@@ -181,15 +236,45 @@ public class RetentionSweeper {
                     // The file's drive is offline (e.g. an unplugged archive). We can't delete it, and
                     // deleteFileQuietly would treat the unreachable path as "already gone" (deleteIfExists
                     // returns false, exists() is false) and null the row — silently orphaning an intact
-                    // VOD. Skip it; its bytes are also excluded from the budget (totalStoredVideoBytes),
+                    // VOD. Skip it; its bytes are also excluded from the budget (measureStoredBytes),
                     // so an offline archive can neither drive eviction nor be cannibalized.
                     continue;
                 }
                 try {
-                    long size = videoSizeBytes(m);
+                    FileStat stat = statFileBytes(m.videoPath(), m.fileSizeBytes());
+                    if (stat.ambiguous()) {
+                        // A candidate whose size can't be trusted must not be deleted against the DB
+                        // guess — crediting phantom bytes would end the pass early or evict extra
+                        // rows. Skip it; the next sweep retries with a clean stat.
+                        log.warn("Retention sweep skipped match {}: could not stat {}",
+                                m.id(), m.videoPath());
+                        continue;
+                    }
+                    if (stat.missing()) {
+                        // Vanished between the budget measurement and this row's turn: nothing to
+                        // unlink and no bytes to credit — just reconcile the row like the measurement
+                        // pass would have.
+                        reconcileMissingMatchVideo(m);
+                        continue;
+                    }
+                    long size = stat.bytes();
+                    // Re-check starred ATOMICALLY at deletion time: a star PATCH commits outside the
+                    // maintenance lock, so a row starred between the candidate snapshot and this turn
+                    // must win. The claim's WHERE re-tests starred=0 (and that the row still points at
+                    // the snapshotted file) in the same UPDATE that prunes the paths — no
+                    // check-then-unlink window remains. The claim also prunes the VOD row only
+                    // (markers/stats survive with nulled paths); its clips are NOT cascade-deleted:
+                    // clips are standalone files, kept and evicted LAST — after every non-starred
+                    // VOD — in the clip phase below.
+                    if (!matches.claimForSweep(m.id(), m.videoPath())) {
+                        continue; // starred (or repointed/pruned) since the snapshot — not deletable
+                    }
                     boolean videoGone = deleteFileQuietly(m.videoPath());
                     boolean thumbGone = deleteFileQuietly(m.thumbPath());
                     if (!videoGone) {
+                        // The file is still on disk: undo the claim so the row keeps referencing its
+                        // intact VOD and the next sweep retries — never an invisibly orphaned file.
+                        matches.restoreVideoPath(m.id(), m.videoPath(), m.thumbPath(), m.fileSizeBytes());
                         log.warn("Retention sweep left match {} intact because video deletion failed", m.id());
                         continue;
                     }
@@ -199,17 +284,13 @@ public class RetentionSweeper {
                                 "Retention sweep could not delete thumbnail for match {}; pruning video row anyway",
                                 m.id());
                     }
-                    // Prune the VOD row only (markers/stats survive with nulled paths). Its clips are NOT
-                    // cascade-deleted: clips are standalone files, kept and evicted LAST — after every
-                    // non-starred VOD — in the clip phase below.
-                    matches.nullVideoPath(m.id());
                     deletedIds.add(m.id());
                     freed += size;
                 } catch (RuntimeException e) {
-                    // One match failing (e.g. a SQLITE_BUSY on nullVideoPath) must not abort the whole
-                    // pass: log and keep evicting. The deleted file with a still-populated row is
-                    // idempotent — the next sweep's deleteFileQuietly treats the gone file as removed and
-                    // re-nulls the row.
+                    // One match failing (e.g. a SQLITE_BUSY on the claim) must not abort the whole
+                    // pass: log and keep evicting. A failed claim changed nothing and retries next
+                    // sweep; a failed claim-RESTORE (two DB failures back to back) leaves a pruned row
+                    // whose intact file needs manual re-linking — rare enough to log, not to handle.
                     log.warn("Retention sweep could not evict match {}: {}", m.id(), e.toString());
                 }
             }
@@ -224,18 +305,31 @@ public class RetentionSweeper {
                 }
                 if (!driveReachable(clip.videoPath())) {
                     // File on an offline drive: can't delete it. Its bytes are also excluded from the
-                    // budget (reachableClipBytes), so an offline clip can neither drive eviction nor be
+                    // budget (measureStoredBytes), so an offline clip can neither drive eviction nor be
                     // skipped-without-subtraction — symmetric with the offline-VOD handling above.
                     continue;
                 }
                 try {
-                    long clipSize = clipSizeBytes(clip);
+                    FileStat stat = statFileBytes(clip.videoPath(), clip.fileSizeBytes());
+                    if (stat.ambiguous()) {
+                        // Same rule as the VOD loop: never delete against a guessed size.
+                        log.warn("Retention sweep skipped clip {}: could not stat {}",
+                                clip.id(), clip.videoPath());
+                        continue;
+                    }
+                    if (stat.missing()) {
+                        // Vanished between the budget measurement and this clip's turn: nothing to
+                        // unlink, no bytes to credit — drop the row like the measurement pass would.
+                        dropMissingClip(clip);
+                        continue;
+                    }
+                    long clipSize = stat.bytes();
                     // File first, THEN row — mirroring the VOD path's discipline. A clip's row is deleted
                     // outright (unlike a match, which keeps its row), so if we dropped the row first and the
                     // unlink then failed (locked file, or a crash between the autocommitted delete and the
                     // unlink) the .mp4 would leak permanently: no row references it, and CrashRecoveryRunner's
                     // non-recursive active-drive scan never descends into videoDir/clips/ to reclaim it. Its
-                    // bytes would also drop out of the row-based reachableClipBytes budget, under-counting the
+                    // bytes would also drop out of the row-based measured budget, under-counting the
                     // cap while `freed` over-reported. So unlink first and gate the row-delete + accounting on
                     // the .mp4 actually being gone.
                     boolean videoGone = deleteFileQuietly(clip.videoPath());
@@ -279,9 +373,10 @@ public class RetentionSweeper {
     }
 
     /**
-     * Pre-record free-space check. Computes free bytes on the video directory's filesystem and, if
-     * below the low-disk threshold, publishes a {@code {scope:"disk"}} error frame and returns a
-     * warning. Returns null when disk is healthy. NEVER blocks recording -- it only warns.
+     * Free-space check, run on every scheduled sweep pass. Computes free bytes on the video
+     * directory's filesystem and, if below the low-disk threshold, publishes a {@code {scope:"disk"}}
+     * error frame and returns a warning. Returns null when disk is healthy. NEVER blocks recording --
+     * it only warns.
      *
      * @return a warning string when low on disk, or null when healthy / unknown
      */
@@ -392,8 +487,19 @@ public class RetentionSweeper {
         return Path.of(dir != null && !dir.isBlank() ? dir : ".");
     }
 
-    private long totalStoredVideoBytes() {
+    /**
+     * Measures the stored-bytes budget: every reachable VOD + clip at its real on-disk size, via
+     * {@link #statFileBytes} — the SAME measure the eviction loops decrement by, so the budget seed
+     * and the loops can't drift when a file's real size differs from its recorded
+     * {@code file_size_bytes}. A file confirmed GONE from a reachable drive counts 0 AND is
+     * reconciled on the spot ({@link #reconcileMissingMatchVideo} / {@link #dropMissingClip}), so a
+     * vanished file's stale DB size can never linger as phantom budget that evicts real recordings.
+     * {@code ambiguous} is set when any reachable file's stat failed for another reason — the caller
+     * must not evict against such a total.
+     */
+    private StoredBytes measureStoredBytes() {
         long total = 0L;
+        boolean ambiguous = false;
         for (MatchSummary m : matches.findAll()) {
             if (m.videoPath() == null || m.videoPath().isBlank()) {
                 continue;
@@ -405,28 +511,19 @@ public class RetentionSweeper {
             if (!driveReachable(m.videoPath())) {
                 continue;
             }
-            total += videoSizeBytes(m);
+            FileStat stat = statFileBytes(m.videoPath(), m.fileSizeBytes());
+            if (stat.missing()) {
+                reconcileMissingMatchVideo(m);
+                continue;
+            }
+            ambiguous |= stat.ambiguous();
+            total += stat.bytes();
         }
         // Clips are first-class stored bytes too: their rendered .mp4s count against the same cap as
         // VODs. Only REACHABLE clips count: a clip on an unplugged drive can't be evicted (the clip
         // phase skips it), so counting its bytes would inflate the over-cap amount with unreclaimable
         // budget and force eviction of reachable VODs chasing a target only offline bytes hold. Symmetric
         // with the offline-VOD exclusion above and the 0-headroom an unreachable archive contributes.
-        total += reachableClipBytes();
-        return total;
-    }
-
-    /**
-     * Sum of clip sizes whose drive is currently reachable, using the real on-disk size (with a DB
-     * fallback) via {@link #clipSizeBytes} — the SAME measure the clip-eviction loop decrements by, so
-     * the budget seed and the loop can't drift when a clip's file size differs from its recorded
-     * {@code file_size_bytes} (matching the VOD path, which uses real size on both sides). Filters by
-     * {@link #driveReachable}, so a clip on an unplugged drive — which the clip-eviction phase can't
-     * reclaim — never inflates the eviction budget. Mirrors how {@link #totalStoredVideoBytes()}
-     * excludes offline VODs.
-     */
-    private long reachableClipBytes() {
-        long total = 0L;
         for (ClipRow clip : clips.findAll()) {
             if (clip.videoPath() == null || clip.videoPath().isBlank()) {
                 continue;
@@ -434,9 +531,48 @@ public class RetentionSweeper {
             if (!driveReachable(clip.videoPath())) {
                 continue;
             }
-            total += clipSizeBytes(clip);
+            FileStat stat = statFileBytes(clip.videoPath(), clip.fileSizeBytes());
+            if (stat.missing()) {
+                dropMissingClip(clip);
+                continue;
+            }
+            ambiguous |= stat.ambiguous();
+            total += stat.bytes();
         }
-        return total;
+        return new StoredBytes(total, ambiguous);
+    }
+
+    /**
+     * Reconciles a match whose video is confirmed gone from a reachable drive (deleted outside the
+     * app): the row is caught up to the post-sweep shape — kept, with its markers/stats, paths and
+     * size nulled. Applies to starred rows too: the star protects the FILE from the sweeper, but this
+     * file is already gone, and an unreconciled starred row would shrink the budget forever (it is
+     * never a sweep candidate). Failures are non-fatal — the file already counts 0 either way.
+     */
+    private void reconcileMissingMatchVideo(MatchSummary m) {
+        try {
+            matches.reconcileMissingVideo(m.id(), m.videoPath());
+            log.warn("Match {} video {} is gone from a reachable drive; row reconciled (paths nulled)",
+                    m.id(), m.videoPath());
+        } catch (RuntimeException e) {
+            // A SQLITE_BUSY here must not abort the pass; the next sweep re-reconciles.
+            log.warn("Could not reconcile missing video for match {}: {}", m.id(), e.toString());
+        }
+    }
+
+    /**
+     * Drops a clip whose .mp4 is confirmed gone from a reachable drive. A clip has no row worth
+     * keeping once its file is gone (unlike a match) — the eviction phase's file-gone semantics —
+     * and a lingering row would keep its stale DB size in play. Failures are non-fatal.
+     */
+    private void dropMissingClip(ClipRow clip) {
+        try {
+            clips.delete(clip.id());
+            log.warn("Clip {} video {} is gone from a reachable drive; row dropped",
+                    clip.id(), clip.videoPath());
+        } catch (RuntimeException e) {
+            log.warn("Could not drop missing clip {}: {}", clip.id(), e.toString());
+        }
     }
 
     /**
@@ -457,32 +593,29 @@ public class RetentionSweeper {
         }
     }
 
-    private long videoSizeBytes(MatchSummary m) {
-        String path = m.videoPath();
+    /**
+     * Stats one stored file for budget accounting. Prefers the real on-disk size. A
+     * {@link NoSuchFileException} whose parent directory still exists means the FILE is confirmed
+     * gone (deleted outside the app), NOT the drive: that returns {@code missing} so the caller
+     * counts 0 and reconciles the row — falling back to the stale DB size there would count phantom
+     * bytes forever. Every other failure (drive vanished between the caller's reachability check and
+     * this stat, permissions, I/O error) is {@code ambiguous}: the DB snapshot is returned for
+     * visibility, but flagged so the sweep never deletes against a guessed size.
+     */
+    private FileStat statFileBytes(String path, Long dbSizeBytes) {
         if (path == null || path.isBlank()) {
-            return 0L;
+            return FileStat.of(0L);
         }
         try {
-            return Files.size(Path.of(path));
+            return FileStat.of(fileSize.sizeBytes(Path.of(path)));
+        } catch (NoSuchFileException e) {
+            if (driveReachable(path)) {
+                return new FileStat(0L, true, false);
+            }
+            return new FileStat(dbSizeBytes != null ? dbSizeBytes : 0L, false, true);
         } catch (IOException | RuntimeException e) {
-            // Prefer real filesystem size, but fall back to the DB snapshot when a transient stat
-            // failure would otherwise hide an over-budget row from pruning.
             log.warn("Could not stat {} during retention sweep: {}", path, e.toString());
-            return m.fileSizeBytes() != null ? m.fileSizeBytes() : 0L;
-        }
-    }
-
-    /** Real on-disk size of a clip's .mp4, falling back to the DB-recorded size on a stat failure. */
-    private long clipSizeBytes(ClipRow clip) {
-        String path = clip.videoPath();
-        if (path == null || path.isBlank()) {
-            return 0L;
-        }
-        try {
-            return Files.size(Path.of(path));
-        } catch (IOException | RuntimeException e) {
-            log.warn("Could not stat clip {} during retention sweep: {}", path, e.toString());
-            return clip.fileSizeBytes() != null ? clip.fileSizeBytes() : 0L;
+            return new FileStat(dbSizeBytes != null ? dbSizeBytes : 0L, false, true);
         }
     }
 
@@ -520,6 +653,25 @@ public class RetentionSweeper {
             log.warn("Could not delete {} during retention sweep: {}", path, e.toString());
             return false;
         }
+    }
+
+    /**
+     * One stored file's stat outcome for budget accounting. {@code bytes} is what to count.
+     * {@code missing} = the drive is reachable but the file is confirmed GONE (count 0; the caller
+     * reconciles the row). {@code ambiguous} = the stat failed for any other reason, so {@code bytes}
+     * is only the DB snapshot — a guess that must never drive a deletion.
+     */
+    private record FileStat(long bytes, boolean missing, boolean ambiguous) {
+        static FileStat of(long bytes) {
+            return new FileStat(bytes, false, false);
+        }
+    }
+
+    /**
+     * Result of {@link #measureStoredBytes}: the reachable stored total, and whether any part of it
+     * is a DB-snapshot guess ({@code ambiguous}) that must not drive an eviction.
+     */
+    private record StoredBytes(long totalBytes, boolean ambiguous) {
     }
 
     /**
