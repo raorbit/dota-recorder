@@ -367,18 +367,25 @@ public class ClipRepository {
     }
 
     /**
-     * Atomically claims a sweep candidate for eviction: nulls the clip's file columns ONLY while it
-     * is still non-starred AND still points at the video the sweeper snapshotted. Both guards live
-     * in the WHERE so the starred re-check and the prune are one statement, not a read-then-write: a
-     * star PATCH that commits between the sweeper's candidate snapshot and this clip's eviction turn
-     * wins — the claim matches nothing and the file is never unlinked. Mirrors
-     * {@link MatchRepository#claimForSweep}. After a successful claim the caller unlinks the file
-     * and {@link #delete}s the row, or {@link #restoreVideoPath}s it when the unlink fails.
+     * Atomically re-checks a sweep candidate at eviction time: reports whether the clip is STILL
+     * non-starred AND still points at the video the sweeper snapshotted. Both guards live in the
+     * WHERE of one UPDATE whose rowcount is the answer, so the starred re-check cannot be a
+     * read-then-write race: a star PATCH that commits between the sweeper's candidate snapshot and
+     * this clip's eviction turn wins — the claim matches nothing and the file is never unlinked.
      *
-     * @return true only if THIS call claimed the row; the caller may then unlink the file
+     * <p>Unlike {@link MatchRepository#claimForSweep} — whose nulled paths ARE a swept match row's
+     * end state (the row is kept) — this claim mutates NOTHING ({@code SET video_path =
+     * video_path}): a swept clip's row is deleted outright after the unlink, so pre-nulling the
+     * paths would only open a crash window — a hard kill between the committed null and the unlink
+     * would leave a pathless row whose .mp4 still exists on disk, invisible to the stored-bytes
+     * budget (which skips null-path clip rows) and never swept again. After a successful claim the
+     * caller unlinks the file and {@link #delete}s the row; on any failure the row is simply left
+     * as the sweep found it — no undo step exists or is needed.
+     *
+     * @return true only if the row still matches the snapshot; the caller may then unlink the file
      */
     public boolean claimForSweep(long id, String videoPath) {
-        String sql = "UPDATE clips SET video_path = NULL, thumb_path = NULL, file_size_bytes = NULL "
+        String sql = "UPDATE clips SET video_path = video_path "
                 + "WHERE id = ? AND starred = 0 AND video_path = ?";
         try (Connection conn = dataSource.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
@@ -387,29 +394,6 @@ public class ClipRepository {
             return ps.executeUpdate() == 1;
         } catch (SQLException e) {
             throw new IllegalStateException("Failed to claim clip " + id + " for sweep", e);
-        }
-    }
-
-    /**
-     * Undoes {@link #claimForSweep} after the file unlink FAILED: restores the snapshotted paths and
-     * size so the row keeps referencing its intact on-disk .mp4 and the next sweep can retry — the
-     * alternative is an invisibly orphaned file that the non-recursive orphan scan never reclaims
-     * from clips/. Unconditional on purpose: it only runs moments after this pass's own successful
-     * claim, under the storage maintenance lock. Mirrors {@link MatchRepository#restoreVideoPath}.
-     *
-     * @return rows updated (0 if no such clip)
-     */
-    public int restoreVideoPath(long id, String videoPath, String thumbPath, Long fileSizeBytes) {
-        String sql = "UPDATE clips SET video_path = ?, thumb_path = ?, file_size_bytes = ? WHERE id = ?";
-        try (Connection conn = dataSource.getConnection();
-             PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, videoPath);
-            ps.setString(2, thumbPath);
-            setNullableLong(ps, 3, fileSizeBytes);
-            ps.setLong(4, id);
-            return ps.executeUpdate();
-        } catch (SQLException e) {
-            throw new IllegalStateException("Failed to restore video path for clip " + id, e);
         }
     }
 

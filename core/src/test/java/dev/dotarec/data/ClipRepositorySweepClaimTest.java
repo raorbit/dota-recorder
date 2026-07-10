@@ -11,11 +11,14 @@ import java.nio.file.Path;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Verifies the retention sweep's atomic clip-row operations, mirroring
- * {@link MatchRepositorySweepClaimTest}: {@link ClipRepository#claimForSweep} nulls the file columns
- * only on a still-non-starred row that still points at the snapshotted video (the starred re-check
- * and the prune are one UPDATE), and {@link ClipRepository#restoreVideoPath} undoes a claim whose
- * file unlink failed.
+ * Verifies the retention sweep's atomic clip-row claim, the clip-side counterpart of
+ * {@link MatchRepositorySweepClaimTest}: {@link ClipRepository#claimForSweep} answers — in one
+ * guarded UPDATE, so the starred re-check cannot be a read-then-write race — whether the row is
+ * still non-starred and still points at the snapshotted video, while mutating NOTHING. Unlike the
+ * match claim (whose nulled paths are the swept row's end state), a claimed clip row is deleted
+ * after the unlink, so a path-nulling claim would open a crash window: a hard kill between the
+ * committed null and the unlink would leave a pathless row whose .mp4 still exists — invisible to
+ * the stored-bytes budget and never swept again.
  */
 class ClipRepositorySweepClaimTest {
 
@@ -34,17 +37,17 @@ class ClipRepositorySweepClaimTest {
     }
 
     @Test
-    void claimForSweepPrunesANonStarredClipExactlyOnce() {
+    void claimForSweepAcceptsANonStarredClipAndMutatesNothing() {
         long id = insert("C:\\vods\\clips\\old.mp4", "C:\\vods\\clips\\old.jpg", 100L, false);
 
         assertThat(clips.claimForSweep(id, "C:\\vods\\clips\\old.mp4")).isTrue();
 
+        // Rowcount-only guard: the row is untouched, so a hard kill between the claim and the
+        // unlink leaves a fully intact row that still counts in (and is swept from) the budget.
         ClipRow claimed = clips.findById(id).orElseThrow();
-        assertThat(claimed.videoPath()).isNull();
-        assertThat(claimed.thumbPath()).isNull();
-        assertThat(claimed.fileSizeBytes()).isNull();
-        // A second claim finds no matching video_path: the row was already claimed.
-        assertThat(clips.claimForSweep(id, "C:\\vods\\clips\\old.mp4")).isFalse();
+        assertThat(claimed.videoPath()).isEqualTo("C:\\vods\\clips\\old.mp4");
+        assertThat(claimed.thumbPath()).isEqualTo("C:\\vods\\clips\\old.jpg");
+        assertThat(claimed.fileSizeBytes()).isEqualTo(100L);
     }
 
     @Test
@@ -65,22 +68,6 @@ class ClipRepositorySweepClaimTest {
         assertThat(clips.claimForSweep(id, "C:\\vods\\clips\\old.mp4")).isFalse();
         assertThat(clips.findById(id).orElseThrow().videoPath())
                 .isEqualTo("D:\\archive\\clips\\old.mp4");
-    }
-
-    @Test
-    void restoreVideoPathUndoesAClaim() {
-        long id = insert("C:\\vods\\clips\\locked.mp4", "C:\\vods\\clips\\locked.jpg", 100L, false);
-        assertThat(clips.claimForSweep(id, "C:\\vods\\clips\\locked.mp4")).isTrue();
-
-        // The file unlink failed: the sweeper puts the snapshotted columns back.
-        assertThat(clips.restoreVideoPath(
-                id, "C:\\vods\\clips\\locked.mp4", "C:\\vods\\clips\\locked.jpg", 100L))
-                .isEqualTo(1);
-
-        ClipRow restored = clips.findById(id).orElseThrow();
-        assertThat(restored.videoPath()).isEqualTo("C:\\vods\\clips\\locked.mp4");
-        assertThat(restored.thumbPath()).isEqualTo("C:\\vods\\clips\\locked.jpg");
-        assertThat(restored.fileSizeBytes()).isEqualTo(100L);
     }
 
     private long insert(String videoPath, String thumbPath, Long fileSizeBytes, boolean starred) {
