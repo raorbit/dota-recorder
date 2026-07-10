@@ -8,6 +8,7 @@ import {
   type StorageLocation,
 } from '../../api/client';
 import type { StatusSnapshot } from '../../api/client';
+import { buildAccountPatch } from '../../lib/account-patch';
 import {
   PADDING_MAX_S,
   PADDING_MIN_S,
@@ -61,6 +62,11 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
   const [videoDir, setVideoDir] = useState('');
   const [retentionGb, setRetentionGb] = useState(50);
   const [accountId, setAccountId] = useState('');
+  // Whether the user edited the Account ID field this session. The core auto-captures
+  // the id from GSI after this form loads, so an untouched (still-stale) field must be
+  // left out of the PUT — otherwise an unrelated save would clobber the captured id.
+  // Reset on load and after each save; see buildAccountPatch.
+  const [accountTouched, setAccountTouched] = useState(false);
 
   // Archive drives (tiered storage). The live per-drive disk usage that backs the
   // free/total readout + the cap-exceeds-drive warning lives in useStorageUsage.
@@ -110,6 +116,7 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
         setVideoDir(s.videoDir);
         setRetentionGb(s.retentionCapGb);
         setAccountId(s.accountId !== null ? String(s.accountId) : '');
+        setAccountTouched(false);
         setStorageLocations(s.storageLocations);
         setAudioSources(s.audioSources);
         setFps(s.fps);
@@ -291,9 +298,10 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
     // doesn't bound length, so a long paste (e.g. a 17-digit SteamID64) coerces through
     // Number() to an imprecise float and would persist a WRONG id — silently mis-tagging
     // every death/kill. Reject anything that isn't a safe integer of sane length before we
-    // build the patch, instead of letting the corrupted value round-trip.
+    // build the patch, instead of letting the corrupted value round-trip. Only the value
+    // the user actually typed is sent (see buildAccountPatch), so only validate that.
     const trimmedAccount = accountId.trim();
-    if (trimmedAccount !== '') {
+    if (accountTouched && trimmedAccount !== '') {
       const parsedAccount = Number(trimmedAccount);
       if (trimmedAccount.length > 10 || !Number.isSafeInteger(parsedAccount)) {
         setError('Account ID looks invalid — enter your numeric Dota account ID, not a SteamID64.');
@@ -311,8 +319,15 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
       // Clamp to a positive integer: a cleared Max-storage field is Number('')===0, and the
       // core now 400s on <=0 — guard it client-side so we never send a non-positive cap.
       retentionCapGb: clampCapGb(retentionGb),
-      // null means "leave unchanged" on the wire, so a blanked field clears via an explicit flag.
-      ...(trimmedAccount === '' ? { clearAccountId: true } : { accountId: Number(trimmedAccount) }),
+      // Only carry the account id when the user actually edited the field this session.
+      // An untouched field is omitted so an unrelated save can't clobber the id the core
+      // auto-captured from GSI after this form loaded (which would break tagging until a
+      // core restart, since SettingsController latches accountCaptureDone).
+      ...buildAccountPatch({
+        touched: accountTouched,
+        value: accountId,
+        baseline: settings?.accountId ?? null,
+      }),
       // FULL-LIST REPLACE: always send the complete current array.
       audioSources,
       // FULL-LIST REPLACE too. All rows are validated non-blank above; clamp each cap to a
@@ -337,6 +352,7 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
       setVideoDir(updated.videoDir);
       setRetentionGb(updated.retentionCapGb);
       setAccountId(updated.accountId !== null ? String(updated.accountId) : '');
+      setAccountTouched(false);
       setStorageLocations(updated.storageLocations);
       setAudioSources(updated.audioSources);
       setFps(updated.fps);
@@ -575,6 +591,7 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
                   placeholder="96828122"
                   onChange={(e) => {
                     setAccountId(e.target.value.replace(/\D/g, ''));
+                    setAccountTouched(true);
                     setSaveState('idle');
                   }}
                 />
