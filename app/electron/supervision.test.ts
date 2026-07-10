@@ -469,6 +469,63 @@ describe('SupervisionController — OBS crash & launch', () => {
     expect(deps.startObs).toHaveBeenCalledTimes(2); // exactly one relaunch, not a runaway drain
   });
 
+  it('still drains a queued relaunch when the in-flight startObs rejects', async () => {
+    // startObs is expected to handle failures internally, but its contract tolerates a rejection.
+    // A crash-during-launch queues a relaunch with the budget already charged; if the in-flight
+    // startObs then REJECTS, the drain loop must still run that queued relaunch (not drop it, leaving
+    // OBS down with no attempt left to retry) and launchObs must resolve — an escaping rejection would
+    // be unhandled through the `void launchObs()` crash-path call sites.
+    const calls: Array<Deferred<void>> = [];
+    const deps = makeDeps({
+      startObs: vi.fn(() => {
+        const d = deferred<void>();
+        calls.push(d);
+        return d.promise;
+      }),
+    });
+    const controller = new SupervisionController(deps, 2);
+
+    const launch = controller.launchObs(); // startObs #1 in flight
+    await flush();
+    controller.handleObsCrash(exit); // crash-during-launch: relaunch queued, attempt 1/2 charged
+
+    calls[0].reject(new Error('spawn failed')); // the in-flight launch rejects
+    await flush();
+    expect(deps.startObs).toHaveBeenCalledTimes(2); // the queued relaunch still ran
+    expect(deps.log).toHaveBeenCalledWith(expect.stringContaining('launch failed'));
+
+    calls[1].resolve();
+    await expect(launch).resolves.toBeUndefined(); // no rejection escapes launchObs
+
+    // The rejection itself charged nothing (only handleObsCrash spends budget): attempt 2/2 is still
+    // available, and only the crash after it hits the exceeded-attempts wall.
+    controller.handleObsCrash(exit); // attempt 2/2
+    await flush();
+    expect(deps.startObs).toHaveBeenCalledTimes(3);
+    calls[2].resolve();
+    await flush();
+    controller.handleObsCrash(exit); // budget exhausted
+    await flush();
+    expect(deps.startObs).toHaveBeenCalledTimes(3);
+    expect(deps.log).toHaveBeenCalledWith(expect.stringContaining('exceeded restart attempts'));
+  });
+
+  it('resolves and logs when startObs rejects with nothing queued', async () => {
+    // The no-queue shape of the same tolerance: a plain launch failure is logged and swallowed, and
+    // the drain loop stops (no phantom retry — retries are only ever queued by handleObsCrash).
+    const deps = makeDeps({
+      startObs: vi.fn(async () => {
+        throw new Error('spawn failed');
+      }),
+    });
+    const controller = new SupervisionController(deps);
+
+    await expect(controller.launchObs()).resolves.toBeUndefined();
+
+    expect(deps.startObs).toHaveBeenCalledTimes(1);
+    expect(deps.log).toHaveBeenCalledWith(expect.stringContaining('launch failed'));
+  });
+
   it('still gives up after the restart budget is exhausted by crashes during launch', async () => {
     // Bounded even when every relaunch itself crashes during its own launch window: the queued-relaunch
     // drain stays capped by obsRestartAttempts. With maxRestarts=2 that is the initial launch + 2 relaunch
