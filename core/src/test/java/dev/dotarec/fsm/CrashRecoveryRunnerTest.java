@@ -732,9 +732,16 @@ class CrashRecoveryRunnerTest {
         long parentId = insertMatch(videoDir.resolve("parent.mp4").toString(), null, 4_096L);
         // The clip row points at a source that no longer exists (a same-filesystem rename consumed it
         // before the repoint committed), while the relocated copy survives on the archive drive.
-        long clipId = insertClip(parentId, videoDir.resolve("clips").resolve("gone-clip.mp4").toString());
+        // Re-linking requires attribution — the remainder after "clip-<clipId>-" must equal the row's
+        // recorded basename and the on-disk size must equal the row's recorded size.
+        String clipBytes = "the real clip bytes";
+        long clipId =
+                insertClip(
+                        parentId,
+                        videoDir.resolve("clips").resolve("1-clip-1.mp4").toString(),
+                        (long) clipBytes.length());
         Path stranded = archiveDir.resolve("clip-" + clipId + "-1-clip-1.mp4");
-        Files.writeString(stranded, "the real clip bytes");
+        Files.writeString(stranded, clipBytes);
 
         runner.run(null);
 
@@ -748,13 +755,19 @@ class CrashRecoveryRunnerTest {
     void relinkAlsoRecoversTheArchivedClipThumbnail() throws Exception {
         Path archiveDir = configureArchive("hdd");
         long parentId = insertMatch(videoDir.resolve("parent.mp4").toString(), null, 4_096L);
-        long clipId = insertClip(parentId, videoDir.resolve("clips").resolve("gone-clip.mp4").toString());
+        String clipBytes = "the real clip bytes";
+        long clipId =
+                insertClip(
+                        parentId,
+                        videoDir.resolve("clips").resolve("1-clip-1.mp4").toString(),
+                        (long) clipBytes.length());
         Path stranded = archiveDir.resolve("clip-" + clipId + "-1-clip-1.mp4");
-        Files.writeString(stranded, "the real clip bytes");
+        Files.writeString(stranded, clipBytes);
         // The move also relocated the clip thumbnail under <archive>/thumbs/clip-<clipId>-...; recovery
         // must find it via the clip prefix (exercises recoverArchivedThumb's clip-prefix branch).
         Path strandedThumb =
-                Files.createDirectories(archiveDir.resolve("thumbs")).resolve("clip-" + clipId + "-gone.jpg");
+                Files.createDirectories(archiveDir.resolve("thumbs"))
+                        .resolve("clip-" + clipId + "-1-clip-1.jpg");
         Files.writeString(strandedThumb, "thumb");
 
         runner.run(null);
@@ -762,6 +775,74 @@ class CrashRecoveryRunnerTest {
         ClipRow row = clips.findById(clipId).orElseThrow();
         assertThat(row.videoPath()).isEqualTo(stranded.toString());
         assertThat(row.thumbPath()).isEqualTo(strandedThumb.toString());
+    }
+
+    @Test
+    void doesNotRelinkClipPrefixedArchiveFileWithMismatchedBasename() throws Exception {
+        Path archiveDir = configureArchive("hdd");
+        long parentId = insertMatch(videoDir.resolve("parent.mp4").toString(), null, 4_096L);
+        // The clip LOST its video (missing path), which used to make ANY "clip-<id>-..." file its new
+        // video. A user-placed "clip-1-whatever.mp4" must not be captured that way: re-linking requires
+        // the remainder after the prefix to equal the row's recorded basename.
+        String clipPath = videoDir.resolve("clips").resolve("1-clip-1.mp4").toString();
+        long clipId = insertClip(parentId, clipPath, 2_048L);
+        Path foreign = archiveDir.resolve("clip-" + clipId + "-whatever.mp4");
+        Files.writeString(foreign, "the user's own video");
+        makeStale(foreign);
+
+        runner.run(null);
+
+        // Not re-linked, not adopted (foreign name), not deleted.
+        assertThat(clips.findById(clipId).orElseThrow().videoPath()).isEqualTo(clipPath);
+        assertThat(matches.findAll()).hasSize(1); // only the parent match
+        assertThat(Files.exists(foreign)).isTrue();
+    }
+
+    @Test
+    void doesNotRelinkClipPrefixedArchiveFileWhoseSizeMismatchesTheStoredSize() throws Exception {
+        Path archiveDir = configureArchive("hdd");
+        long parentId = insertMatch(videoDir.resolve("parent.mp4").toString(), null, 4_096L);
+        // The remainder matches the lost clip's basename, but the on-disk size differs from the size
+        // the row recorded when the clip rendered — not provably the row's own bytes, so no re-link.
+        // The name IS a recorder-produced clip shape, so the provenance-gated import still adopts it
+        // as a STANDALONE row, never as clip <id>'s video.
+        String clipPath = videoDir.resolve("clips").resolve("1-clip-1.mp4").toString();
+        long clipId = insertClip(parentId, clipPath, 2_048L);
+        Path wrongSize = archiveDir.resolve("clip-" + clipId + "-1-clip-1.mp4");
+        Files.writeString(wrongSize, "not 2048 bytes");
+        makeStale(wrongSize);
+
+        runner.run(null);
+
+        assertThat(clips.findById(clipId).orElseThrow().videoPath()).isEqualTo(clipPath);
+        assertThat(Files.exists(wrongSize)).isTrue();
+        assertThat(matches.findAll())
+                .filteredOn(row -> wrongSize.toString().equals(row.videoPath()))
+                .singleElement()
+                .satisfies(row -> assertThat(row.enrichmentState()).isEqualTo("gsi_only"));
+    }
+
+    @Test
+    void doesNotRelinkWhenClipRowHasNoRecordedBasenameToAttribute() throws Exception {
+        Path archiveDir = configureArchive("hdd");
+        long parentId = insertMatch(videoDir.resolve("parent.mp4").toString(), null, 4_096L);
+        // A clip row whose video_path is NULL (never rendered, or reset by a sweep) has no
+        // basename/size to attribute a "clip-<id>-" file with, so it must NOT be re-linked; the
+        // provenance rule then decides adoption — this one is recorder-named, so it is imported as a
+        // STANDALONE row, never as clip <id>'s video.
+        long clipId = insertClip(parentId, null, null);
+        Path stray = archiveDir.resolve("clip-" + clipId + "-1-clip-1.mp4");
+        Files.writeString(stray, "an old clip render");
+        makeStale(stray);
+
+        runner.run(null);
+
+        assertThat(clips.findById(clipId).orElseThrow().videoPath()).isNull();
+        assertThat(Files.exists(stray)).isTrue();
+        assertThat(matches.findAll())
+                .filteredOn(row -> stray.toString().equals(row.videoPath()))
+                .singleElement()
+                .satisfies(row -> assertThat(row.enrichmentState()).isEqualTo("gsi_only"));
     }
 
     @Test
@@ -851,9 +932,14 @@ class CrashRecoveryRunnerTest {
 
     /** Inserts a ready clip for {@code parentId} pointing at {@code videoPath} and returns its id. */
     private long insertClip(long parentId, String videoPath) {
+        return insertClip(parentId, videoPath, 2_048L);
+    }
+
+    /** Inserts a ready clip with an explicit recorded {@code fileSizeBytes} (null when never rendered). */
+    private long insertClip(long parentId, String videoPath, Long fileSizeBytes) {
         return clips.insert(
-                parentId, "auto", "rampage", 10.0, 30.0, null, videoPath, null, 2_048L, "ready", null,
-                1_000L);
+                parentId, "auto", "rampage", 10.0, 30.0, null, videoPath, null, fileSizeBytes, "ready",
+                null, 1_000L);
     }
 
     private RecordingSessionRow sessionRow(String id, Long dotaMatchId) {
