@@ -364,8 +364,8 @@ public class CrashRecoveryRunner implements ApplicationRunner {
             String fileName = file.getFileName().toString();
             // Clip leftovers carry a "clip-<clipId>-" prefix (a separate id space from match files); route
             // them to clip recovery so a stranded clip copy is re-linked/dropped, never adopted as a bogus
-            // match. A false return (no such clip row, or a prefix collision that isn't attributable move
-            // residue) falls through to the provenance-gated orphan import below.
+            // match. A false return (no such clip row, or a prefix collision the row can't attribute as
+            // its lost video or move residue) falls through to the provenance-gated orphan import below.
             Long clipId = leadingClipId(fileName);
             if (clipId != null && recoverArchivedClipLeftover(file, clipId)) {
                 return;
@@ -379,7 +379,12 @@ public class CrashRecoveryRunner implements ApplicationRunner {
                         // the same attribution the delete branch demands. A bare numeric-prefix match
                         // would let a user-placed "12-family.mp4" become match 12's VOD (and thereby
                         // retention-deletable).
-                        if (isAttributableToLostVideo(file, matchId + "-", row.get())) {
+                        if (isAttributableToLostVideo(
+                                file,
+                                matchId + "-",
+                                row.get().videoPath(),
+                                row.get().fileSizeBytes(),
+                                "match " + matchId)) {
                             String thumb =
                                     recoverArchivedThumb(
                                             file.getParent(), matchId + "-", row.get().thumbPath());
@@ -463,14 +468,14 @@ public class CrashRecoveryRunner implements ApplicationRunner {
     }
 
     /**
-     * True when {@code file} on an archive drive is provably {@code row}'s own relocated recording, so
-     * a row whose video went MISSING may be re-linked to it. The re-link analogue of
+     * True when {@code file} on an archive drive is provably the row's own relocated recording, so a
+     * row (match or clip) whose video went MISSING may be re-linked to it. The re-link analogue of
      * {@link #isGenuineMoveResidue}: the row's file is gone, so its stored fields stand in for it —
      *
      * <ul>
-     *   <li><b>naming</b> — the remainder after the {@code <matchId>-} prefix must equal the basename
-     *       of the row's recorded {@code video_path} (the {@code src.getFileName()} the archiver
-     *       prefixed when it staged the move);</li>
+     *   <li><b>naming</b> — the remainder after the owner prefix ({@code <matchId>-} or
+     *       {@code clip-<clipId>-}) must equal the basename of the row's recorded {@code video_path}
+     *       (the {@code src.getFileName()} the archiver prefixed when it staged the move);</li>
      *   <li><b>attribution</b> — when the row recorded a file size, the leftover's on-disk size must
      *       equal it (the move never rewrites bytes).</li>
      * </ul>
@@ -479,9 +484,10 @@ public class CrashRecoveryRunner implements ApplicationRunner {
      * attribute the file, so it is NOT re-linked — the provenance-gated orphan import then decides
      * whether the file is adopted as a standalone row instead.
      */
-    private boolean isAttributableToLostVideo(Path file, String prefix, MatchSummary row) {
+    private boolean isAttributableToLostVideo(
+            Path file, String prefix, String rowVideoPath, Long storedSize, String owner) {
         String remainder = leftoverRemainder(file.getFileName().toString(), prefix);
-        Path rowVideo = safePath(row.videoPath());
+        Path rowVideo = safePath(rowVideoPath);
         if (remainder == null || rowVideo == null || rowVideo.getFileName() == null) {
             return false;
         }
@@ -489,7 +495,6 @@ public class CrashRecoveryRunner implements ApplicationRunner {
         if (!remainder.equals(rowVideo.getFileName().toString())) {
             return false;
         }
-        Long storedSize = row.fileSizeBytes();
         if (storedSize == null) {
             return true; // no recorded size to compare; the basename match is the best attribution left
         }
@@ -497,7 +502,7 @@ public class CrashRecoveryRunner implements ApplicationRunner {
             return Files.size(file) == storedSize;
         } catch (Exception e) {
             // Can't confirm the size matches -> don't claim the file for the row.
-            log.warn("Could not stat archive leftover {} for match {}: {}", file, row.id(), e.toString());
+            log.warn("Could not stat archive leftover {} for {}: {}", file, owner, e.toString());
             return false;
         }
     }
@@ -521,16 +526,19 @@ public class CrashRecoveryRunner implements ApplicationRunner {
      *
      * <ul>
      *   <li>if the clip row lost its file (a same-filesystem rename consumed the source before the
-     *       repoint committed), RE-LINK the row to this recovered copy;</li>
+     *       repoint committed), RE-LINK the row to this recovered copy — but only when the file is
+     *       ATTRIBUTABLE to the row ({@link #isAttributableToLostVideo}: original basename and, when
+     *       recorded, size), so a user-placed prefix collision never becomes the clip's video;</li>
      *   <li>if the clip is already intact AND the file is provably its move residue (same
      *       basename/size attribution as the match path), this is a redundant copy from the
      *       interrupted move — DELETE it to reclaim the space.</li>
      * </ul>
      *
      * <p>Returns {@code false} when no such clip row exists (e.g. the clip was deleted) or when the
-     * intact clip's prefix collides with a file that isn't attributable as its residue (e.g. a
-     * user-placed {@code clip-12-something.mp4}), so the caller falls back to the provenance-gated
-     * import rather than deleting a file it can't attribute.
+     * clip's prefix collides with a file that isn't attributable to it (as its missing video or as
+     * its intact copy's residue, e.g. a user-placed {@code clip-12-something.mp4}), so the caller
+     * falls back to the provenance-gated import rather than adopting or deleting a file it can't
+     * attribute.
      */
     private boolean recoverArchivedClipLeftover(Path file, long clipId) {
         Optional<ClipRow> row = clips.findById(clipId);
@@ -538,11 +546,28 @@ public class CrashRecoveryRunner implements ApplicationRunner {
             return false;
         }
         if (videoFileMissing(row.get().videoPath())) {
-            String thumb =
-                    recoverArchivedThumb(file.getParent(), "clip-" + clipId + "-", row.get().thumbPath());
-            clips.updateVideoPath(clipId, file.toString(), thumb);
-            log.warn("Re-linked stranded archive clip {} to clip row {} (interrupted move)", file, clipId);
-            return true;
+            // A lost clip video is re-linked only to what is provably its own relocated copy — the
+            // same attribution the match re-link demands. A bare prefix match would let a user-placed
+            // "clip-3-whatever.mp4" become clip 3's video (and thereby deletable with it later).
+            if (isAttributableToLostVideo(
+                    file,
+                    "clip-" + clipId + "-",
+                    row.get().videoPath(),
+                    row.get().fileSizeBytes(),
+                    "clip " + clipId)) {
+                String thumb =
+                        recoverArchivedThumb(
+                                file.getParent(), "clip-" + clipId + "-", row.get().thumbPath());
+                clips.updateVideoPath(clipId, file.toString(), thumb);
+                log.warn("Re-linked stranded archive clip {} to clip row {} (interrupted move)", file, clipId);
+                return true;
+            }
+            log.warn(
+                    "Archive file {} shares clip {}'s id prefix but isn't attributable to its missing"
+                        + " video; not re-linking",
+                    file,
+                    clipId);
+            return false;
         }
         // The row is intact, so this clip-prefixed file is only redundant if it is genuinely the
         // clip's move residue — the same attribution the match path requires before deleting.
