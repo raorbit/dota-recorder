@@ -17,9 +17,12 @@ import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Enforces the disk budget for recorded VODs (modeled on Warcraft Recorder).
@@ -88,6 +91,20 @@ public class RetentionSweeper {
     private final TotalSpaceProbe totalSpace;
     private final UsableSpaceProbe usableSpace;
     private final FileSizeProbe fileSize;
+
+    /**
+     * Miss registry backing the two-pass confirmed-missing rule: row key
+     * ({@code "match:"/"clip:" + id + "|" + path}) → the sweep pass that FIRST observed the file
+     * missing. The destructive row reconcile ({@link #reconcileMissingMatchVideo} /
+     * {@link #dropMissingClip}) runs only when a miss persists into a LATER pass; a file observed
+     * present again clears its entry, and entries whose row no longer carries the snapshotted path
+     * are pruned every measurement. In-memory on purpose: a restart just restarts the two-pass
+     * clock, which only delays a reconcile. Guarded by the maintenance lock — every reader/writer
+     * runs inside {@link #sweep(Long)}.
+     */
+    private final Map<String, Long> firstMissPass = new HashMap<>();
+    /** Monotonic sweep-pass counter behind {@link #firstMissPass}; guarded by the maintenance lock. */
+    private long sweepPass;
 
     @org.springframework.beans.factory.annotation.Autowired
     public RetentionSweeper(
@@ -187,10 +204,12 @@ public class RetentionSweeper {
      * remains. The {@code protectedId} (e.g. the actively-recording match) is skipped even if it is
      * the oldest, so an in-progress .mp4 is never deleted.
      *
-     * <p>Files confirmed GONE from a reachable drive (deleted outside the app) are reconciled during
-     * the budget measurement: they count 0 bytes and their row is caught up to the post-sweep shape
-     * (a clip's row is dropped), so a stale DB size can never linger as phantom budget that evicts
-     * real recordings to offset bytes that don't exist. When any reachable file's size can't be
+     * <p>Files confirmed GONE from a reachable drive (deleted outside the app) count 0 bytes from
+     * the FIRST miss, so a stale DB size can never linger as phantom budget that evicts real
+     * recordings to offset bytes that don't exist. The destructive row catch-up (paths nulled; a
+     * clip's row dropped) additionally waits until a SECOND consecutive sweep confirms the miss —
+     * see {@link #missConfirmedAcrossSweeps} — so a transiently-missing file (e.g. a starred VOD
+     * cut-pasted out and back) keeps its row intact. When any reachable file's size can't be
      * measured at all, the pass measures but does NOT evict — deleting real VODs against guessed
      * bytes is worse than sweeping an hour late.
      *
@@ -205,6 +224,7 @@ public class RetentionSweeper {
         // safe.
         maintenanceLock.lock();
         try {
+            sweepPass++; // one tick per pass: the miss registry tells "same pass" from "a later one"
             long capBytes = capBytes();
             StoredBytes stored = measureStoredBytes();
             long total = stored.totalBytes();
@@ -252,8 +272,12 @@ public class RetentionSweeper {
                     }
                     if (stat.missing()) {
                         // Vanished between the budget measurement and this row's turn: nothing to
-                        // unlink and no bytes to credit — just reconcile the row like the measurement
-                        // pass would have.
+                        // unlink. Credit back whatever the measurement counted for this candidate
+                        // (0 if it was already missing then), or the pass would keep evicting other
+                        // VODs to offset bytes that are already gone. The row reconcile itself is
+                        // deferred until a second sweep confirms the miss.
+                        total -= stored.countedBytes().getOrDefault(
+                                missKey("match", m.id(), m.videoPath()), 0L);
                         reconcileMissingMatchVideo(m);
                         continue;
                     }
@@ -319,12 +343,23 @@ public class RetentionSweeper {
                     }
                     if (stat.missing()) {
                         // Vanished between the budget measurement and this clip's turn: nothing to
-                        // unlink, no bytes to credit — drop the row like the measurement pass would.
+                        // unlink. Same credit rule as the VOD loop — refund the measurement's counted
+                        // bytes — and the row drop is deferred until a second sweep confirms the miss.
+                        total -= stored.countedBytes().getOrDefault(
+                                missKey("clip", clip.id(), clip.videoPath()), 0L);
                         dropMissingClip(clip);
                         continue;
                     }
                     long clipSize = stat.bytes();
-                    // File first, THEN row — mirroring the VOD path's discipline. A clip's row is deleted
+                    // Re-check starred ATOMICALLY at deletion time — the same claim protocol as the
+                    // VOD loop above: a star PATCH commits outside the maintenance lock, so a clip
+                    // starred between the candidate snapshot and this turn must win. The claim's
+                    // WHERE re-tests starred=0 (and that the row still points at the snapshotted
+                    // file) in the same UPDATE that nulls the paths — no check-then-unlink window.
+                    if (!clips.claimForSweep(clip.id(), clip.videoPath())) {
+                        continue; // starred (or repointed/deleted) since the snapshot — not deletable
+                    }
+                    // File next, row LAST — mirroring the VOD path's discipline. A clip's row is deleted
                     // outright (unlike a match, which keeps its row), so if we dropped the row first and the
                     // unlink then failed (locked file, or a crash between the autocommitted delete and the
                     // unlink) the .mp4 would leak permanently: no row references it, and CrashRecoveryRunner's
@@ -335,8 +370,11 @@ public class RetentionSweeper {
                     boolean videoGone = deleteFileQuietly(clip.videoPath());
                     boolean thumbGone = deleteFileQuietly(clip.thumbPath());
                     if (!videoGone) {
-                        // Undeletable .mp4: keep the row (so it still references the file) and credit nothing.
-                        // The next sweep retries — no leak, no budget drift.
+                        // The file is still on disk: undo the claim so the row keeps referencing its
+                        // intact .mp4 and credit nothing. The next sweep retries — no leak, no budget
+                        // drift, never an invisibly orphaned file.
+                        clips.restoreVideoPath(clip.id(), clip.videoPath(), clip.thumbPath(),
+                                clip.fileSizeBytes());
                         log.warn("Retention sweep left clip {} intact because video deletion failed", clip.id());
                         continue;
                     }
@@ -345,15 +383,29 @@ public class RetentionSweeper {
                                 "Retention sweep could not delete thumbnail for clip {}; deleting clip row anyway",
                                 clip.id());
                     }
-                    clips.delete(clip.id());
+                    try {
+                        clips.delete(clip.id());
+                    } catch (RuntimeException e) {
+                        // The .mp4 is already gone but the row delete failed (e.g. a SQLITE_BUSY).
+                        // Restore the snapshotted path so the row re-enters the missing-file flow — a
+                        // later sweep confirms the miss and drops it — instead of lingering claimed
+                        // and pathless forever. No freed/total credit for this clip, matching the
+                        // pre-claim behavior for this double fault.
+                        clips.restoreVideoPath(clip.id(), clip.videoPath(), clip.thumbPath(),
+                                clip.fileSizeBytes());
+                        log.warn("Retention sweep could not delete clip row {}: {}", clip.id(), e.toString());
+                        continue;
+                    }
                     total -= clipSize;
                     freed += clipSize;
                     clipsDeleted++;
                 } catch (RuntimeException e) {
-                    // One clip failing (e.g. a SQLITE_BUSY on delete) must not abort the whole pass:
-                    // log and keep evicting the remaining clips so the budget is still enforced. The .mp4
-                    // is already gone at this point, so the still-present row is idempotent — the next
-                    // sweep's deleteFileQuietly treats the gone file as removed and re-deletes the row.
+                    // One clip failing (e.g. a SQLITE_BUSY on the claim, or on a restore after a
+                    // failed unlink) must not abort the whole pass: log and keep evicting the
+                    // remaining clips so the budget is still enforced. A failed claim changed nothing
+                    // and retries next sweep; a failed claim-RESTORE (two DB failures back to back)
+                    // leaves a pathless row whose file state needs manual attention — rare enough to
+                    // log, not to handle.
                     log.warn("Retention sweep could not evict clip {}: {}", clip.id(), e.toString());
                 }
             }
@@ -491,23 +543,30 @@ public class RetentionSweeper {
      * Measures the stored-bytes budget: every reachable VOD + clip at its real on-disk size, via
      * {@link #statFileBytes} — the SAME measure the eviction loops decrement by, so the budget seed
      * and the loops can't drift when a file's real size differs from its recorded
-     * {@code file_size_bytes}. A file confirmed GONE from a reachable drive counts 0 AND is
-     * reconciled on the spot ({@link #reconcileMissingMatchVideo} / {@link #dropMissingClip}), so a
-     * vanished file's stale DB size can never linger as phantom budget that evicts real recordings.
-     * {@code ambiguous} is set when any reachable file's stat failed for another reason — the caller
-     * must not evict against such a total.
+     * {@code file_size_bytes}. A file confirmed GONE from a reachable drive counts 0 from the FIRST
+     * miss (a vanished file's stale DB size can never linger as phantom budget that evicts real
+     * recordings); the destructive row catch-up ({@link #reconcileMissingMatchVideo} /
+     * {@link #dropMissingClip}) waits for a second sweep's confirmation. What was counted per row is
+     * recorded in {@code countedBytes} so the eviction loops can refund a candidate that vanishes
+     * before its turn. {@code ambiguous} is set when any reachable file's stat failed for another
+     * reason — the caller must not evict against such a total.
      */
     private StoredBytes measureStoredBytes() {
         long total = 0L;
         boolean ambiguous = false;
+        Map<String, Long> counted = new HashMap<>();
+        Set<String> liveKeys = new HashSet<>();
         for (MatchSummary m : matches.findAll()) {
             if (m.videoPath() == null || m.videoPath().isBlank()) {
                 continue;
             }
+            String key = missKey("match", m.id(), m.videoPath());
+            liveKeys.add(key);
             // A VOD on an offline drive (unplugged archive) is not manageable budget: it can be neither
             // moved nor deleted. Counting it would make total exceed the (now archive-excluded) budget
             // and force eviction of OTHER drives' files — or orphan this one. Exclude it, symmetric with
-            // clampedCapBytes contributing 0 headroom for the same unreachable archive.
+            // clampedCapBytes contributing 0 headroom for the same unreachable archive. Its miss entry
+            // (if any) also survives untouched: an offline drive is neither presence nor a miss.
             if (!driveReachable(m.videoPath())) {
                 continue;
             }
@@ -516,8 +575,12 @@ public class RetentionSweeper {
                 reconcileMissingMatchVideo(m);
                 continue;
             }
+            if (!stat.ambiguous()) {
+                firstMissPass.remove(key); // observed present again: reset the two-pass miss clock
+            }
             ambiguous |= stat.ambiguous();
             total += stat.bytes();
+            counted.put(key, stat.bytes());
         }
         // Clips are first-class stored bytes too: their rendered .mp4s count against the same cap as
         // VODs. Only REACHABLE clips count: a clip on an unplugged drive can't be evicted (the clip
@@ -528,6 +591,8 @@ public class RetentionSweeper {
             if (clip.videoPath() == null || clip.videoPath().isBlank()) {
                 continue;
             }
+            String key = missKey("clip", clip.id(), clip.videoPath());
+            liveKeys.add(key);
             if (!driveReachable(clip.videoPath())) {
                 continue;
             }
@@ -536,20 +601,34 @@ public class RetentionSweeper {
                 dropMissingClip(clip);
                 continue;
             }
+            if (!stat.ambiguous()) {
+                firstMissPass.remove(key);
+            }
             ambiguous |= stat.ambiguous();
             total += stat.bytes();
+            counted.put(key, stat.bytes());
         }
-        return new StoredBytes(total, ambiguous);
+        // Prune miss entries whose row no longer carries the snapshotted path (row deleted,
+        // repointed, or already reconciled): a dead key must never pre-arm some future miss.
+        firstMissPass.keySet().retainAll(liveKeys);
+        return new StoredBytes(total, ambiguous, counted);
     }
 
     /**
-     * Reconciles a match whose video is confirmed gone from a reachable drive (deleted outside the
-     * app): the row is caught up to the post-sweep shape — kept, with its markers/stats, paths and
-     * size nulled. Applies to starred rows too: the star protects the FILE from the sweeper, but this
+     * Reconciles a match whose video is gone from a reachable drive (deleted outside the app): the
+     * row is caught up to the post-sweep shape — kept, with its markers/stats, paths and size
+     * nulled. Applies to starred rows too: the star protects the FILE from the sweeper, but this
      * file is already gone, and an unreconciled starred row would shrink the budget forever (it is
-     * never a sweep candidate). Failures are non-fatal — the file already counts 0 either way.
+     * never a sweep candidate). The mutation waits for {@link #missConfirmedAcrossSweeps} — a first
+     * miss only arms the registry, so a transiently-missing file keeps its row. Failures are
+     * non-fatal — the file already counts 0 either way.
      */
     private void reconcileMissingMatchVideo(MatchSummary m) {
+        if (!missConfirmedAcrossSweeps(missKey("match", m.id(), m.videoPath()))) {
+            log.warn("Match {} video {} looks gone from a reachable drive; deferring the row "
+                    + "reconcile until a second sweep confirms the miss", m.id(), m.videoPath());
+            return;
+        }
         try {
             matches.reconcileMissingVideo(m.id(), m.videoPath());
             log.warn("Match {} video {} is gone from a reachable drive; row reconciled (paths nulled)",
@@ -561,11 +640,18 @@ public class RetentionSweeper {
     }
 
     /**
-     * Drops a clip whose .mp4 is confirmed gone from a reachable drive. A clip has no row worth
-     * keeping once its file is gone (unlike a match) — the eviction phase's file-gone semantics —
-     * and a lingering row would keep its stale DB size in play. Failures are non-fatal.
+     * Drops a clip whose .mp4 is gone from a reachable drive. A clip has no row worth keeping once
+     * its file is gone (unlike a match) — the eviction phase's file-gone semantics — and a lingering
+     * row would keep its stale DB size in play. Like the match reconcile, the drop waits for
+     * {@link #missConfirmedAcrossSweeps} so a transiently-missing clip survives a single
+     * observation. Failures are non-fatal.
      */
     private void dropMissingClip(ClipRow clip) {
+        if (!missConfirmedAcrossSweeps(missKey("clip", clip.id(), clip.videoPath()))) {
+            log.warn("Clip {} video {} looks gone from a reachable drive; deferring the row drop "
+                    + "until a second sweep confirms the miss", clip.id(), clip.videoPath());
+            return;
+        }
         try {
             clips.delete(clip.id());
             log.warn("Clip {} video {} is gone from a reachable drive; row dropped",
@@ -573,6 +659,32 @@ public class RetentionSweeper {
         } catch (RuntimeException e) {
             log.warn("Could not drop missing clip {}: {}", clip.id(), e.toString());
         }
+    }
+
+    /**
+     * Records a missing-file observation for {@code key} and reports whether the miss is CONFIRMED —
+     * first observed on an EARLIER sweep pass and still missing now — so the destructive row
+     * mutation may run. A first observation (or a re-observation within the SAME pass: the
+     * measurement and an eviction loop can both see one row) only arms the registry and returns
+     * false. Rationale: a transiently-missing file — say a starred VOD the user cut-pasted out of
+     * videoDir and later moves back — must survive a single observation with its row intact,
+     * because a nulled row can never re-link its returning file (move attribution requires the
+     * recorded basename) and the next boot's orphan scan would re-adopt it as a NEW unstarred row
+     * at the front of the eviction queue. Only the ROW mutation waits: a missing file counts 0
+     * bytes from the first miss, so phantom bytes never survive in the budget.
+     */
+    private boolean missConfirmedAcrossSweeps(String key) {
+        Long firstSeen = firstMissPass.putIfAbsent(key, sweepPass);
+        if (firstSeen == null || firstSeen >= sweepPass) {
+            return false;
+        }
+        firstMissPass.remove(key);
+        return true;
+    }
+
+    /** Registry/accounting key for one row+path snapshot; the path makes a repointed row a new key. */
+    private static String missKey(String kind, long id, String path) {
+        return kind + ":" + id + "|" + path;
     }
 
     /**
@@ -669,10 +781,11 @@ public class RetentionSweeper {
     }
 
     /**
-     * Result of {@link #measureStoredBytes}: the reachable stored total, and whether any part of it
-     * is a DB-snapshot guess ({@code ambiguous}) that must not drive an eviction.
+     * Result of {@link #measureStoredBytes}: the reachable stored total, whether any part of it is a
+     * DB-snapshot guess ({@code ambiguous}) that must not drive an eviction, and the bytes counted
+     * per row key so the eviction loops can refund a candidate that vanishes before its turn.
      */
-    private record StoredBytes(long totalBytes, boolean ambiguous) {
+    private record StoredBytes(long totalBytes, boolean ambiguous, Map<String, Long> countedBytes) {
     }
 
     /**
