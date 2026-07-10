@@ -6,7 +6,10 @@
 // CLIP still has something on screen, so the placeholder must not paint over it.
 //   hasVod       — the full-VOD stream is available (videoUrl !== null)
 //   activeClipId — the clip the media element is playing, or null when over the full VOD
-export function shouldShowNoVideoPlaceholder(hasVod: boolean, activeClipId: number | null): boolean {
+export function shouldShowNoVideoPlaceholder(
+  hasVod: boolean,
+  activeClipId: number | null,
+): boolean {
   return !hasVod && activeClipId === null;
 }
 
