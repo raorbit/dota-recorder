@@ -145,12 +145,15 @@ public class SettingsController {
         //
         // Phase 1 (here, OUTSIDE the lock): pre-check the pure overlap rule against a snapshot so an
         // overlapping pair is rejected before any directory is created, then run the filesystem
-        // checks (trim; absolute; not an existing file; creatable + writable) — but ONLY on genuinely
-        // new or edited paths. A path whose canonical form the settings already hold (the active
-        // videoDir, an archive location, or a historical root) was probed when it was first accepted
-        // and may legitimately sit on a currently-offline drive (a state the sweeper/archiver
-        // deliberately tolerate), and the renderer re-sends the FULL videoDir + storageLocations on
-        // every PUT — so re-sending a stored path must never 400 an unrelated save. OBS (cwd
+        // checks (trim; absolute; not an existing file; creatable + writable) — skipped ONLY for a
+        // path that keeps serving the same ACTIVE role it already holds (see currentVideoDirRoot /
+        // currentActiveRoots). Such a path was probed when it became active and may legitimately sit
+        // on a currently-offline drive (a state the sweeper/archiver deliberately tolerate), and the
+        // renderer re-sends the FULL videoDir + storageLocations on every PUT — so re-sending a
+        // stored path must never 400 an unrelated save. A path known only as a HISTORICAL root
+        // (previousVideoDirs/previousArchiveDirs) is probed like any new path: history proves the
+        // folder existed once, not that it still does, and a PUT promoting it back to an active role
+        // must fail loudly rather than persist a dir OBS/the archiver cannot write. OBS (cwd
         // obs/bin/64bit) and the JVM resolve relative paths against different working directories,
         // splitting recordings from playback/retention, so the pure shape checks (incl. absoluteness)
         // still run on every incoming path.
@@ -166,15 +169,16 @@ public class SettingsController {
         } else if (patch.videoDir() != null) {
             validateStorageLocations(snapshot.storageLocations, patch.videoDir());
         }
-        Set<String> knownPaths = knownStoragePaths(snapshot);
         final String incomingVideoDir =
                 patch.videoDir() == null
                         ? null
-                        : prepareStoragePath(patch.videoDir(), "video directory", knownPaths);
+                        : prepareStoragePath(
+                                patch.videoDir(), "video directory", currentVideoDirRoot(snapshot));
         final List<StorageLocation> incomingArchives =
                 patch.storageLocations() == null
                         ? null
-                        : prepareStorageLocations(patch.storageLocations(), knownPaths);
+                        : prepareStorageLocations(
+                                patch.storageLocations(), currentActiveRoots(snapshot));
         // Atomic read-copy-mutate: only the user-facing fields are overlaid (non-null), so the
         // app-managed OBS fields (host/port/password) carry forward untouched rather than being
         // reset to defaults.
@@ -349,30 +353,45 @@ public class SettingsController {
     }
 
     /**
-     * The canonical ({@link #normalizePath}) forms of every storage path the settings already hold:
-     * the active videoDir, each archive location, and the historical video/archive roots. An incoming
-     * path matching one of these was filesystem-probed when it was first accepted, so a PUT
-     * re-sending it (the renderer always sends the full videoDir + storageLocations) persists it
-     * without a fresh probe — a stored root on a temporarily-offline drive must not fail the save.
+     * Probe-skip set for an incoming {@code videoDir}: the canonical ({@link #normalizePath}) form
+     * of the CURRENT active recording directory, and nothing else. The renderer re-sends the full
+     * videoDir on every PUT and the active dir may sit on a temporarily-offline drive, so an
+     * UNCHANGED re-send must not fail an unrelated save with a fresh probe. But ANY canonically
+     * different incoming dir is about to become the folder OBS records into and is ALWAYS probed —
+     * including one matching a historical root ({@code previousVideoDirs}/{@code
+     * previousArchiveDirs}) or a stored archive location. Historical roots are offline-tolerant
+     * READ+DELETE roots: nothing guarantees their folder still exists (the user may have deleted the
+     * emptied dir in Explorer long after the move), and persisting an absent ACTIVE dir unprobed
+     * writes a nonexistent RecFilePath into the OBS profile, so StartRecord fails and
+     * OUTPUT_STARTED never fires — every match silently unrecorded.
      */
-    private static Set<String> knownStoragePaths(Settings s) {
+    private static Set<String> currentVideoDirRoot(Settings s) {
         Set<String> known = new java.util.HashSet<>();
         addKnownPath(known, s.videoDir);
+        return known;
+    }
+
+    /**
+     * Probe-skip set for incoming {@code storageLocations}: the canonical forms of the paths
+     * CURRENTLY serving as active roots — the active videoDir plus each stored archive location. A
+     * re-sent archive was probed when it became active and may legitimately sit on an unplugged
+     * drive the sweeper/archiver deliberately tolerate; the videoDir entry covers the same PUT
+     * moving the recording dir OFF a folder while adding that folder as an archive (it is the live
+     * recording target, so it provably exists). Historical roots are deliberately NOT in this set:
+     * re-ADDING a retired root makes it an archiver TARGET again, and the archiver cannot self-heal
+     * a missing folder — {@code RecordingArchiver.firstWithHeadroom}'s free-space probe
+     * ({@code Files.getFileStore}) throws on a nonexistent directory and skips the drive before
+     * {@code moveToLocation}'s createDirectories is ever reached — so an unprobed absent folder
+     * would be persisted and then silently never receive a single file. Probe it like a new path:
+     * the folder is recreated eagerly, or the PUT fails 400 while the drive is genuinely offline.
+     */
+    private static Set<String> currentActiveRoots(Settings s) {
+        Set<String> known = currentVideoDirRoot(s);
         if (s.storageLocations != null) {
             for (StorageLocation loc : s.storageLocations) {
                 if (loc != null) {
                     addKnownPath(known, loc.path());
                 }
-            }
-        }
-        if (s.previousVideoDirs != null) {
-            for (String dir : s.previousVideoDirs) {
-                addKnownPath(known, dir);
-            }
-        }
-        if (s.previousArchiveDirs != null) {
-            for (String dir : s.previousArchiveDirs) {
-                addKnownPath(known, dir);
             }
         }
         return known;
@@ -387,28 +406,29 @@ public class SettingsController {
 
     /** {@link #prepareStoragePath} over a full incoming storageLocations replace-list. */
     private static List<StorageLocation> prepareStorageLocations(
-            List<StorageLocation> locations, Set<String> knownPaths) {
+            List<StorageLocation> locations, Set<String> probeSkip) {
         List<StorageLocation> prepared = new java.util.ArrayList<>(locations.size());
         for (StorageLocation loc : locations) {
             // Null/blank entries were already rejected by validateStorageLocations above.
             prepared.add(new StorageLocation(
                     loc.id(),
-                    prepareStoragePath(loc.path(), "storage location", knownPaths),
+                    prepareStoragePath(loc.path(), "storage location", probeSkip),
                     loc.capGb()));
         }
         return prepared;
     }
 
     /**
-     * Trims and shape-checks an incoming storage path, filesystem-probing it ONLY when it is
-     * genuinely new or edited — a path whose canonical form is already stored ({@code knownPaths})
-     * is persisted untouched. Runs BEFORE {@code store.update()}: the probe can block for tens of
-     * seconds on an unreachable network/USB path, and holding the store monitor that long stalls the
-     * GSI heartbeat until the ForceStopWatchdog cuts a live recording.
+     * Trims and shape-checks an incoming storage path, filesystem-probing it UNLESS its canonical
+     * form is in {@code probeSkip} — the role-specific set of paths still serving the same active
+     * role they already hold ({@link #currentVideoDirRoot} for videoDir, {@link #currentActiveRoots}
+     * for archive locations), which are persisted untouched. Runs BEFORE {@code store.update()}: the
+     * probe can block for tens of seconds on an unreachable network/USB path, and holding the store
+     * monitor that long stalls the GSI heartbeat until the ForceStopWatchdog cuts a live recording.
      */
-    private static String prepareStoragePath(String rawPath, String label, Set<String> knownPaths) {
+    private static String prepareStoragePath(String rawPath, String label, Set<String> probeSkip) {
         String trimmed = requireWellFormedDirectory(rawPath, label);
-        if (!knownPaths.contains(normalizePath(trimmed))) {
+        if (!probeSkip.contains(normalizePath(trimmed))) {
             probeUsableDirectory(trimmed, label);
         }
         return trimmed;
@@ -447,7 +467,7 @@ public class SettingsController {
      * existing-or-creatable, writable directory — probed by creating and immediately deleting a temp
      * file. Creating the directory here is deliberate: it is non-destructive, and it fails the PUT at
      * save time instead of at the first recording. Must only run OUTSIDE the settings store's lock
-     * and never for a path the settings already hold (see {@link #prepareStoragePath}).
+     * and never for a path still serving the same active role (see {@link #prepareStoragePath}).
      */
     private static void probeUsableDirectory(String trimmed, String label) {
         Path dir = Path.of(trimmed);

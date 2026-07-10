@@ -1084,14 +1084,14 @@ class SettingsControllerTest {
         assertThat(store.get().previousArchiveDirs).hasSize(1);
     }
 
-    // ---- probe skipping for already-stored paths + probe placement ---------
+    // ---- probe skipping for still-active paths + probe placement -----------
 
     @Test
     void putSettings_resendingAStoredOfflineArchive_doesNotFailAnUnrelatedSave() throws Exception {
         // The renderer sends the FULL storageLocations list and videoDir on every PUT
         // (RecordingSettings.tsx), so a stored archive on a currently-unplugged drive (a state the
-        // sweeper/archiver deliberately tolerate) must not 400 an unrelated fps change: a path the
-        // settings already hold is persisted without a fresh filesystem probe.
+        // sweeper/archiver deliberately tolerate) must not 400 an unrelated fps change: a path still
+        // serving the same active role is persisted without a fresh filesystem probe.
         String clips = dir("clips");
         String offlineArchive = offlineDir("unplugged-drive.bin");
         store.update(
@@ -1169,6 +1169,65 @@ class SettingsControllerTest {
     }
 
     @Test
+    void putSettings_movingVideoDirBackToARetiredRootWhoseFolderIsGone_recreatesIt() {
+        // The worst probe-skip hole: videoDir moved D:\vods -> C:\vods long ago (D:\vods retained
+        // in previousVideoDirs), the user deleted the emptied folder in Explorer, and months later
+        // types D:\vods back into the Output folder field. A CHANGED videoDir must get the full
+        // probe even when it matches a historical root — skipping it would persist a nonexistent
+        // dir, OBS's StartRecord would fail on the missing RecFilePath, OUTPUT_STARTED would never
+        // fire, and every match would go silently unrecorded.
+        String clips = dir("clips");
+        Path retired = tmp.resolve("retired-vods");
+        store.update(
+                s -> {
+                    s.videoDir = clips;
+                    s.previousVideoDirs.add(retired.toString());
+                    return s;
+                });
+        assertThat(java.nio.file.Files.exists(retired)).isFalse();
+
+        SettingsView updated =
+                controller.putSettings(
+                        new SettingsPatch(
+                                null, null, null, retired.toString(), null, null, null, null, null,
+                                null, null, null, null, null));
+
+        assertThat(updated.videoDir()).isEqualTo(retired.toString());
+        // The probe ran and eagerly recreated the folder, so OBS's first write cannot miss it.
+        assertThat(java.nio.file.Files.isDirectory(retired)).isTrue();
+        // The move is still recorded: the outgoing dir lands in the historical list.
+        assertThat(store.get().previousVideoDirs).contains(clips);
+    }
+
+    @Test
+    void putSettings_movingVideoDirToAnOfflineRetiredRoot_isRejected() throws Exception {
+        // Same scenario, but the retired root's drive is genuinely unusable: the PUT must fail
+        // loudly (400) at save time instead of persisting an active recording dir that cannot be
+        // created — failing here is a visible save error; failing at StartRecord is a silent
+        // no-recording session.
+        String clips = dir("clips");
+        String offlineRetired = offlineDir("unplugged-drive.bin");
+        store.update(
+                s -> {
+                    s.videoDir = clips;
+                    s.previousVideoDirs.add(offlineRetired);
+                    return s;
+                });
+
+        assertThatThrownBy(
+                        () ->
+                                controller.putSettings(
+                                        new SettingsPatch(
+                                                null, null, null, offlineRetired, null, null, null,
+                                                null, null, null, null, null, null, null)))
+                .isInstanceOfSatisfying(
+                        ResponseStatusException.class,
+                        e -> assertThat(e.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST));
+        // Rejected before persist: recording continues into the untouched current dir.
+        assertThat(store.get().videoDir).isEqualTo(clips);
+    }
+
+    @Test
     void putSettings_editingAnArchiveToAnUnusablePath_isStillRejected() throws Exception {
         // Only UNCHANGED stored paths skip the probe; an edited path is genuinely new and is still
         // validated against the filesystem.
@@ -1192,10 +1251,14 @@ class SettingsControllerTest {
     }
 
     @Test
-    void putSettings_reAddingARetiredArchiveThatIsNowOffline_succeeds() throws Exception {
-        // A historical root counts as "known" too: re-activating a retired archive whose drive is
-        // currently unplugged is not a new-path situation (its VODs were already reachable through
-        // the retained root), so the PUT must not 400.
+    void putSettings_reAddingARetiredArchiveThatIsNowOffline_isRejected() throws Exception {
+        // A historical root does NOT count as "known" for a re-add: it is an offline-tolerant
+        // READ+DELETE root, and history proves the folder existed once, not that it still does.
+        // Re-adding it makes it an archiver TARGET again, and the archiver cannot self-heal a
+        // missing folder (firstWithHeadroom's Files.getFileStore probe throws on a nonexistent dir
+        // and skips the drive before moveToLocation's createDirectories runs), so an unprobed
+        // absent folder would be persisted and then silently never receive a file. Probe it like a
+        // new path: while the drive is genuinely offline the PUT fails 400.
         String offlineArchive = offlineDir("unplugged-drive.bin");
         store.update(
                 s -> {
@@ -1203,15 +1266,45 @@ class SettingsControllerTest {
                     return s;
                 });
 
+        SettingsPatch patch =
+                new SettingsPatch(
+                        null, null, null, null, null, null, null, null, null, null,
+                        List.of(new StorageLocation("a", offlineArchive, 500)),
+                        null, null, null);
+        assertThatThrownBy(() -> controller.putSettings(patch))
+                .isInstanceOfSatisfying(
+                        ResponseStatusException.class,
+                        e -> assertThat(e.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST));
+
+        // Rejected before persist: no active location, and the historical root is untouched — its
+        // VODs stay reachable through the retained entry exactly as before the failed PUT.
+        assertThat(store.get().storageLocations).isEmpty();
+        assertThat(store.get().previousArchiveDirs).containsExactly(offlineArchive);
+    }
+
+    @Test
+    void putSettings_reAddingARetiredArchiveWhoseFolderIsGone_recreatesIt() throws Exception {
+        // The benign twin of the offline case: the retired root's DRIVE is fine but the emptied
+        // folder was deleted in Explorer after the archiver moved everything off it. Re-adding it
+        // probes like a new path, so the folder is recreated eagerly at save time and the archiver
+        // can place files on it again (its free-space probe would otherwise skip the drive forever).
+        Path retired = tmp.resolve("retired-archive");
+        store.update(
+                s -> {
+                    s.previousArchiveDirs.add(retired.toString());
+                    return s;
+                });
+        assertThat(java.nio.file.Files.exists(retired)).isFalse();
+
         SettingsView updated =
                 controller.putSettings(
                         new SettingsPatch(
                                 null, null, null, null, null, null, null, null, null, null,
-                                List.of(new StorageLocation("a", offlineArchive, 500)),
+                                List.of(new StorageLocation("a", retired.toString(), 500)),
                                 null, null, null));
 
         assertThat(updated.storageLocations()).hasSize(1);
-        assertThat(store.get().storageLocations.get(0).path()).isEqualTo(offlineArchive);
+        assertThat(java.nio.file.Files.isDirectory(retired)).isTrue();
         // Active again: the equal-match prune still drops it from the historical list.
         assertThat(store.get().previousArchiveDirs).isEmpty();
     }
