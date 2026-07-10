@@ -87,6 +87,19 @@ public class SettingsStore {
          */
         public List<String> previousVideoDirs;
         /**
+         * Archive dirs that a settings update removed (or edited away) from {@link
+         * #storageLocations}. VODs the archiver moved onto an archive drive keep absolute paths under
+         * it, so a removed archive's rows must stay reachable exactly like {@link #previousVideoDirs}:
+         * READ+DELETE roots only — streamable, deletable, and sweepable — never a recording/archiver
+         * target, and contributing NO cap to the retention budget (the sweeper's budget reads only
+         * {@code retentionCapGb} + the active {@code storageLocations}). Deduped on the canonical
+         * {@link StorageRoots#normalize} form; an entry re-added as an active root (or
+         * overlapping/nesting one) is dropped until it is removed again (see
+         * {@link #recordPreviousArchiveDirs}). Defaults to {@code null} (backfilled to empty by
+         * {@link #load}).
+         */
+        public List<String> previousArchiveDirs;
+        /**
          * Dota 2 32-bit account id (the OpenDota {@code account_id}). Used by the enricher to find
          * OUR player in the 10-player scoreboard so result/stats can be attributed. Null until the
          * user configures it; a null id holds matches in {@code pending} rather than failing them.
@@ -160,6 +173,8 @@ public class SettingsStore {
             c.accountId = accountId;
             // Deep-copy so a copy-on-write update() never shares (and can safely append to) the list.
             c.previousVideoDirs = previousVideoDirs == null ? null : new ArrayList<>(previousVideoDirs);
+            c.previousArchiveDirs =
+                    previousArchiveDirs == null ? null : new ArrayList<>(previousArchiveDirs);
             c.opendotaApiKey = opendotaApiKey;
             c.gsiAuthToken = gsiAuthToken;
             c.autoClipOnRampage = autoClipOnRampage;
@@ -232,6 +247,16 @@ public class SettingsStore {
             loaded = readOrNull(bak);
             if (loaded != null) {
                 log.warn("settings.json unreadable; recovered from {}", bak.getFileName());
+                // Heal the primary NOW, via the same tmp+atomic-move path save() uses but WITHOUT
+                // rolling the .bak (it is currently the only good copy). Left corrupt, the next
+                // save()'s backup roll would copy the corrupt primary OVER this good .bak before the
+                // atomic move — a crash in that window would lose both copies.
+                try {
+                    writePrimaryAtomically(loaded);
+                } catch (IOException e) {
+                    log.warn("Could not rewrite settings.json from the recovered backup: {}",
+                            e.toString());
+                }
             }
         }
         if (loaded == null) {
@@ -300,6 +325,9 @@ public class SettingsStore {
         if (loaded.previousVideoDirs == null) {
             loaded.previousVideoDirs = new ArrayList<>();
         }
+        if (loaded.previousArchiveDirs == null) {
+            loaded.previousArchiveDirs = new ArrayList<>();
+        }
         return loaded;
     }
 
@@ -341,6 +369,77 @@ public class SettingsStore {
         }
     }
 
+    /**
+     * The archive counterpart of {@link #recordPreviousVideoDir}: records every path in {@code
+     * outgoing} (the storageLocations list a settings update just replaced) that the NEW active roots
+     * no longer cover, so VODs the archiver moved onto a removed/edited archive drive stay streamable
+     * + deletable (their rows keep absolute paths under the old dir). Also prunes: a retained entry
+     * that became an active root again (re-added), or that overlaps/nests one, is dropped — the active
+     * root owns that subtree now. Call inside an {@link #update} mutator AFTER assigning the new
+     * {@code videoDir}/{@code storageLocations}; {@code outgoing} may be null to prune only (e.g. a
+     * videoDir-only change landing ON a retained archive dir). Comparison uses the canonical
+     * {@link StorageRoots#normalize} form, so casing/whitespace variants never duplicate a root.
+     */
+    public static void recordPreviousArchiveDirs(Settings s, List<StorageLocation> outgoing) {
+        List<String> activeRoots = new ArrayList<>();
+        if (s.videoDir != null && !s.videoDir.isBlank()) {
+            activeRoots.add(canonicalDir(s.videoDir));
+        }
+        if (s.storageLocations != null) {
+            for (StorageLocation loc : s.storageLocations) {
+                if (loc != null && loc.path() != null && !loc.path().isBlank()) {
+                    activeRoots.add(canonicalDir(loc.path()));
+                }
+            }
+        }
+        // previousArchiveDirs is never null here: load() backfills it and copy() preserves it.
+        s.previousArchiveDirs.removeIf(
+                dir -> dir == null || dir.isBlank() || overlapsAny(canonicalDir(dir), activeRoots));
+        if (outgoing == null) {
+            return;
+        }
+        for (StorageLocation loc : outgoing) {
+            if (loc == null || loc.path() == null || loc.path().isBlank()) {
+                continue;
+            }
+            String canonical = canonicalDir(loc.path());
+            if (overlapsAny(canonical, activeRoots)) {
+                continue; // still (or again) covered by an active root — nothing to retain
+            }
+            boolean tracked = false;
+            for (String dir : s.previousArchiveDirs) {
+                if (canonicalDir(dir).equals(canonical)) {
+                    tracked = true;
+                    break;
+                }
+            }
+            if (!tracked) {
+                s.previousArchiveDirs.add(loc.path().trim());
+            }
+        }
+    }
+
+    /** {@link StorageRoots#normalize} with a lowercase-trim fallback for an unparseable path. */
+    private static String canonicalDir(String path) {
+        try {
+            return StorageRoots.normalize(path.trim());
+        } catch (RuntimeException e) {
+            return path.trim().toLowerCase(java.util.Locale.ROOT);
+        }
+    }
+
+    /** Whether canonical {@code dir} equals, contains, or is contained by any of {@code roots}. */
+    private static boolean overlapsAny(String dir, List<String> roots) {
+        for (String root : roots) {
+            if (dir.equals(root)
+                    || dir.startsWith(StorageRoots.prefix(root))
+                    || root.startsWith(StorageRoots.prefix(dir))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** Reads and parses a settings file, or {@code null} when it is absent, unreadable, or corrupt. */
     private Settings readOrNull(Path path) {
         if (!Files.isReadable(path)) {
@@ -367,27 +466,37 @@ public class SettingsStore {
      * pre-migration backup pattern (MigrationRunner).
      */
     public synchronized void save(Settings updated) {
-        Path tmp = file.resolveSibling(FILE_NAME + TMP_SUFFIX);
         Path bak = file.resolveSibling(FILE_NAME + BAK_SUFFIX);
         try {
-            mapper.writeValue(tmp.toFile(), updated);
             // Roll a one-deep backup of the last good file before clobbering it (overwritten each save).
             if (Files.exists(file)) {
                 Files.copy(file, bak, StandardCopyOption.REPLACE_EXISTING);
             }
-            try {
-                Files.move(
-                        tmp,
-                        file,
-                        StandardCopyOption.ATOMIC_MOVE,
-                        StandardCopyOption.REPLACE_EXISTING);
-            } catch (AtomicMoveNotSupportedException e) {
-                // Rare (same-dir NTFS supports atomic move); fall back to a plain replace.
-                Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING);
-            }
+            writePrimaryAtomically(updated);
             this.settings = updated;
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to write settings: " + file, e);
+        }
+    }
+
+    /**
+     * Serializes {@code updated} to a sibling {@code .tmp} and atomic-moves it over
+     * {@code settings.json}, WITHOUT touching the {@code .bak}. Shared by {@link #save} and the
+     * .bak recovery in {@link #load}, which must not roll the backup — during recovery the .bak is
+     * the only good copy, and the corrupt primary must never be copied over it.
+     */
+    private void writePrimaryAtomically(Settings updated) throws IOException {
+        Path tmp = file.resolveSibling(FILE_NAME + TMP_SUFFIX);
+        mapper.writeValue(tmp.toFile(), updated);
+        try {
+            Files.move(
+                    tmp,
+                    file,
+                    StandardCopyOption.ATOMIC_MOVE,
+                    StandardCopyOption.REPLACE_EXISTING);
+        } catch (AtomicMoveNotSupportedException e) {
+            // Rare (same-dir NTFS supports atomic move); fall back to a plain replace.
+            Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING);
         }
     }
 

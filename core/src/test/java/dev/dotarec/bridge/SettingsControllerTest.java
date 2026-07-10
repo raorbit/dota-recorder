@@ -15,6 +15,7 @@ import dev.dotarec.config.AppPaths;
 import dev.dotarec.config.SettingsStore;
 import dev.dotarec.config.SettingsStore.AudioSource;
 import dev.dotarec.config.SettingsStore.StorageLocation;
+import dev.dotarec.config.StorageRoots;
 import dev.dotarec.obs.ObsController;
 import dev.dotarec.obs.setup.ObsConfigWriter;
 import java.nio.file.Path;
@@ -35,12 +36,14 @@ class SettingsControllerTest {
 
     private final ObjectMapper mapper = new ObjectMapper();
 
+    private Path tmp;
     private SettingsStore store;
     private ObsConfigWriter obsConfigWriter;
     private SettingsController controller;
 
     @BeforeEach
     void setUp(@TempDir Path tmp) {
+        this.tmp = tmp;
         AppPaths paths =
                 new AppPaths(tmp.resolve("data").toString(), tmp.resolve("obs").toString());
         store = new SettingsStore(paths);
@@ -51,6 +54,15 @@ class SettingsControllerTest {
         // the OBS dir on disk. Individual tests can stub it to throw to exercise the failure surfacing.
         obsConfigWriter = mock(ObsConfigWriter.class);
         controller = new SettingsController(store, obsController, obsConfigWriter);
+    }
+
+    /**
+     * An absolute temp-rooted path for a PUT to accept: the storage-path validation probes the real
+     * filesystem (absolute, creatable, writable), so accepted paths must live under the test's temp
+     * dir — a fictional {@code D:/...} would be rejected (or worse, created on a real drive).
+     */
+    private String dir(String name) {
+        return tmp.resolve(name).toString();
     }
 
     @Test
@@ -82,23 +94,24 @@ class SettingsControllerTest {
 
     @Test
     void putSettings_roundTripsUserFacingFields() {
+        String clips = dir("clips");
         SettingsView updated =
                 controller.putSettings(
                         new SettingsPatch(
-                                "1280x720", "x264", 80, "D:/clips", 96828122L, null, null, null,
+                                "1280x720", "x264", 80, clips, 96828122L, null, null, null,
                                 null, null, null, null, null, null));
 
         assertThat(updated.resolution()).isEqualTo("1280x720");
         assertThat(updated.encoder()).isEqualTo("x264");
         assertThat(updated.retentionCapGb()).isEqualTo(80);
-        assertThat(updated.videoDir()).isEqualTo("D:/clips");
+        assertThat(updated.videoDir()).isEqualTo(clips);
         assertThat(updated.accountId()).isEqualTo(96828122L);
 
         // Persisted to the store, not just echoed.
         assertThat(store.get().resolution).isEqualTo("1280x720");
         assertThat(store.get().encoder).isEqualTo("x264");
         assertThat(store.get().retentionCapGb).isEqualTo(80);
-        assertThat(store.get().videoDir).isEqualTo("D:/clips");
+        assertThat(store.get().videoDir).isEqualTo(clips);
         assertThat(store.get().accountId).isEqualTo(96828122L);
     }
 
@@ -411,10 +424,12 @@ class SettingsControllerTest {
 
     @Test
     void putSettings_storageLocations_fullListReplace() {
+        String archiveA = dir("dota-archive-a");
+        String archiveB = dir("dota-archive-b");
         List<StorageLocation> locs =
                 List.of(
-                        new StorageLocation("a", "E:/dota-archive", 2000),
-                        new StorageLocation("b", "F:/dota-archive", 4000));
+                        new StorageLocation("a", archiveA, 2000),
+                        new StorageLocation("b", archiveB, 4000));
 
         SettingsView updated =
                 controller.putSettings(
@@ -424,16 +439,17 @@ class SettingsControllerTest {
 
         assertThat(updated.storageLocations()).hasSize(2);
         assertThat(store.get().storageLocations).hasSize(2);
-        assertThat(store.get().storageLocations.get(1).path()).isEqualTo("F:/dota-archive");
+        assertThat(store.get().storageLocations.get(1).path()).isEqualTo(archiveB);
         assertThat(store.get().storageLocations.get(1).capGb()).isEqualTo(4000);
     }
 
     @Test
     void putSettings_nullStorageLocations_leavesListUnchanged() {
+        String archive = dir("archive");
         controller.putSettings(
                 new SettingsPatch(
                         null, null, null, null, null, null, null, null, null, null,
-                        List.of(new StorageLocation("a", "E:/archive", 500)), null, null, null));
+                        List.of(new StorageLocation("a", archive, 500)), null, null, null));
 
         // A later PUT with null storageLocations must not touch the stored list.
         controller.putSettings(
@@ -442,7 +458,7 @@ class SettingsControllerTest {
                         null, null, null));
 
         assertThat(store.get().storageLocations).hasSize(1);
-        assertThat(store.get().storageLocations.get(0).path()).isEqualTo("E:/archive");
+        assertThat(store.get().storageLocations.get(0).path()).isEqualTo(archive);
     }
 
     @Test
@@ -450,7 +466,7 @@ class SettingsControllerTest {
         controller.putSettings(
                 new SettingsPatch(
                         null, null, null, null, null, null, null, null, null, null,
-                        List.of(new StorageLocation("a", "E:/archive", 500)), null, null, null));
+                        List.of(new StorageLocation("a", dir("archive"), 500)), null, null, null));
 
         SettingsView updated =
                 controller.putSettings(
@@ -587,33 +603,36 @@ class SettingsControllerTest {
     void putSettings_changingVideoDir_retainsTheOldDirAsHistorical() {
         // Seed a non-default active dir, then move it. The outgoing dir must be retained so recordings
         // written under it stay streamable/deletable (their rows keep absolute paths under the old dir).
+        String clipsOld = dir("clips-old");
+        String clipsNew = dir("clips-new");
         controller.putSettings(
                 new SettingsPatch(
-                        null, null, null, "D:/clips-old", null, null, null, null, null, null, null,
+                        null, null, null, clipsOld, null, null, null, null, null, null, null,
                         null, null, null));
 
         controller.putSettings(
                 new SettingsPatch(
-                        null, null, null, "E:/clips-new", null, null, null, null, null, null, null,
+                        null, null, null, clipsNew, null, null, null, null, null, null, null,
                         null, null, null));
 
-        assertThat(store.get().videoDir).isEqualTo("E:/clips-new");
-        assertThat(store.get().previousVideoDirs).contains("D:/clips-old");
+        assertThat(store.get().videoDir).isEqualTo(clipsNew);
+        assertThat(store.get().previousVideoDirs).contains(clipsOld);
     }
 
     @Test
     void putSettings_videoDirUnchanged_doesNotRecordItAsHistorical() {
         // Seed the active dir directly (not via a PUT, which would itself record the default as
         // historical) so the list starts empty.
-        store.update(s -> { s.videoDir = "D:/clips"; return s; });
+        String clips = dir("clips");
+        store.update(s -> { s.videoDir = clips; return s; });
 
         // Re-PUT the SAME videoDir: it is neither a move nor a leak, so nothing is retained.
         controller.putSettings(
                 new SettingsPatch(
-                        null, null, null, "D:/clips", null, null, null, null, null, null, null,
+                        null, null, null, clips, null, null, null, null, null, null, null,
                         null, null, null));
 
-        assertThat(store.get().videoDir).isEqualTo("D:/clips");
+        assertThat(store.get().videoDir).isEqualTo(clips);
         assertThat(store.get().previousVideoDirs).isEmpty();
     }
 
@@ -621,39 +640,42 @@ class SettingsControllerTest {
     void putSettings_videoDirOnlyPatch_rejectedWhenItNestsInStoredArchive() {
         // Seed a stored archive location, then a videoDir-only PUT that nests INSIDE it. The overlap
         // rule must run against the ALREADY-STORED archive list even though this PUT omits it.
+        String clips = dir("clips");
+        String archive = dir("archive");
         controller.putSettings(
                 new SettingsPatch(
-                        null, null, null, "D:/clips", null, null, null, null, null, null,
-                        List.of(new StorageLocation("a", "E:/archive", 500)), null, null, null));
+                        null, null, null, clips, null, null, null, null, null, null,
+                        List.of(new StorageLocation("a", archive, 500)), null, null, null));
 
         assertThatThrownBy(
                         () ->
                                 controller.putSettings(
                                         new SettingsPatch(
-                                                null, null, null, "E:/archive/inner", null, null, null,
+                                                null, null, null, archive + "/inner", null, null, null,
                                                 null, null, null, null, null, null, null)))
                 .isInstanceOfSatisfying(
                         ResponseStatusException.class,
                         e -> assertThat(e.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST));
         // Rejected before persist: the active dir is unchanged.
-        assertThat(store.get().videoDir).isEqualTo("D:/clips");
+        assertThat(store.get().videoDir).isEqualTo(clips);
     }
 
     @Test
     void putSettings_videoDirOnlyPatch_acceptedWhenDistinctFromStoredArchive() {
-        // A stored archive on a different drive: a videoDir-only PUT that does NOT overlap it is fine.
+        // A stored archive on a different folder: a videoDir-only PUT that does NOT overlap it is fine.
         controller.putSettings(
                 new SettingsPatch(
-                        null, null, null, "D:/clips", null, null, null, null, null, null,
-                        List.of(new StorageLocation("a", "E:/archive", 500)), null, null, null));
+                        null, null, null, dir("clips"), null, null, null, null, null, null,
+                        List.of(new StorageLocation("a", dir("archive"), 500)), null, null, null));
 
+        String newClips = dir("new-clips");
         SettingsView updated =
                 controller.putSettings(
                         new SettingsPatch(
-                                null, null, null, "F:/new-clips", null, null, null, null, null, null,
+                                null, null, null, newClips, null, null, null, null, null, null,
                                 null, null, null, null));
 
-        assertThat(updated.videoDir()).isEqualTo("F:/new-clips");
+        assertThat(updated.videoDir()).isEqualTo(newClips);
         // The stored archive list is untouched by a videoDir-only PUT.
         assertThat(store.get().storageLocations).hasSize(1);
     }
@@ -769,15 +791,16 @@ class SettingsControllerTest {
     void putSettings_acceptsDistinctPositiveStorageLocationsAndRoundTrips() {
         // The happy path: distinct, non-nested archive paths with positive caps, plus a positive
         // active cap, are accepted (200) and round-trip through the store.
+        String archiveOne = dir("archive-one");
         List<StorageLocation> locs =
                 List.of(
-                        new StorageLocation("a", "E:/archive-one", 2000),
-                        new StorageLocation("b", "F:/archive-two", 4000));
+                        new StorageLocation("a", archiveOne, 2000),
+                        new StorageLocation("b", dir("archive-two"), 4000));
 
         SettingsView updated =
                 controller.putSettings(
                         new SettingsPatch(
-                                null, null, 80, "D:/clips", null, null, null, null, null, null, locs,
+                                null, null, 80, dir("clips"), null, null, null, null, null, null, locs,
                                 null, null, null));
 
         assertThat(updated.retentionCapGb()).isEqualTo(80);
@@ -785,7 +808,237 @@ class SettingsControllerTest {
         // Persisted, not just echoed.
         assertThat(store.get().retentionCapGb).isEqualTo(80);
         assertThat(store.get().storageLocations).hasSize(2);
-        assertThat(store.get().storageLocations.get(0).path()).isEqualTo("E:/archive-one");
+        assertThat(store.get().storageLocations.get(0).path()).isEqualTo(archiveOne);
         assertThat(store.get().storageLocations.get(1).capGb()).isEqualTo(4000);
+    }
+
+    // ---- storage path validation (absolute / file / creatable / writable) --
+
+    @Test
+    void putSettings_rejectsRelativeVideoDir() {
+        // OBS (cwd obs/bin/64bit) and the JVM resolve relative paths against different working
+        // directories, so a relative videoDir would record to one folder and play back from another.
+        String before = store.get().videoDir;
+        assertThatThrownBy(
+                        () ->
+                                controller.putSettings(
+                                        new SettingsPatch(
+                                                null, null, null, "relative/clips", null, null, null,
+                                                null, null, null, null, null, null, null)))
+                .isInstanceOfSatisfying(
+                        ResponseStatusException.class,
+                        e -> assertThat(e.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST));
+        assertThat(store.get().videoDir).isEqualTo(before);
+    }
+
+    @Test
+    void putSettings_rejectsRelativeArchivePath() {
+        SettingsPatch patch =
+                new SettingsPatch(
+                        null, null, null, null, null, null, null, null, null, null,
+                        List.of(new StorageLocation("a", "relative/archive", 500)), null, null, null);
+        assertThatThrownBy(() -> controller.putSettings(patch))
+                .isInstanceOfSatisfying(
+                        ResponseStatusException.class,
+                        e -> assertThat(e.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST));
+        assertThat(store.get().storageLocations).isEmpty();
+    }
+
+    @Test
+    void putSettings_rejectsVideoDirPointingAtExistingFile() throws Exception {
+        // A path that is an existing regular file cannot be a recording folder.
+        Path file = tmp.resolve("not-a-folder.mp4");
+        java.nio.file.Files.createFile(file);
+        assertThatThrownBy(
+                        () ->
+                                controller.putSettings(
+                                        new SettingsPatch(
+                                                null, null, null, file.toString(), null, null, null,
+                                                null, null, null, null, null, null, null)))
+                .isInstanceOfSatisfying(
+                        ResponseStatusException.class,
+                        e -> assertThat(e.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST));
+        // The file survives the rejected PUT.
+        assertThat(java.nio.file.Files.isRegularFile(file)).isTrue();
+    }
+
+    @Test
+    void putSettings_rejectsArchivePathPointingAtExistingFile() throws Exception {
+        Path file = tmp.resolve("not-a-folder.mp4");
+        java.nio.file.Files.createFile(file);
+        SettingsPatch patch =
+                new SettingsPatch(
+                        null, null, null, null, null, null, null, null, null, null,
+                        List.of(new StorageLocation("a", file.toString(), 500)), null, null, null);
+        assertThatThrownBy(() -> controller.putSettings(patch))
+                .isInstanceOfSatisfying(
+                        ResponseStatusException.class,
+                        e -> assertThat(e.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST));
+        assertThat(store.get().storageLocations).isEmpty();
+    }
+
+    @Test
+    void putSettings_rejectsUncreatableVideoDir() throws Exception {
+        // A directory nested UNDER an existing regular file can never be created; the PUT must fail
+        // at save time (400), not at the first recording.
+        Path file = tmp.resolve("blocker.txt");
+        java.nio.file.Files.createFile(file);
+        assertThatThrownBy(
+                        () ->
+                                controller.putSettings(
+                                        new SettingsPatch(
+                                                null, null, null, file.resolve("sub").toString(), null,
+                                                null, null, null, null, null, null, null, null, null)))
+                .isInstanceOfSatisfying(
+                        ResponseStatusException.class,
+                        e -> assertThat(e.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST));
+    }
+
+    @Test
+    void putSettings_trimsStoragePathWhitespace() {
+        // Stray whitespace off a user-typed path is trimmed before persist, so the stored path,
+        // OBS's output dir, and the containment guards all agree on one string.
+        String clips = dir("clips");
+        String archive = dir("archive");
+        controller.putSettings(
+                new SettingsPatch(
+                        null, null, null, "  " + clips + "  ", null, null, null, null, null, null,
+                        List.of(new StorageLocation("a", " " + archive + " ", 500)), null, null, null));
+
+        assertThat(store.get().videoDir).isEqualTo(clips);
+        assertThat(store.get().storageLocations.get(0).path()).isEqualTo(archive);
+    }
+
+    @Test
+    void putSettings_createsAMissingVideoDir() {
+        // A not-yet-existing (but creatable) folder is accepted and created eagerly, so OBS's first
+        // write never races a missing output dir.
+        Path clips = tmp.resolve("brand-new-clips");
+        assertThat(java.nio.file.Files.exists(clips)).isFalse();
+
+        controller.putSettings(
+                new SettingsPatch(
+                        null, null, null, clips.toString(), null, null, null, null, null, null, null,
+                        null, null, null));
+
+        assertThat(store.get().videoDir).isEqualTo(clips.toString());
+        assertThat(java.nio.file.Files.isDirectory(clips)).isTrue();
+    }
+
+    // ---- historical archive roots (previousArchiveDirs) --------------------
+
+    @Test
+    void putSettings_removingAnArchiveLocation_retainsItAsHistoricalRoot() {
+        // VODs the archiver moved onto the drive keep absolute paths under it; removing the location
+        // must keep those files streamable + deletable, so the path lands in previousArchiveDirs and
+        // StorageRoots still serves it.
+        String archive = dir("archive");
+        controller.putSettings(
+                new SettingsPatch(
+                        null, null, null, null, null, null, null, null, null, null,
+                        List.of(new StorageLocation("a", archive, 500)), null, null, null));
+
+        controller.putSettings(
+                new SettingsPatch(
+                        null, null, null, null, null, null, null, null, null, null, List.of(),
+                        null, null, null));
+
+        assertThat(store.get().previousArchiveDirs).containsExactly(archive);
+        List<String> roots = StorageRoots.of(store.get());
+        assertThat(roots).contains(archive);
+        assertThat(StorageRoots.isUnder(Path.of(archive, "match-42.mp4"), roots)).isTrue();
+    }
+
+    @Test
+    void putSettings_editingAnArchivePath_retainsTheOldPath() {
+        // Editing a location's path is a remove+add of the same row: the OLD path must be retained,
+        // the new one is the active root.
+        String oldArchive = dir("archive-old");
+        String newArchive = dir("archive-new");
+        controller.putSettings(
+                new SettingsPatch(
+                        null, null, null, null, null, null, null, null, null, null,
+                        List.of(new StorageLocation("a", oldArchive, 500)), null, null, null));
+
+        controller.putSettings(
+                new SettingsPatch(
+                        null, null, null, null, null, null, null, null, null, null,
+                        List.of(new StorageLocation("a", newArchive, 500)), null, null, null));
+
+        assertThat(store.get().storageLocations).hasSize(1);
+        assertThat(store.get().storageLocations.get(0).path()).isEqualTo(newArchive);
+        assertThat(store.get().previousArchiveDirs).containsExactly(oldArchive);
+    }
+
+    @Test
+    void putSettings_reAddingARetiredArchive_dropsItFromHistorical() {
+        // Re-adding the path as an active root drops the historical entry (the active root already
+        // grants its access); removing it again re-retains it exactly once — no duplicates.
+        String archive = dir("archive");
+        SettingsPatch add =
+                new SettingsPatch(
+                        null, null, null, null, null, null, null, null, null, null,
+                        List.of(new StorageLocation("a", archive, 500)), null, null, null);
+        SettingsPatch clear =
+                new SettingsPatch(
+                        null, null, null, null, null, null, null, null, null, null, List.of(),
+                        null, null, null);
+
+        controller.putSettings(add);
+        controller.putSettings(clear);
+        controller.putSettings(add);
+        assertThat(store.get().previousArchiveDirs).isEmpty();
+
+        controller.putSettings(clear);
+        assertThat(store.get().previousArchiveDirs).containsExactly(archive);
+    }
+
+    @Test
+    void putSettings_videoDirLandingOnARetiredArchive_dropsItFromHistorical() {
+        // A videoDir-only PUT can land the recording dir ON a retained archive dir: it is an active
+        // root again, so the historical entry must drop even though this PUT omits storageLocations.
+        String archive = dir("archive");
+        controller.putSettings(
+                new SettingsPatch(
+                        null, null, null, null, null, null, null, null, null, null,
+                        List.of(new StorageLocation("a", archive, 500)), null, null, null));
+        controller.putSettings(
+                new SettingsPatch(
+                        null, null, null, null, null, null, null, null, null, null, List.of(),
+                        null, null, null));
+        assertThat(store.get().previousArchiveDirs).containsExactly(archive);
+
+        controller.putSettings(
+                new SettingsPatch(
+                        null, null, null, archive, null, null, null, null, null, null, null,
+                        null, null, null));
+
+        assertThat(store.get().videoDir).isEqualTo(archive);
+        assertThat(store.get().previousArchiveDirs).isEmpty();
+    }
+
+    @Test
+    void putSettings_retiredArchive_dedupesCaseInsensitively() {
+        // Removing the same folder twice under different casing retains ONE entry: the canonical
+        // (case-folded) form is the dedup key, matching the containment guards.
+        String archive = dir("archive");
+        SettingsPatch clear =
+                new SettingsPatch(
+                        null, null, null, null, null, null, null, null, null, null, List.of(),
+                        null, null, null);
+
+        controller.putSettings(
+                new SettingsPatch(
+                        null, null, null, null, null, null, null, null, null, null,
+                        List.of(new StorageLocation("a", archive, 500)), null, null, null));
+        controller.putSettings(clear);
+        controller.putSettings(
+                new SettingsPatch(
+                        null, null, null, null, null, null, null, null, null, null,
+                        List.of(new StorageLocation("a", archive.toUpperCase(java.util.Locale.ROOT), 500)),
+                        null, null, null));
+        controller.putSettings(clear);
+
+        assertThat(store.get().previousArchiveDirs).hasSize(1);
     }
 }

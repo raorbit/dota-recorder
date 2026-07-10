@@ -266,6 +266,34 @@ class SettingsStoreTest {
     }
 
     @Test
+    void bakRecovery_rewritesThePrimary_soTheNextSaveCannotPoisonTheBackup(@TempDir Path dir)
+            throws Exception {
+        // Establish a good .bak (saving twice rolls the first version into it), then corrupt the
+        // primary. Recovery must HEAL the primary immediately: left corrupt, the next save() would
+        // roll the corrupt primary over the good .bak before the atomic move, and a crash in that
+        // window would lose both copies.
+        SettingsStore store = new SettingsStore(paths(dir));
+        store.update(s -> { s.gsiAuthToken = "secret-token"; return s; });
+        store.update(s -> { s.resolution = "1280x720"; return s; });
+        Files.writeString(dir.resolve("settings.json"), "{ this is not valid json");
+
+        SettingsStore reloaded = new SettingsStore(paths(dir));
+        assertThat(reloaded.get().gsiAuthToken).isEqualTo("secret-token");
+
+        // The recovery re-persisted the recovered settings over the corrupt primary (atomically,
+        // without touching the .bak — during recovery it is the only good copy).
+        assertThat(Files.readString(dir.resolve("settings.json"))).contains("secret-token");
+        assertThat(Files.readString(dir.resolve("settings.json.bak"))).contains("secret-token");
+
+        // A subsequent save now rolls the HEALED primary into .bak — the corrupt junk can no longer
+        // poison the backup.
+        reloaded.update(s -> { s.resolution = "2560x1440"; return s; });
+        assertThat(Files.readString(dir.resolve("settings.json.bak")))
+                .contains("secret-token")
+                .doesNotContain("not valid json");
+    }
+
+    @Test
     void audioSources_survivesUpdateAndUnrelatedUpdate(@TempDir Path dir) {
         SettingsStore store = new SettingsStore(paths(dir));
         store.update(
@@ -375,6 +403,100 @@ class SettingsStoreTest {
 
         SettingsStore store = new SettingsStore(paths(dir));
         assertThat(store.get().previousVideoDirs).isEmpty();
+    }
+
+    @Test
+    void freshStore_hasEmptyPreviousArchiveDirs(@TempDir Path dir) {
+        SettingsStore store = new SettingsStore(paths(dir));
+        assertThat(store.get().previousArchiveDirs).isEmpty();
+    }
+
+    @Test
+    void load_backfillsEmptyPreviousArchiveDirsFromLegacyJson(@TempDir Path dir) throws Exception {
+        // A settings.json predating previousArchiveDirs deserializes it to null; load() backfills
+        // empty so the storage-roots build and recordPreviousArchiveDirs never NPE on a null list.
+        Files.createDirectories(dir);
+        Files.writeString(dir.resolve("settings.json"), "{\"videoDir\":\"D:/clips\"}");
+
+        SettingsStore store = new SettingsStore(paths(dir));
+        assertThat(store.get().previousArchiveDirs).isEmpty();
+    }
+
+    @Test
+    void previousArchiveDirs_survivesUpdateAndReload(@TempDir Path dir) {
+        SettingsStore store = new SettingsStore(paths(dir));
+        store.update(
+                s -> {
+                    SettingsStore.recordPreviousArchiveDirs(
+                            s, java.util.List.of(new SettingsStore.StorageLocation("a", "D:/old-archive", 500)));
+                    return s;
+                });
+
+        // copy() carries the list across a later unrelated update (the copy() trap).
+        store.update(
+                s -> {
+                    s.resolution = "1280x720";
+                    return s;
+                });
+        assertThat(store.get().previousArchiveDirs).containsExactly("D:/old-archive");
+
+        // And it round-trips through settings.json.
+        SettingsStore reloaded = new SettingsStore(paths(dir));
+        assertThat(reloaded.get().previousArchiveDirs).containsExactly("D:/old-archive");
+    }
+
+    @Test
+    void recordPreviousArchiveDirs_retainsRemovedDedupsAndSkipsActiveRoots(@TempDir Path dir) {
+        SettingsStore store = new SettingsStore(paths(dir));
+        store.update(
+                s -> {
+                    s.videoDir = "C:/clips";
+                    s.storageLocations =
+                            new java.util.ArrayList<>(
+                                    java.util.List.of(
+                                            new SettingsStore.StorageLocation("a", "E:/kept", 500)));
+                    // Outgoing list: one still-active path (skipped), one nested under the active
+                    // videoDir (skipped — the active root already owns that subtree), one blank
+                    // (skipped), and one genuinely removed path (retained). The duplicate casing of
+                    // the removed path dedups on the canonical form.
+                    SettingsStore.recordPreviousArchiveDirs(
+                            s,
+                            java.util.List.of(
+                                    new SettingsStore.StorageLocation("a", "E:/kept", 500),
+                                    new SettingsStore.StorageLocation("b", "C:/clips/nested", 500),
+                                    new SettingsStore.StorageLocation("c", "  ", 500),
+                                    new SettingsStore.StorageLocation("d", "D:/removed", 500),
+                                    new SettingsStore.StorageLocation("e", "d:\\removed", 500)));
+                    return s;
+                });
+
+        assertThat(store.get().previousArchiveDirs).containsExactly("D:/removed");
+    }
+
+    @Test
+    void recordPreviousArchiveDirs_reAddingAsActiveRootDropsTheEntry(@TempDir Path dir) {
+        SettingsStore store = new SettingsStore(paths(dir));
+        store.update(
+                s -> {
+                    s.videoDir = "C:/clips";
+                    SettingsStore.recordPreviousArchiveDirs(
+                            s, java.util.List.of(new SettingsStore.StorageLocation("a", "D:/archive", 500)));
+                    return s;
+                });
+        assertThat(store.get().previousArchiveDirs).containsExactly("D:/archive");
+
+        // The path becomes an active root again (re-added archive): a prune-only call drops it.
+        store.update(
+                s -> {
+                    s.storageLocations =
+                            new java.util.ArrayList<>(
+                                    java.util.List.of(
+                                            new SettingsStore.StorageLocation("a", "D:/archive", 500)));
+                    SettingsStore.recordPreviousArchiveDirs(s, null);
+                    return s;
+                });
+
+        assertThat(store.get().previousArchiveDirs).isEmpty();
     }
 
     @Test
