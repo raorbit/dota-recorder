@@ -81,6 +81,7 @@ public class MatchFsm {
     private static final double LIVE_DURATION_CLAMP = Double.MAX_VALUE;
 
     private final ObsRecorder obs;
+    private final RecordStatusProbe statusProbe;
     private final ThumbnailCapturer thumbnails;
     private final EventTagger tagger;
     private final MatchRepository matches;
@@ -104,8 +105,20 @@ public class MatchFsm {
      * to pin the anchor to its synthetic frames or step the wall clock backward independently. */
     private final TimeSource time;
 
+    /** Bounded orphaned-stop retries: one per {@code ForceStopWatchdog} orphan tick, then give up loudly. */
+    static final int ORPHAN_STOP_MAX_ATTEMPTS = 10;
+
     private volatile MatchState state = MatchState.IDLE;
     private RecordingSession session;
+
+    /**
+     * Ownership memento for a stop-failed output: set when finalize gives up on a double StopRecord
+     * failure while OBS still reports the output active, cleared when the output is stopped / goes
+     * inactive / can no longer be attributed to us, or when a new match arms. Guarded by the FSM
+     * monitor like {@link #session}. In-memory only: an app quit loses it, and the next boot's orphan
+     * scan adopts the file instead.
+     */
+    private OrphanedStop orphanedStop;
 
     /** Latches the once-per-demo-session "not recording" log so the ~10Hz feed can't spam it. */
     private boolean demoSkipLogged;
@@ -117,6 +130,7 @@ public class MatchFsm {
     // masked. A test constructs `new TimeSource(fakeNano, fakeWall)` directly to pin either clock.
     public MatchFsm(
             ObsRecorder obs,
+            RecordStatusProbe statusProbe,
             ThumbnailCapturer thumbnails,
             EventTagger tagger,
             MatchRepository matches,
@@ -130,6 +144,7 @@ public class MatchFsm {
             ObjectMapper mapper,
             TimeSource time) {
         this.obs = obs;
+        this.statusProbe = statusProbe;
         this.thumbnails = thumbnails;
         this.tagger = tagger;
         this.matches = matches;
@@ -224,7 +239,9 @@ public class MatchFsm {
      * hero-select arm landing between the caller's state check and the StopRecord would get its fresh
      * recording killed. Deliberately user-initiated only (never scheduled): OBS reporting an active
      * output while the FSM is idle is also what a recording started by hand in the managed OBS window
-     * looks like, and an automatic sweep would keep killing it.
+     * looks like, and an automatic sweep would keep killing it. (The scheduled
+     * {@link #retryOrphanedStop()} path is different: it only ever touches an output it can
+     * positively attribute to its own abandoned stop.)
      *
      * <p>The stopped file is intentionally not imported here — the next boot's orphan scan
      * ({@link CrashRecoveryRunner}) adopts it with the usual quiescence guard.
@@ -232,16 +249,25 @@ public class MatchFsm {
      * @return true when an orphaned output was confirmed stopped
      */
     public synchronized boolean stopOrphanedRecording() {
-        if (state == MatchState.RECORDING || !obs.isRecording()) {
+        if (state == MatchState.RECORDING) {
+            return false;
+        }
+        if (!obs.isRecording()) {
+            // No active output left to stop; any retained stop-retry state is moot too.
+            this.orphanedStop = null;
             return false;
         }
         try {
             String path = obs.stopRecording();
+            // The user-initiated stop supersedes the bounded automatic retries.
+            this.orphanedStop = null;
             log.warn("Stopped FSM-orphaned OBS recording {}; the orphan scan adopts it on next boot", path);
             return true;
         } catch (RuntimeException e) {
             // Couldn't confirm the stop: leave ObsHealth.recording as-is so the UI keeps showing the
-            // truth and another click (or the next match's corrective StopRecord) can retry.
+            // truth and another click (or the next match's corrective StopRecord) can retry. Retained
+            // retry state stays too -- the output is still plausibly ours and the scheduled retries
+            // remain bounded.
             log.warn("Could not stop orphaned OBS recording: {}", e.toString());
             return false;
         }
@@ -319,6 +345,16 @@ public class MatchFsm {
                     "OBS connected but not ready to record (no active scene or muted/absent audio);"
                             + " staying IDLE, will retry on next frame");
             return;
+        }
+        if (orphanedStop != null) {
+            // A new match is arming: it owns the output path now. obs.startRecording()'s corrective
+            // StopRecord (fired while health.recording is still true) supersedes the bounded orphan
+            // retries, so cancel them BEFORE that stop -- both run under this monitor, so a retry tick
+            // can never race the arm for the same output.
+            log.info(
+                    "New match arming; cancelling orphaned-stop retries for match row {}",
+                    orphanedStop.matchRowId);
+            this.orphanedStop = null;
         }
         long confirmedNanos;
         try {
@@ -461,6 +497,10 @@ public class MatchFsm {
             // failure can't leave an orphan match row. publishRecorded runs only after commit, so the
             // UI never sees a match that rolled back.
             long matchRowId = persistFinalized(s, videoPath, thumbPath, fileSizeBytes, durationS, now);
+
+            if (videoPath == null) {
+                retainOrphanedStop(matchRowId, thumbPath, durationS, now);
+            }
 
             publishRecorded(matchRowId, s, durationS);
 
@@ -671,6 +711,185 @@ public class MatchFsm {
         if (obs.isRecording()) {
             log.warn("OBS still reports recording after finalize stop attempt");
         }
+    }
+
+    /**
+     * Retains ownership of a stop-failed output after finalize persisted its video-less row: the
+     * double StopRecord failed and OBS still reports the output active, so the file OBS keeps
+     * writing is OURS but unattached. Without this the reset to IDLE discards that knowledge --
+     * the RECORDING-gated watchdog disarms and a tray-hidden user gets unbounded disk fill with
+     * zero notification. The retained state fuels the bounded {@link #retryOrphanedStop()} ticks,
+     * which can still cut the output and attach its file to the persisted row.
+     */
+    private void retainOrphanedStop(long matchRowId, String thumbPath, int durationS, long now) {
+        if (!obs.isRecording()) {
+            // The stop "failed" but the output ended anyway (or OBS is gone): nothing left to own.
+            return;
+        }
+        this.orphanedStop = new OrphanedStop(matchRowId, thumbPath, durationS * 1_000L, now);
+        log.warn(
+                "StopRecord gave up but OBS still reports the output active; retaining orphan "
+                        + "ownership of match row {} for bounded stop retries",
+                matchRowId);
+    }
+
+    /**
+     * One bounded retry tick for a stop-failed output the FSM still owns (see
+     * {@link #retainOrphanedStop}). Driven by {@code ForceStopWatchdog} on the scheduler thread --
+     * never the GSI request path. Each tick re-checks that the active output is still plausibly
+     * OURS: active, with an OBS-reported duration at or beyond our last observation (a reset below
+     * it means a FRESH output, e.g. one hand-started in the managed OBS window, which an automatic
+     * stop must never touch -- the same objection that rejected a generic scheduled kill). Only
+     * then is another StopRecord issued. A success that reports the output path attaches the file
+     * to the retained row (full recovery); on an inactive output, an unattributable output, or
+     * exhausted attempts the state is cleared and the boot orphan scan stays the fallback --
+     * {@code ObsHealth.recording} keeps telling the renderer the truth either way, so the manual
+     * stop affordance survives a give-up.
+     */
+    public synchronized void retryOrphanedStop() {
+        OrphanedStop o = this.orphanedStop;
+        if (o == null) {
+            return;
+        }
+        if (state != MatchState.IDLE) {
+            // A new match owns the output path now (startRecording clears the state before its
+            // corrective stop, so this is purely defensive).
+            this.orphanedStop = null;
+            return;
+        }
+        o.attempts++;
+        RecordOutputStatus status = statusProbe.probeRecordStatus();
+        if (status == null || (status.active() && status.durationMs() == null)) {
+            // OBS unanswerable (or answered without a duration): the output cannot be attributed
+            // this tick, so stop NOTHING -- burn the attempt and let the next tick look again.
+            log.warn(
+                    "Orphaned-stop retry {}/{} for match row {}: OBS record status unavailable; skipping",
+                    o.attempts, ORPHAN_STOP_MAX_ATTEMPTS, o.matchRowId);
+            giveUpIfExhausted(o);
+            return;
+        }
+        if (!status.active()) {
+            // The output ended without us (user stopped it in the OBS window, OBS quit): nothing
+            // left to stop, and the boot orphan scan adopts the file.
+            log.info(
+                    "Orphaned output for match row {} is no longer active; ending stop retries",
+                    o.matchRowId);
+            this.orphanedStop = null;
+            return;
+        }
+        if (status.durationMs() < o.lastKnownDurationMs) {
+            // Duration reset below our last observation: this is a fresh output, not the one
+            // finalize abandoned. Never touch an output we cannot attribute to ourselves.
+            log.warn(
+                    "Active OBS output is not the one finalize abandoned (duration {}ms < {}ms); "
+                            + "ending stop retries for match row {}",
+                    status.durationMs(), o.lastKnownDurationMs, o.matchRowId);
+            this.orphanedStop = null;
+            return;
+        }
+        o.lastKnownDurationMs = status.durationMs();
+        try {
+            String path = obs.stopRecording();
+            this.orphanedStop = null;
+            if (path != null && !path.isBlank()) {
+                attachRecoveredVideo(o, path);
+            } else {
+                log.warn(
+                        "Late StopRecord succeeded for match row {} but reported no output path; "
+                                + "the boot orphan scan adopts the file",
+                        o.matchRowId);
+            }
+        } catch (RuntimeException e) {
+            log.warn(
+                    "Orphaned-stop retry {}/{} failed for match row {}: {}",
+                    o.attempts, ORPHAN_STOP_MAX_ATTEMPTS, o.matchRowId, e.toString());
+            giveUpIfExhausted(o);
+        }
+    }
+
+    private void giveUpIfExhausted(OrphanedStop o) {
+        if (o.attempts < ORPHAN_STOP_MAX_ATTEMPTS) {
+            return;
+        }
+        // Loud terminal failure: OBS keeps writing and automation is out of safe moves. The status
+        // card still renders the truthful ObsHealth.recording, so the user's stop button (or the
+        // next match's corrective StopRecord, or quitting the app) remains the way out.
+        log.error(
+                "Giving up on the orphaned OBS output for match row {} after {} stop attempts "
+                        + "(finalize abandoned it at {}); OBS is still writing -- stop it from the "
+                        + "app's stop button or the OBS window",
+                o.matchRowId, o.attempts, Instant.ofEpochMilli(o.abandonedAtWallMs));
+        this.orphanedStop = null;
+    }
+
+    /**
+     * Attaches a late-stopped file to the row finalize already persisted (markers/metadata and the
+     * thumbnail captured before the failed stop are all there) -- full recovery without waiting for
+     * next-boot orphan adoption. Best-effort: on any failure the file stays on disk untouched and
+     * the boot scan remains the fallback.
+     */
+    private void attachRecoveredVideo(OrphanedStop o, String path) {
+        try {
+            int updated = matches.updateVideoPath(o.matchRowId, path, o.thumbPath);
+            if (updated == 0) {
+                log.warn(
+                        "Late-stopped video {} could not be attached: match row {} is gone; "
+                                + "the boot orphan scan adopts the file",
+                        path, o.matchRowId);
+                return;
+            }
+            log.info("Late StopRecord recovered {}; attached to match row {}", path, o.matchRowId);
+        } catch (RuntimeException e) {
+            log.warn(
+                    "Could not attach late-stopped video {} to match row {}: {}; the boot orphan "
+                            + "scan adopts the file",
+                    path, o.matchRowId, e.toString());
+        }
+    }
+
+    /** Whether a stop-failed output's ownership is currently retained. Test/diagnostic hook. */
+    synchronized boolean hasOrphanedStopRetry() {
+        return orphanedStop != null;
+    }
+
+    /**
+     * What the FSM keeps after {@link #stopRecordingWithRetry} gave up while OBS kept writing: the
+     * persisted (video-less) row to attach a late-recovered file to, and the sameness baseline --
+     * the output had already run for at least the finalize-computed duration when we gave up, so
+     * any later OBS-reported duration BELOW the last observation cannot be our output.
+     */
+    private static final class OrphanedStop {
+        final long matchRowId;
+        final String thumbPath;
+        final long abandonedAtWallMs;
+        /** Ratchets up with each consistent observation; a reported duration below it aborts. */
+        long lastKnownDurationMs;
+        int attempts;
+
+        OrphanedStop(long matchRowId, String thumbPath, long lastKnownDurationMs, long abandonedAtWallMs) {
+            this.matchRowId = matchRowId;
+            this.thumbPath = thumbPath;
+            this.lastKnownDurationMs = lastKnownDurationMs;
+            this.abandonedAtWallMs = abandonedAtWallMs;
+        }
+    }
+
+    /**
+     * The FSM's port onto OBS's live GetRecordStatus, feeding the orphaned-stop sameness guard.
+     * Consumer-owned (like {@code RecordingSession.TaggerState} for the tagger) rather than a new
+     * {@code ObsRecorder} method because only the orphan retry consumes it; {@code ObsController}
+     * implements it. A null answer means OBS cannot be asked right now (disconnected / timed out),
+     * which the retry treats as "cannot attribute -- touch nothing".
+     */
+    public interface RecordStatusProbe {
+        RecordOutputStatus probeRecordStatus();
+    }
+
+    /**
+     * A live record-output snapshot: whether OBS reports the output active, and its reported
+     * duration in milliseconds ({@code null} when OBS omitted it -- also unattributable).
+     */
+    public record RecordOutputStatus(boolean active, Long durationMs) {
     }
 
     private void openJournal(RecordingSession s, GsiFrame frame) {

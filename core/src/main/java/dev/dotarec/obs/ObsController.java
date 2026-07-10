@@ -1,6 +1,7 @@
 package dev.dotarec.obs;
 
 import dev.dotarec.config.SettingsStore;
+import dev.dotarec.fsm.MatchFsm;
 import io.obswebsocket.community.client.OBSCommunicator;
 import io.obswebsocket.community.client.OBSRemoteController;
 import io.obswebsocket.community.client.message.event.outputs.RecordStateChangedEvent;
@@ -56,7 +57,7 @@ import org.springframework.stereotype.Service;
  * a stall of OBS's own callbacks.
  */
 @Service
-public class ObsController implements ObsRecorder {
+public class ObsController implements ObsRecorder, MatchFsm.RecordStatusProbe {
 
     private static final Logger log = LoggerFactory.getLogger(ObsController.class);
 
@@ -540,6 +541,36 @@ public class ObsController implements ObsRecorder {
             }
         } catch (Exception e) {
             log.debug("OBS record-status refresh failed: {}", e.toString());
+        }
+    }
+
+    /**
+     * Live GetRecordStatus snapshot for {@link MatchFsm}'s orphaned-stop sameness guard. Uses the
+     * short {@link #READINESS_TIMEOUT_MS} budget: the retry tick holds the MatchFsm monitor (the
+     * same one the GSI thread takes), so a wedged OBS must degrade fast to "unanswerable" (null)
+     * rather than stall the feed. Read-only and never throws; deliberately does NOT touch the
+     * {@link ObsHealth} flags -- their event-driven semantics feed the corrective-stop guards.
+     */
+    @Override
+    public MatchFsm.RecordOutputStatus probeRecordStatus() {
+        if (!health.isConnected()) {
+            return null;
+        }
+        OBSRemoteController c = this.controller;
+        if (c == null) {
+            return null;
+        }
+        try {
+            GetRecordStatusResponse status = c.getRecordStatus(READINESS_TIMEOUT_MS);
+            if (status == null || !status.isSuccessful() || status.getOutputActive() == null) {
+                return null;
+            }
+            Number duration = status.getOutputDuration();
+            return new MatchFsm.RecordOutputStatus(
+                    status.getOutputActive(), duration == null ? null : duration.longValue());
+        } catch (Exception e) {
+            log.debug("OBS record-status probe failed: {}", e.toString());
+            return null;
         }
     }
 

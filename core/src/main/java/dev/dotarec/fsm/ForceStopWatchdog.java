@@ -40,6 +40,17 @@ public class ForceStopWatchdog {
      */
     static final long SILENCE_THRESHOLD_MS = 30_000L;
 
+    /**
+     * Cadence of the FSM's bounded orphaned-stop retries ({@link MatchFsm#retryOrphanedStop()}): a
+     * stop-failed output that finalize gave up on -- OBS still writing while the FSM reset to IDLE,
+     * where this watchdog's RECORDING gate disarms -- gets another StopRecord attempt every tick,
+     * up to {@link MatchFsm#ORPHAN_STOP_MAX_ATTEMPTS}. The tick itself is unconditional; all the
+     * state and the sameness guard (never touch an output the FSM cannot attribute to its own
+     * abandoned stop, e.g. one hand-started in the OBS window) live in the FSM, so an idle app
+     * no-ops here.
+     */
+    static final long ORPHAN_RETRY_INTERVAL_MS = 30_000L;
+
     private final MatchFsm fsm;
     private final GsiHeartbeat heartbeat;
 
@@ -58,5 +69,11 @@ public class ForceStopWatchdog {
             log.warn("GSI silent for {}ms while recording; force-finalizing", ago);
             fsm.forceFinalize();
         }
+    }
+
+    /** Drives the FSM's bounded orphaned-stop retries; a no-op unless finalize retained one. */
+    @Scheduled(fixedDelay = ORPHAN_RETRY_INTERVAL_MS)
+    public void orphanRetryTick() {
+        fsm.retryOrphanedStop();
     }
 }

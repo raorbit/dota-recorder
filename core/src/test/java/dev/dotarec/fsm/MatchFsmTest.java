@@ -47,7 +47,7 @@ import org.junit.jupiter.api.io.TempDir;
 class MatchFsmTest {
 
     /** Fake OBS the FSM drives deterministically; confirms synchronously like the seam test fake. */
-    static final class FakeObs implements ObsRecorder {
+    static final class FakeObs implements ObsRecorder, MatchFsm.RecordStatusProbe {
         boolean connected = true;
         boolean ready = true;
         boolean stopThrowsRuntime = false;
@@ -59,6 +59,8 @@ class MatchFsmTest {
         int stopCalls;
         long thenStopCalledAt = -1;
         String savedPath = "C:\\videos\\match.mkv";
+        /** What probeRecordStatus answers; null models an unanswerable OBS. Tests drive it directly. */
+        MatchFsm.RecordOutputStatus recordStatus;
 
         @Override public void connect() { }
         @Override public boolean ensureConnected() { return connected; }
@@ -95,6 +97,8 @@ class MatchFsmTest {
         @Override public boolean isRecording() { return recording; }
 
         @Override public Instant recordConfirmedAt() { return confirmedAt; }
+
+        @Override public MatchFsm.RecordOutputStatus probeRecordStatus() { return recordStatus; }
     }
 
     /** Fake thumbnail capturer; records the order vs stopRecording to prove thumbnail-before-stop. */
@@ -143,7 +147,7 @@ class MatchFsmTest {
         // Pin the monotonic anchor so marker-offset assertions are deterministic: the FSM stamps the
         // record-confirmed offset base from this clock and synthetic frames carry .mono() stamps
         // relative to ANCHOR_NANOS (the wall path is exercised separately via FakeObs.confirmedAt).
-        fsm = new MatchFsm(obs, thumbs, new EventTagger(), matches, markers, pauses, journal, events,
+        fsm = new MatchFsm(obs, obs, thumbs, new EventTagger(), matches, markers, pauses, journal, events,
                 ds, clipService, settings, new ObjectMapper(),
                 new TimeSource(() -> ANCHOR_NANOS, System::currentTimeMillis));
     }
@@ -621,7 +625,7 @@ class MatchFsmTest {
                 new java.util.concurrent.atomic.AtomicInteger();
         java.util.function.LongSupplier steppingNano =
                 () -> nanoReads.getAndIncrement() == 0 ? ANCHOR_NANOS : ANCHOR_NANOS + 8_000_000_000L;
-        MatchFsm localFsm = new MatchFsm(obs, thumbs, new EventTagger(), matches, markers, pauses,
+        MatchFsm localFsm = new MatchFsm(obs, obs, thumbs, new EventTagger(), matches, markers, pauses,
                 journal, events, ds, clipService, settings, new ObjectMapper(),
                 new TimeSource(steppingNano, System::currentTimeMillis));
 
@@ -680,7 +684,7 @@ class MatchFsmTest {
         long backwardWall = System.currentTimeMillis() - 3_600_000L;
         java.util.function.LongSupplier backwardWallClock = () -> backwardWall;
 
-        MatchFsm monoFsm = new MatchFsm(obs, thumbs, new EventTagger(), matches, markers, pauses,
+        MatchFsm monoFsm = new MatchFsm(obs, obs, thumbs, new EventTagger(), matches, markers, pauses,
                 journal, events, ds, clipService, settings, new ObjectMapper(),
                 new TimeSource(steppingNano, backwardWallClock));
 
@@ -727,7 +731,7 @@ class MatchFsmTest {
     @Test
     void thumbnailFailure_doesNotLoseTheRecording() {
         ThumbnailCapturer failing = id -> { throw new ObsException("no scene"); };
-        fsm = new MatchFsm(obs, failing, new EventTagger(), matches, markers, pauses, journal, events,
+        fsm = new MatchFsm(obs, obs, failing, new EventTagger(), matches, markers, pauses, journal, events,
                 ds, clipService, settings, new ObjectMapper(), TimeSource.system());
 
         fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
@@ -783,7 +787,7 @@ class MatchFsmTest {
         MatchRepository throwing = mock(MatchRepository.class);
         when(throwing.insert(any(java.sql.Connection.class), any(MatchRepository.NewMatch.class)))
                 .thenThrow(new IllegalStateException("disk full"));
-        fsm = new MatchFsm(obs, thumbs, new EventTagger(), throwing, markers, pauses, journal, events,
+        fsm = new MatchFsm(obs, obs, thumbs, new EventTagger(), throwing, markers, pauses, journal, events,
                 ds, clipService, settings, new ObjectMapper(), TimeSource.system());
 
         fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
@@ -805,7 +809,7 @@ class MatchFsmTest {
         MatchRepository throwing = mock(MatchRepository.class);
         when(throwing.insert(any(java.sql.Connection.class), any(MatchRepository.NewMatch.class)))
                 .thenThrow(new IllegalStateException("disk full"));
-        fsm = new MatchFsm(obs, thumbs, new EventTagger(), throwing, markers, pauses, journal, events,
+        fsm = new MatchFsm(obs, obs, thumbs, new EventTagger(), throwing, markers, pauses, journal, events,
                 ds, clipService, settings, new ObjectMapper(), TimeSource.system());
 
         fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
@@ -933,7 +937,7 @@ class MatchFsmTest {
                                 new dev.dotarec.tagger.PendingMarker("kill", 2.5, 120, trickyLabel, "gsi"));
                     }
                 };
-        MatchFsm labelFsm = new MatchFsm(obs, thumbs, labelTagger, matches, markers, pauses, journal,
+        MatchFsm labelFsm = new MatchFsm(obs, obs, thumbs, labelTagger, matches, markers, pauses, journal,
                 events, ds, clipService, settings, new ObjectMapper(),
                 new TimeSource(() -> ANCHOR_NANOS, System::currentTimeMillis));
 

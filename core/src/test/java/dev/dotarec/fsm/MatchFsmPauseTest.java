@@ -40,7 +40,7 @@ import org.junit.jupiter.api.io.TempDir;
 class MatchFsmPauseTest {
 
     /** Fake OBS; {@code stopFails}/{@code connected} toggle the OBS-down path. */
-    static final class FakeObs implements ObsRecorder {
+    static final class FakeObs implements ObsRecorder, MatchFsm.RecordStatusProbe {
         boolean connected = true;
         boolean stopFails = false;
         boolean recording;
@@ -73,6 +73,9 @@ class MatchFsmPauseTest {
         @Override public boolean isRecording() { return recording; }
 
         @Override public Instant recordConfirmedAt() { return confirmedAt; }
+
+        /** Unanswerable OBS by default; these tests never exercise the orphan-retry path. */
+        @Override public MatchFsm.RecordOutputStatus probeRecordStatus() { return null; }
     }
 
     static final class FakeThumbs implements ThumbnailCapturer {
@@ -106,8 +109,8 @@ class MatchFsmPauseTest {
         settings = mock(SettingsStore.class);
         when(settings.get()).thenReturn(new SettingsStore.Settings());
         fsm = new MatchFsm(
-                obs, new FakeThumbs(), new EventTagger(), matches, markers, pauses, journal, events,
-                ds, clipService, settings, new ObjectMapper(), TimeSource.system());
+                obs, obs, new FakeThumbs(), new EventTagger(), matches, markers, pauses, journal,
+                events, ds, clipService, settings, new ObjectMapper(), TimeSource.system());
     }
 
     @Test
@@ -220,6 +223,7 @@ class MatchFsmPauseTest {
         when(throwingPauses.insert(any(), anyLong(), anyLong(), any()))
                 .thenThrow(new IllegalStateException("pause write failed"));
         MatchFsm fsmWithBadPauses = new MatchFsm(
+                obs,
                 obs,
                 new FakeThumbs(),
                 new EventTagger(),
