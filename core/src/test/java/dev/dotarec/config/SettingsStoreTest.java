@@ -500,6 +500,91 @@ class SettingsStoreTest {
     }
 
     @Test
+    void recordPreviousArchiveDirs_keepsAParentEntryWhenAnActiveRootNestsInsideIt(@TempDir Path dir) {
+        SettingsStore store = new SettingsStore(paths(dir));
+        store.update(
+                s -> {
+                    s.videoDir = "C:/clips";
+                    SettingsStore.recordPreviousArchiveDirs(
+                            s,
+                            java.util.List.of(
+                                    new SettingsStore.StorageLocation("a", "D:/archive", 500)));
+                    return s;
+                });
+        assertThat(store.get().previousArchiveDirs).containsExactly("D:/archive");
+
+        // The recording dir later lands INSIDE the retained parent. The child root covers only its
+        // own subtree, so pruning the parent would strand VODs directly under D:/archive outside
+        // every storage root (streaming 404s, deletes skip the unlink, the sweeper refuses eviction
+        // while still counting the bytes). The parent is read+delete-only and contributes no cap, so
+        // keeping it is harmless — mirror recordPreviousVideoDir, which never prunes a parent either.
+        store.update(
+                s -> {
+                    s.videoDir = "D:/archive/recordings";
+                    SettingsStore.recordPreviousArchiveDirs(s, null);
+                    return s;
+                });
+
+        assertThat(store.get().previousArchiveDirs).containsExactly("D:/archive");
+        // A file directly under the parent is still served by the storage roots.
+        assertThat(
+                        StorageRoots.isUnder(
+                                Path.of("D:/archive/stranded-match.mp4"),
+                                StorageRoots.of(store.get())))
+                .isTrue();
+    }
+
+    @Test
+    void recordPreviousArchiveDirs_prunesAnEntryEqualToOrNestedInsideAnActiveRoot(
+            @TempDir Path dir) {
+        SettingsStore store = new SettingsStore(paths(dir));
+        store.update(
+                s -> {
+                    s.videoDir = "C:/clips";
+                    SettingsStore.recordPreviousArchiveDirs(
+                            s,
+                            java.util.List.of(
+                                    new SettingsStore.StorageLocation("a", "D:/archive/sub", 500),
+                                    new SettingsStore.StorageLocation("b", "E:/other", 500)));
+                    return s;
+                });
+        assertThat(store.get().previousArchiveDirs).containsExactly("D:/archive/sub", "E:/other");
+
+        // D:/archive becomes an active root: the retained CHILD sits fully inside its subtree and
+        // drops (the active root owns it now); the unrelated E:/other survives.
+        store.update(
+                s -> {
+                    s.storageLocations =
+                            new java.util.ArrayList<>(
+                                    java.util.List.of(
+                                            new SettingsStore.StorageLocation("a", "D:/archive", 500)));
+                    SettingsStore.recordPreviousArchiveDirs(s, null);
+                    return s;
+                });
+
+        assertThat(store.get().previousArchiveDirs).containsExactly("E:/other");
+    }
+
+    @Test
+    void recordPreviousArchiveDirs_retainsAnOutgoingParentOfANewActiveRoot(@TempDir Path dir) {
+        SettingsStore store = new SettingsStore(paths(dir));
+        // Removing the D:/archive location while the recording dir nests INSIDE it: the child root
+        // does not cover files directly under the parent, so the outgoing parent must be retained,
+        // not treated as "covered".
+        store.update(
+                s -> {
+                    s.videoDir = "D:/archive/recordings";
+                    SettingsStore.recordPreviousArchiveDirs(
+                            s,
+                            java.util.List.of(
+                                    new SettingsStore.StorageLocation("a", "D:/archive", 500)));
+                    return s;
+                });
+
+        assertThat(store.get().previousArchiveDirs).containsExactly("D:/archive");
+    }
+
+    @Test
     void clearedAppSources_stayCleared_butBuiltinRowsAreGuaranteed(@TempDir Path dir) {
         SettingsStore store = new SettingsStore(paths(dir));
         // Fresh install: Dota app capture + the two built-in rows.

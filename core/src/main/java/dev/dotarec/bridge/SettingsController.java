@@ -137,15 +137,54 @@ public class SettingsController {
             throw new ResponseStatusException(
                     HttpStatus.BAD_REQUEST, "video directory must not be blank");
         }
+        // Storage paths are handled in two phases so the store's monitor is NEVER held across a
+        // filesystem touch: settings.get() is synchronized on the same monitor and runs on every
+        // ~10Hz GSI frame (GsiController.authorized) BEFORE the heartbeat is credited, and a probe
+        // against an unreachable UNC/NAS/unplugged-USB path can block for tens of seconds per call in
+        // Windows SMB timeouts — long enough for the 30s ForceStopWatchdog to cut a live recording.
+        //
+        // Phase 1 (here, OUTSIDE the lock): pre-check the pure overlap rule against a snapshot so an
+        // overlapping pair is rejected before any directory is created, then run the filesystem
+        // checks (trim; absolute; not an existing file; creatable + writable) — but ONLY on genuinely
+        // new or edited paths. A path whose canonical form the settings already hold (the active
+        // videoDir, an archive location, or a historical root) was probed when it was first accepted
+        // and may legitimately sit on a currently-offline drive (a state the sweeper/archiver
+        // deliberately tolerate), and the renderer re-sends the FULL videoDir + storageLocations on
+        // every PUT — so re-sending a stored path must never 400 an unrelated save. OBS (cwd
+        // obs/bin/64bit) and the JVM resolve relative paths against different working directories,
+        // splitting recordings from playback/retention, so the pure shape checks (incl. absoluteness)
+        // still run on every incoming path.
+        //
+        // Phase 2 (inside store.update): only the cheap pure checks re-run, against the authoritative
+        // copy. A PUT interleaving between probe and mutator is a benign TOCTOU — the probes are
+        // usability checks, not invariants, and the in-lock pure validation still holds the line.
+        Settings snapshot = store.get();
+        if (patch.storageLocations() != null) {
+            validateStorageLocations(
+                    patch.storageLocations(),
+                    patch.videoDir() != null ? patch.videoDir() : snapshot.videoDir);
+        } else if (patch.videoDir() != null) {
+            validateStorageLocations(snapshot.storageLocations, patch.videoDir());
+        }
+        Set<String> knownPaths = knownStoragePaths(snapshot);
+        final String incomingVideoDir =
+                patch.videoDir() == null
+                        ? null
+                        : prepareStoragePath(patch.videoDir(), "video directory", knownPaths);
+        final List<StorageLocation> incomingArchives =
+                patch.storageLocations() == null
+                        ? null
+                        : prepareStorageLocations(patch.storageLocations(), knownPaths);
         // Atomic read-copy-mutate: only the user-facing fields are overlaid (non-null), so the
         // app-managed OBS fields (host/port/password) carry forward untouched rather than being
         // reset to defaults.
         store.update(
                 current -> {
-                    // The storage-overlap rule runs INSIDE the store's synchronized update, against
+                    // The storage-overlap rule re-runs INSIDE the store's synchronized update, against
                     // the authoritative copy, so a concurrent PUT can't slip a nested videoDir /
-                    // archive pair between the check and the mutation. A thrown 400 aborts before
-                    // anything is persisted.
+                    // archive pair between the snapshot pre-check and the mutation. Pure string
+                    // checks only — the filesystem probes already ran outside the lock. A thrown 400
+                    // aborts before anything is persisted.
                     if (patch.storageLocations() != null) {
                         validateStorageLocations(patch.storageLocations(),
                                 patch.videoDir() != null ? patch.videoDir() : current.videoDir);
@@ -154,27 +193,6 @@ public class SettingsController {
                         // still not overlap/nest the ALREADY-STORED archive locations (else it
                         // double-counts usage and degenerates the archiver).
                         validateStorageLocations(current.storageLocations, patch.videoDir());
-                    }
-                    // Filesystem checks (trim; absolute; not an existing file; creatable + writable)
-                    // on every INCOMING storage path, after the pure overlap rule so an overlapping
-                    // pair is rejected before any directory is created. OBS (cwd obs/bin/64bit) and
-                    // the JVM resolve relative paths against different working directories, splitting
-                    // recordings from playback/retention — so a relative path is rejected outright.
-                    // Only patch-carried paths are probed: a stored archive on a temporarily-offline
-                    // drive must not fail an unrelated PUT.
-                    String incomingVideoDir =
-                            patch.videoDir() == null
-                                    ? null
-                                    : requireUsableDirectory(patch.videoDir(), "video directory");
-                    List<StorageLocation> incomingArchives = null;
-                    if (patch.storageLocations() != null) {
-                        incomingArchives = new java.util.ArrayList<>(patch.storageLocations().size());
-                        for (StorageLocation loc : patch.storageLocations()) {
-                            incomingArchives.add(new StorageLocation(
-                                    loc.id(),
-                                    requireUsableDirectory(loc.path(), "storage location"),
-                                    loc.capGb()));
-                        }
                     }
                     if (patch.resolution() != null) {
                         current.resolution = patch.resolution();
@@ -331,15 +349,79 @@ public class SettingsController {
     }
 
     /**
-     * Trims {@code rawPath} and requires it to be a usable storage directory, returning the trimmed
-     * path for persistence or throwing a 400. Usable means: absolute (OBS runs with cwd
-     * {@code obs/bin/64bit} while the JVM resolves against its own working dir, so a relative path
-     * would record to one folder and play back/retain from another), not an existing regular file,
-     * and an existing-or-creatable, writable directory — probed by creating and immediately deleting
-     * a temp file. Creating the directory here is deliberate: it is non-destructive, and it fails the
-     * PUT at save time instead of at the first recording.
+     * The canonical ({@link #normalizePath}) forms of every storage path the settings already hold:
+     * the active videoDir, each archive location, and the historical video/archive roots. An incoming
+     * path matching one of these was filesystem-probed when it was first accepted, so a PUT
+     * re-sending it (the renderer always sends the full videoDir + storageLocations) persists it
+     * without a fresh probe — a stored root on a temporarily-offline drive must not fail the save.
      */
-    private static String requireUsableDirectory(String rawPath, String label) {
+    private static Set<String> knownStoragePaths(Settings s) {
+        Set<String> known = new java.util.HashSet<>();
+        addKnownPath(known, s.videoDir);
+        if (s.storageLocations != null) {
+            for (StorageLocation loc : s.storageLocations) {
+                if (loc != null) {
+                    addKnownPath(known, loc.path());
+                }
+            }
+        }
+        if (s.previousVideoDirs != null) {
+            for (String dir : s.previousVideoDirs) {
+                addKnownPath(known, dir);
+            }
+        }
+        if (s.previousArchiveDirs != null) {
+            for (String dir : s.previousArchiveDirs) {
+                addKnownPath(known, dir);
+            }
+        }
+        return known;
+    }
+
+    /** Adds the canonical form of a non-blank stored path to {@code known}. */
+    private static void addKnownPath(Set<String> known, String path) {
+        if (path != null && !path.isBlank()) {
+            known.add(normalizePath(path));
+        }
+    }
+
+    /** {@link #prepareStoragePath} over a full incoming storageLocations replace-list. */
+    private static List<StorageLocation> prepareStorageLocations(
+            List<StorageLocation> locations, Set<String> knownPaths) {
+        List<StorageLocation> prepared = new java.util.ArrayList<>(locations.size());
+        for (StorageLocation loc : locations) {
+            // Null/blank entries were already rejected by validateStorageLocations above.
+            prepared.add(new StorageLocation(
+                    loc.id(),
+                    prepareStoragePath(loc.path(), "storage location", knownPaths),
+                    loc.capGb()));
+        }
+        return prepared;
+    }
+
+    /**
+     * Trims and shape-checks an incoming storage path, filesystem-probing it ONLY when it is
+     * genuinely new or edited — a path whose canonical form is already stored ({@code knownPaths})
+     * is persisted untouched. Runs BEFORE {@code store.update()}: the probe can block for tens of
+     * seconds on an unreachable network/USB path, and holding the store monitor that long stalls the
+     * GSI heartbeat until the ForceStopWatchdog cuts a live recording.
+     */
+    private static String prepareStoragePath(String rawPath, String label, Set<String> knownPaths) {
+        String trimmed = requireWellFormedDirectory(rawPath, label);
+        if (!knownPaths.contains(normalizePath(trimmed))) {
+            probeUsableDirectory(trimmed, label);
+        }
+        return trimmed;
+    }
+
+    /**
+     * The pure shape rules for a storage path — trim; non-blank; parseable; absolute (OBS runs with
+     * cwd {@code obs/bin/64bit} while the JVM resolves against its own working dir, so a relative
+     * path would record to one folder and play back/retain from another). Returns the trimmed path
+     * for persistence or throws a 400. Deliberately touches NO filesystem: it also runs for
+     * already-stored paths, which may live on a temporarily-offline drive.
+     */
+    private static String requireWellFormedDirectory(String rawPath, String label) {
         String trimmed = rawPath == null ? "" : rawPath.trim();
         if (trimmed.isEmpty()) {
             throw new ResponseStatusException(
@@ -357,6 +439,18 @@ public class SettingsController {
                     HttpStatus.BAD_REQUEST,
                     label + " must be an absolute path (was: " + trimmed + ")");
         }
+        return trimmed;
+    }
+
+    /**
+     * Filesystem probe for a NEW or EDITED storage path: not an existing regular file, and an
+     * existing-or-creatable, writable directory — probed by creating and immediately deleting a temp
+     * file. Creating the directory here is deliberate: it is non-destructive, and it fails the PUT at
+     * save time instead of at the first recording. Must only run OUTSIDE the settings store's lock
+     * and never for a path the settings already hold (see {@link #prepareStoragePath}).
+     */
+    private static void probeUsableDirectory(String trimmed, String label) {
+        Path dir = Path.of(trimmed);
         if (Files.isRegularFile(dir)) {
             throw new ResponseStatusException(
                     HttpStatus.BAD_REQUEST,
@@ -376,7 +470,6 @@ public class SettingsController {
             throw new ResponseStatusException(
                     HttpStatus.BAD_REQUEST, label + " is not writable: " + trimmed);
         }
-        return trimmed;
     }
 
     /**

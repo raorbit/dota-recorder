@@ -65,6 +65,18 @@ class SettingsControllerTest {
         return tmp.resolve(name).toString();
     }
 
+    /**
+     * An absolute path that deterministically cannot exist or be created: nested under an existing
+     * regular FILE, so {@code Files.createDirectories} always fails on it. The closest a unit test
+     * gets to a stored path on an unplugged/offline drive — and it can never accidentally come
+     * "online" mid-test.
+     */
+    private String offlineDir(String blockerName) throws Exception {
+        Path blocker = tmp.resolve(blockerName);
+        java.nio.file.Files.createFile(blocker);
+        return blocker.resolve("offline-store").toString();
+    }
+
     @Test
     void getSettings_jsonHasNoObsFields() throws Exception {
         SettingsView view = controller.getSettings();
@@ -1018,6 +1030,36 @@ class SettingsControllerTest {
     }
 
     @Test
+    void putSettings_retainedParentSurvivesAVideoDirNestedInsideIt() {
+        // previousArchiveDirs = [parent]; the user later points videoDir INSIDE the parent. The child
+        // root covers only its own subtree — NOT files directly under the parent — so the retained
+        // entry must survive the prune, keeping those VODs streamable/deletable/sweepable. (Pruning
+        // it would strand them outside every StorageRoots entry until settings.json is hand-edited.)
+        String parent = dir("parent-archive");
+        controller.putSettings(
+                new SettingsPatch(
+                        null, null, null, null, null, null, null, null, null, null,
+                        List.of(new StorageLocation("a", parent, 500)), null, null, null));
+        controller.putSettings(
+                new SettingsPatch(
+                        null, null, null, null, null, null, null, null, null, null, List.of(),
+                        null, null, null));
+        assertThat(store.get().previousArchiveDirs).containsExactly(parent);
+
+        String nested = Path.of(parent, "recordings").toString();
+        controller.putSettings(
+                new SettingsPatch(
+                        null, null, null, nested, null, null, null, null, null, null, null,
+                        null, null, null));
+
+        assertThat(store.get().videoDir).isEqualTo(nested);
+        assertThat(store.get().previousArchiveDirs).containsExactly(parent);
+        // A file directly under the parent is still served by the storage roots.
+        List<String> roots = StorageRoots.of(store.get());
+        assertThat(StorageRoots.isUnder(Path.of(parent, "stranded-match.mp4"), roots)).isTrue();
+    }
+
+    @Test
     void putSettings_retiredArchive_dedupesCaseInsensitively() {
         // Removing the same folder twice under different casing retains ONE entry: the canonical
         // (case-folded) form is the dedup key, matching the containment guards.
@@ -1040,5 +1082,191 @@ class SettingsControllerTest {
         controller.putSettings(clear);
 
         assertThat(store.get().previousArchiveDirs).hasSize(1);
+    }
+
+    // ---- probe skipping for already-stored paths + probe placement ---------
+
+    @Test
+    void putSettings_resendingAStoredOfflineArchive_doesNotFailAnUnrelatedSave() throws Exception {
+        // The renderer sends the FULL storageLocations list and videoDir on every PUT
+        // (RecordingSettings.tsx), so a stored archive on a currently-unplugged drive (a state the
+        // sweeper/archiver deliberately tolerate) must not 400 an unrelated fps change: a path the
+        // settings already hold is persisted without a fresh filesystem probe.
+        String clips = dir("clips");
+        String offlineArchive = offlineDir("unplugged-drive.bin");
+        store.update(
+                s -> {
+                    s.videoDir = clips;
+                    s.storageLocations =
+                            new java.util.ArrayList<>(
+                                    List.of(new StorageLocation("a", offlineArchive, 500)));
+                    return s;
+                });
+
+        SettingsView updated =
+                controller.putSettings(
+                        new SettingsPatch(
+                                null, null, null, clips, null, null, null, 30, null, null,
+                                List.of(new StorageLocation("a", offlineArchive, 500)),
+                                null, null, null));
+
+        assertThat(updated.fps()).isEqualTo(30);
+        assertThat(store.get().fps).isEqualTo(30);
+        assertThat(store.get().storageLocations).hasSize(1);
+        assertThat(store.get().storageLocations.get(0).path()).isEqualTo(offlineArchive);
+        // The stored path was NOT probed: nothing tried to create it.
+        assertThat(java.nio.file.Files.exists(Path.of(offlineArchive))).isFalse();
+    }
+
+    @Test
+    void putSettings_videoDirChange_succeedsWhileAStoredArchiveIsOffline() throws Exception {
+        // An emergency videoDir change (say, the recording drive filled up) must go through even
+        // while an archive drive is unplugged: only the NEW dir is probed, and the resent offline
+        // archive is persisted as-is.
+        String offlineArchive = offlineDir("unplugged-drive.bin");
+        String clipsOld = dir("clips-old");
+        store.update(
+                s -> {
+                    s.videoDir = clipsOld;
+                    s.storageLocations =
+                            new java.util.ArrayList<>(
+                                    List.of(new StorageLocation("a", offlineArchive, 500)));
+                    return s;
+                });
+
+        String clipsNew = dir("clips-new");
+        SettingsView updated =
+                controller.putSettings(
+                        new SettingsPatch(
+                                null, null, null, clipsNew, null, null, null, null, null, null,
+                                List.of(new StorageLocation("a", offlineArchive, 500)),
+                                null, null, null));
+
+        assertThat(updated.videoDir()).isEqualTo(clipsNew);
+        // The genuinely-new dir WAS probed (and eagerly created); the offline archive was skipped.
+        assertThat(java.nio.file.Files.isDirectory(Path.of(clipsNew))).isTrue();
+        assertThat(store.get().previousVideoDirs).contains(clipsOld);
+        assertThat(store.get().storageLocations.get(0).path()).isEqualTo(offlineArchive);
+    }
+
+    @Test
+    void putSettings_resendingAStoredOfflineVideoDir_isNotProbed() throws Exception {
+        // The active videoDir itself on an offline drive: re-sending it unchanged (the renderer
+        // always sends it) must not fail the PUT or try to create the dir.
+        String offlineClips = offlineDir("unplugged-drive.bin");
+        store.update(s -> { s.videoDir = offlineClips; return s; });
+
+        SettingsView updated =
+                controller.putSettings(
+                        new SettingsPatch(
+                                null, null, null, offlineClips, null, null, null, 30, null, null,
+                                null, null, null, null));
+
+        assertThat(updated.fps()).isEqualTo(30);
+        assertThat(store.get().videoDir).isEqualTo(offlineClips);
+        // Not a move: nothing lands in the historical list.
+        assertThat(store.get().previousVideoDirs).isEmpty();
+    }
+
+    @Test
+    void putSettings_editingAnArchiveToAnUnusablePath_isStillRejected() throws Exception {
+        // Only UNCHANGED stored paths skip the probe; an edited path is genuinely new and is still
+        // validated against the filesystem.
+        String archive = dir("archive");
+        controller.putSettings(
+                new SettingsPatch(
+                        null, null, null, null, null, null, null, null, null, null,
+                        List.of(new StorageLocation("a", archive, 500)), null, null, null));
+
+        String unusable = offlineDir("blocker.bin");
+        SettingsPatch patch =
+                new SettingsPatch(
+                        null, null, null, null, null, null, null, null, null, null,
+                        List.of(new StorageLocation("a", unusable, 500)), null, null, null);
+        assertThatThrownBy(() -> controller.putSettings(patch))
+                .isInstanceOfSatisfying(
+                        ResponseStatusException.class,
+                        e -> assertThat(e.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST));
+        // Rejected before persist: the stored location is unchanged.
+        assertThat(store.get().storageLocations.get(0).path()).isEqualTo(archive);
+    }
+
+    @Test
+    void putSettings_reAddingARetiredArchiveThatIsNowOffline_succeeds() throws Exception {
+        // A historical root counts as "known" too: re-activating a retired archive whose drive is
+        // currently unplugged is not a new-path situation (its VODs were already reachable through
+        // the retained root), so the PUT must not 400.
+        String offlineArchive = offlineDir("unplugged-drive.bin");
+        store.update(
+                s -> {
+                    s.previousArchiveDirs.add(offlineArchive);
+                    return s;
+                });
+
+        SettingsView updated =
+                controller.putSettings(
+                        new SettingsPatch(
+                                null, null, null, null, null, null, null, null, null, null,
+                                List.of(new StorageLocation("a", offlineArchive, 500)),
+                                null, null, null));
+
+        assertThat(updated.storageLocations()).hasSize(1);
+        assertThat(store.get().storageLocations.get(0).path()).isEqualTo(offlineArchive);
+        // Active again: the equal-match prune still drops it from the historical list.
+        assertThat(store.get().previousArchiveDirs).isEmpty();
+    }
+
+    @Test
+    void putSettings_overlappingNewPaths_rejectedBeforeAnyDirectoryIsCreated() {
+        // The pure overlap rule runs before the filesystem probes, so a rejected PUT leaves no
+        // directory side effects behind — neither the nested pair's parent nor its child appears.
+        Path rec = tmp.resolve("rec");
+        SettingsPatch patch =
+                new SettingsPatch(
+                        null, null, null, rec.toString(), null, null, null, null, null, null,
+                        List.of(new StorageLocation("a", rec.resolve("inner").toString(), 500)),
+                        null, null, null);
+        assertThatThrownBy(() -> controller.putSettings(patch))
+                .isInstanceOfSatisfying(
+                        ResponseStatusException.class,
+                        e -> assertThat(e.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST));
+        assertThat(java.nio.file.Files.exists(rec)).isFalse();
+    }
+
+    @Test
+    void putSettings_filesystemProbeRunsBeforeTheStoreUpdate() {
+        // Regression guard for the GSI-hot-path stall: settings.get() shares the store monitor with
+        // update(), and GsiController credits the ForceStopWatchdog heartbeat only after get(), so a
+        // probe against an unreachable path held INSIDE update() could block frames > 30s and cut a
+        // live recording. Track update() entry and assert the probe (the eager directory creation)
+        // already happened by then — the mutator itself performs no filesystem work.
+        Path clips = tmp.resolve("probed-before-lock");
+        java.util.concurrent.atomic.AtomicBoolean dirExistedAtUpdateEntry =
+                new java.util.concurrent.atomic.AtomicBoolean();
+        AppPaths paths =
+                new AppPaths(
+                        tmp.resolve("tracking-data").toString(),
+                        tmp.resolve("tracking-obs").toString());
+        SettingsStore trackingStore =
+                new SettingsStore(paths) {
+                    @Override
+                    public void update(
+                            java.util.function.UnaryOperator<SettingsStore.Settings> mutator) {
+                        dirExistedAtUpdateEntry.set(java.nio.file.Files.isDirectory(clips));
+                        super.update(mutator);
+                    }
+                };
+        ObsController obsController = mock(ObsController.class);
+        when(obsController.ensureConnected()).thenReturn(false);
+        SettingsController tracked =
+                new SettingsController(trackingStore, obsController, mock(ObsConfigWriter.class));
+
+        tracked.putSettings(
+                new SettingsPatch(
+                        null, null, null, clips.toString(), null, null, null, null, null, null,
+                        null, null, null, null));
+
+        assertThat(dirExistedAtUpdateEntry).isTrue();
+        assertThat(trackingStore.get().videoDir).isEqualTo(clips.toString());
     }
 }

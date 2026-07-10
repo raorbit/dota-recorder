@@ -93,8 +93,9 @@ public class SettingsStore {
          * READ+DELETE roots only — streamable, deletable, and sweepable — never a recording/archiver
          * target, and contributing NO cap to the retention budget (the sweeper's budget reads only
          * {@code retentionCapGb} + the active {@code storageLocations}). Deduped on the canonical
-         * {@link StorageRoots#normalize} form; an entry re-added as an active root (or
-         * overlapping/nesting one) is dropped until it is removed again (see
+         * {@link StorageRoots#normalize} form; an entry re-added as an active root (or nested inside
+         * one) is dropped until it is removed again, while an entry that merely CONTAINS an active
+         * root is kept — the child root does not cover files directly under the parent (see
          * {@link #recordPreviousArchiveDirs}). Defaults to {@code null} (backfilled to empty by
          * {@link #load}).
          */
@@ -374,8 +375,14 @@ public class SettingsStore {
      * outgoing} (the storageLocations list a settings update just replaced) that the NEW active roots
      * no longer cover, so VODs the archiver moved onto a removed/edited archive drive stay streamable
      * + deletable (their rows keep absolute paths under the old dir). Also prunes: a retained entry
-     * that became an active root again (re-added), or that overlaps/nests one, is dropped — the active
-     * root owns that subtree now. Call inside an {@link #update} mutator AFTER assigning the new
+     * that became an active root again (re-added), or that now sits INSIDE one, is dropped — the
+     * active root owns that whole subtree. An entry that merely CONTAINS a new active root is KEPT:
+     * the child root covers only its own subtree, not files directly under the parent, whose rows
+     * would otherwise sit outside every {@link StorageRoots} entry (streaming 404s, deletes skip the
+     * unlink, the sweeper refuses eviction) — and keeping it is harmless, since previous* roots are
+     * READ+DELETE only, contribute no cap, and are never a recording target (mirrors the
+     * exact-equality-only prune in {@link #recordPreviousVideoDir}). Call inside an {@link #update}
+     * mutator AFTER assigning the new
      * {@code videoDir}/{@code storageLocations}; {@code outgoing} may be null to prune only (e.g. a
      * videoDir-only change landing ON a retained archive dir). Comparison uses the canonical
      * {@link StorageRoots#normalize} form, so casing/whitespace variants never duplicate a root.
@@ -394,7 +401,7 @@ public class SettingsStore {
         }
         // previousArchiveDirs is never null here: load() backfills it and copy() preserves it.
         s.previousArchiveDirs.removeIf(
-                dir -> dir == null || dir.isBlank() || overlapsAny(canonicalDir(dir), activeRoots));
+                dir -> dir == null || dir.isBlank() || coveredByAny(canonicalDir(dir), activeRoots));
         if (outgoing == null) {
             return;
         }
@@ -403,7 +410,7 @@ public class SettingsStore {
                 continue;
             }
             String canonical = canonicalDir(loc.path());
-            if (overlapsAny(canonical, activeRoots)) {
+            if (coveredByAny(canonical, activeRoots)) {
                 continue; // still (or again) covered by an active root — nothing to retain
             }
             boolean tracked = false;
@@ -428,12 +435,15 @@ public class SettingsStore {
         }
     }
 
-    /** Whether canonical {@code dir} equals, contains, or is contained by any of {@code roots}. */
-    private static boolean overlapsAny(String dir, List<String> roots) {
+    /**
+     * Whether canonical {@code dir} is fully covered by one of {@code roots}: equal to it, or
+     * contained by it. Deliberately NOT the reverse containment — a {@code dir} that merely CONTAINS
+     * an active root is not covered by it (files directly under {@code dir} live outside the root's
+     * subtree), so such an entry must survive the historical-root prune.
+     */
+    private static boolean coveredByAny(String dir, List<String> roots) {
         for (String root : roots) {
-            if (dir.equals(root)
-                    || dir.startsWith(StorageRoots.prefix(root))
-                    || root.startsWith(StorageRoots.prefix(dir))) {
+            if (dir.equals(root) || dir.startsWith(StorageRoots.prefix(root))) {
                 return true;
             }
         }
