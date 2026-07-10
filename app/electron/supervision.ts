@@ -42,6 +42,7 @@ export class SupervisionController {
   private coreRestarting = false;
   private corePendingRecrash = false;
   private obsLaunching = false;
+  private obsRelaunchPending = false;
 
   constructor(
     private readonly deps: SupervisionDeps,
@@ -60,9 +61,18 @@ export class SupervisionController {
     }
     this.obsLaunching = true;
     try {
-      await this.deps.startObs();
+      // Drain loop: a crash of THIS launch's own child fires handleObsCrash while obsLaunching is still
+      // true, which can't launch a fresh OBS itself (the guard above blocks it) so it queues the relaunch
+      // in obsRelaunchPending. Re-run startObs() once for each queued relaunch. The budget was already
+      // charged by handleObsCrash before it queued, so this stays bounded by obsRestartAttempts (a crash
+      // past the budget queues nothing) — never an unbounded loop.
+      do {
+        this.obsRelaunchPending = false;
+        await this.deps.startObs();
+      } while (this.obsRelaunchPending);
     } finally {
       this.obsLaunching = false;
+      this.obsRelaunchPending = false; // bound the flag's lifetime to this one launch episode
     }
   }
 
@@ -78,6 +88,14 @@ export class SupervisionController {
     }
     this.obsRestartAttempts += 1;
     this.deps.log(`[obs] relaunching (attempt ${this.obsRestartAttempts}/${this.maxRestarts})`);
+    if (this.obsLaunching) {
+      // The crashed OBS is the in-flight launch's own child (it died before start() settled). launchObs
+      // would drop this relaunch as a duplicate, and that in-flight start() is about to reject
+      // (superseded) — so without queuing, the budget is charged but nothing retries and OBS stays down
+      // for the whole session. Queue it; the in-flight launchObs drains it once its startObs() settles.
+      this.obsRelaunchPending = true;
+      return;
+    }
     void this.launchObs();
   }
 

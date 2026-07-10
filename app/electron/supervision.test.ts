@@ -413,4 +413,91 @@ describe('SupervisionController — OBS crash & launch', () => {
 
     expect(deps.startObs).toHaveBeenCalledTimes(4); // 2 (pre/post restart) + 2 fresh-budget relaunches
   });
+
+  it('relaunches OBS when its own child crashes during the launch window (not a silent dead state)', async () => {
+    // The confirmed defect: an OBS child that crashes while its launch is still in flight fires
+    // handleObsCrash, whose relaunch the launch guard used to drop as a duplicate — leaving OBS down for
+    // the whole session with the budget already charged and nothing left to retry. The relaunch must be
+    // queued and run once the in-flight launch settles.
+    const calls: Array<Deferred<void>> = [];
+    const deps = makeDeps({
+      startObs: vi.fn(() => {
+        const d = deferred<void>();
+        calls.push(d);
+        return d.promise;
+      }),
+    });
+    const controller = new SupervisionController(deps, 2);
+
+    void controller.launchObs(); // initial launch: obsLaunching=true, startObs #1 in flight
+    await flush();
+    expect(deps.startObs).toHaveBeenCalledTimes(1);
+
+    controller.handleObsCrash(exit); // the in-flight launch's own child crashed -> queue a relaunch
+    expect(deps.startObs).toHaveBeenCalledTimes(1); // guard still holds: no second concurrent startObs
+
+    calls[0].resolve(); // the in-flight launch settles (its start() rejected superseded, swallowed upstream)
+    await flush();
+    expect(deps.startObs).toHaveBeenCalledTimes(2); // the queued relaunch ran instead of being dropped
+    expect(deps.log).toHaveBeenCalledWith(expect.stringContaining('relaunching (attempt 1/2)'));
+
+    calls[1].resolve();
+    await flush();
+  });
+
+  it('runs the queued relaunch exactly once for a single crash-during-launch', async () => {
+    // A single crash queues a single relaunch: once the relaunch settles cleanly (no further crash) the
+    // drain loop must stop, not re-run startObs forever.
+    const calls: Array<Deferred<void>> = [];
+    const deps = makeDeps({
+      startObs: vi.fn(() => {
+        const d = deferred<void>();
+        calls.push(d);
+        return d.promise;
+      }),
+    });
+    const controller = new SupervisionController(deps, 2);
+
+    void controller.launchObs();
+    await flush();
+    controller.handleObsCrash(exit); // one crash -> one queued relaunch
+    calls[0].resolve();
+    await flush();
+    calls[1].resolve(); // the relaunch settles cleanly
+    await flush();
+
+    expect(deps.startObs).toHaveBeenCalledTimes(2); // exactly one relaunch, not a runaway drain
+  });
+
+  it('still gives up after the restart budget is exhausted by crashes during launch', async () => {
+    // Bounded even when every relaunch itself crashes during its own launch window: the queued-relaunch
+    // drain stays capped by obsRestartAttempts. With maxRestarts=2 that is the initial launch + 2 relaunch
+    // attempts, then it gives up (logs and leaves OBS down — the OBS crash path deliberately does not
+    // pop a modal; not-ready is surfaced via /status).
+    const calls: Array<Deferred<void>> = [];
+    const deps = makeDeps({
+      startObs: vi.fn(() => {
+        const d = deferred<void>();
+        calls.push(d);
+        return d.promise;
+      }),
+    });
+    const controller = new SupervisionController(deps, 2);
+
+    void controller.launchObs(); // initial launch (startObs #1)
+    await flush();
+    controller.handleObsCrash(exit); // attempt 1 queued
+    calls[0].resolve();
+    await flush();
+    controller.handleObsCrash(exit); // attempt 2 queued (during relaunch #2's launch window)
+    calls[1].resolve();
+    await flush();
+    controller.handleObsCrash(exit); // budget exhausted -> nothing queued
+    calls[2].resolve();
+    await flush();
+
+    expect(deps.startObs).toHaveBeenCalledTimes(3); // initial + 2 bounded relaunches
+    expect(deps.log).toHaveBeenCalledWith(expect.stringContaining('exceeded restart attempts'));
+    expect(deps.notifyDown).not.toHaveBeenCalled(); // OBS-down is surfaced via /status, not a modal
+  });
 });
