@@ -10,6 +10,10 @@ import dev.dotarec.gsi.GsiPayload;
 import dev.dotarec.obs.ObsController;
 import dev.dotarec.obs.ObsSceneConfigurer;
 import dev.dotarec.obs.setup.ObsConfigWriter;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Set;
 import org.slf4j.Logger;
@@ -151,6 +155,27 @@ public class SettingsController {
                         // double-counts usage and degenerates the archiver).
                         validateStorageLocations(current.storageLocations, patch.videoDir());
                     }
+                    // Filesystem checks (trim; absolute; not an existing file; creatable + writable)
+                    // on every INCOMING storage path, after the pure overlap rule so an overlapping
+                    // pair is rejected before any directory is created. OBS (cwd obs/bin/64bit) and
+                    // the JVM resolve relative paths against different working directories, splitting
+                    // recordings from playback/retention — so a relative path is rejected outright.
+                    // Only patch-carried paths are probed: a stored archive on a temporarily-offline
+                    // drive must not fail an unrelated PUT.
+                    String incomingVideoDir =
+                            patch.videoDir() == null
+                                    ? null
+                                    : requireUsableDirectory(patch.videoDir(), "video directory");
+                    List<StorageLocation> incomingArchives = null;
+                    if (patch.storageLocations() != null) {
+                        incomingArchives = new java.util.ArrayList<>(patch.storageLocations().size());
+                        for (StorageLocation loc : patch.storageLocations()) {
+                            incomingArchives.add(new StorageLocation(
+                                    loc.id(),
+                                    requireUsableDirectory(loc.path(), "storage location"),
+                                    loc.capGb()));
+                        }
+                    }
                     if (patch.resolution() != null) {
                         current.resolution = patch.resolution();
                     }
@@ -169,13 +194,13 @@ public class SettingsController {
                     if (patch.retentionCapGb() != null) {
                         current.retentionCapGb = patch.retentionCapGb();
                     }
-                    if (patch.videoDir() != null && !patch.videoDir().equals(current.videoDir)) {
+                    if (incomingVideoDir != null && !incomingVideoDir.equals(current.videoDir)) {
                         // Retain the outgoing dir so recordings written under it stay streamable +
                         // deletable after the move (their rows keep absolute paths under the old folder).
                         // Assign the new dir FIRST so recordPreviousVideoDir's "skip the current dir"
                         // guard compares the old dir against the NEW videoDir, not against itself.
                         String outgoing = current.videoDir;
-                        current.videoDir = patch.videoDir();
+                        current.videoDir = incomingVideoDir;
                         SettingsStore.recordPreviousVideoDir(current, outgoing);
                     }
                     // accountId also uses null = "leave unchanged", so clearing it needs an explicit
@@ -192,9 +217,18 @@ public class SettingsController {
                         current.audioSources = patch.audioSources();
                     }
                     // storageLocations is a FULL-LIST REPLACE too: null = leave unchanged, [] = clear
-                    // (single-drive), [..] = replace the whole archive-drive list.
-                    if (patch.storageLocations() != null) {
-                        current.storageLocations = patch.storageLocations();
+                    // (single-drive), [..] = replace the whole archive-drive list. A path the replace
+                    // removes (or edits away) is retained as a historical archive root so VODs already
+                    // moved onto it stay streamable + deletable; a retained path that became an active
+                    // root again is dropped.
+                    if (incomingArchives != null) {
+                        List<StorageLocation> outgoing = current.storageLocations;
+                        current.storageLocations = incomingArchives;
+                        SettingsStore.recordPreviousArchiveDirs(current, outgoing);
+                    } else if (incomingVideoDir != null) {
+                        // A videoDir-only PUT can land the recording dir ON a retained archive dir —
+                        // it is an active root again, so the retained entry must drop.
+                        SettingsStore.recordPreviousArchiveDirs(current, null);
                     }
                     if (patch.autoClipOnRampage() != null) {
                         current.autoClipOnRampage = patch.autoClipOnRampage();
@@ -294,6 +328,55 @@ public class SettingsController {
      */
     private static boolean contains(String outer, String inner) {
         return inner.startsWith(StorageRoots.prefix(outer));
+    }
+
+    /**
+     * Trims {@code rawPath} and requires it to be a usable storage directory, returning the trimmed
+     * path for persistence or throwing a 400. Usable means: absolute (OBS runs with cwd
+     * {@code obs/bin/64bit} while the JVM resolves against its own working dir, so a relative path
+     * would record to one folder and play back/retain from another), not an existing regular file,
+     * and an existing-or-creatable, writable directory — probed by creating and immediately deleting
+     * a temp file. Creating the directory here is deliberate: it is non-destructive, and it fails the
+     * PUT at save time instead of at the first recording.
+     */
+    private static String requireUsableDirectory(String rawPath, String label) {
+        String trimmed = rawPath == null ? "" : rawPath.trim();
+        if (trimmed.isEmpty()) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST, label + " must not be blank");
+        }
+        Path dir;
+        try {
+            dir = Path.of(trimmed);
+        } catch (InvalidPathException e) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST, label + " is not a valid path: " + trimmed);
+        }
+        if (!dir.isAbsolute()) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    label + " must be an absolute path (was: " + trimmed + ")");
+        }
+        if (Files.isRegularFile(dir)) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    label + " points at an existing file, not a folder: " + trimmed);
+        }
+        try {
+            Files.createDirectories(dir);
+        } catch (IOException | RuntimeException e) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    label + " does not exist and could not be created: " + trimmed);
+        }
+        try {
+            Path probe = Files.createTempFile(dir, ".dotarec-write-probe", ".tmp");
+            Files.deleteIfExists(probe);
+        } catch (IOException | RuntimeException e) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST, label + " is not writable: " + trimmed);
+        }
+        return trimmed;
     }
 
     /**

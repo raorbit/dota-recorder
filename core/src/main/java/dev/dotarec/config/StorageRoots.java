@@ -13,9 +13,11 @@ import java.util.Locale;
  * boundary.
  *
  * <p>The allow-list is the active {@code videoDir}, every archive drive's path, and every historical
- * {@code videoDir} the user has since moved off. The historical dirs are READ+DELETE roots only (rows
- * recorded before a videoDir change keep absolute paths under the old folder), so their files stay
- * streamable and a delete/sweep still unlinks them — recording/archiver never target them.
+ * root — the {@code videoDir}s the user has since moved off AND the archive dirs since removed from
+ * the location list. The historical dirs are READ+DELETE roots only (rows recorded/archived before
+ * the change keep absolute paths under the old folder), so their files stay streamable and a
+ * delete/sweep still unlinks them — recording/archiver never target them, and they add no cap to the
+ * retention budget.
  */
 public final class StorageRoots {
 
@@ -49,9 +51,9 @@ public final class StorageRoots {
     }
 
     /**
-     * The configured storage roots: the active {@code videoDir}, every archive drive's path, and every
-     * historical {@code videoDir}. Defined ONCE here so the match/clip controllers and the retention
-     * sweeper can never enforce divergent allow-lists.
+     * The configured storage roots: the active {@code videoDir}, every archive drive's path, every
+     * historical {@code videoDir}, and every historical archive dir. Defined ONCE here so the
+     * match/clip controllers and the retention sweeper can never enforce divergent allow-lists.
      */
     public static List<String> of(SettingsStore.Settings s) {
         List<String> roots = new ArrayList<>();
@@ -65,6 +67,9 @@ public final class StorageRoots {
         }
         if (s.previousVideoDirs != null) {
             roots.addAll(s.previousVideoDirs);
+        }
+        if (s.previousArchiveDirs != null) {
+            roots.addAll(s.previousArchiveDirs);
         }
         return roots;
     }
