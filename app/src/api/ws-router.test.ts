@@ -41,9 +41,7 @@ describe('classifyWsFrame', () => {
   });
 
   it('ignores a disk error frame missing required numeric fields', () => {
-    expect(
-      classifyWsFrame({ type: 'error', payload: { scope: 'disk', message: 'x' } }),
-    ).toBeNull();
+    expect(classifyWsFrame({ type: 'error', payload: { scope: 'disk', message: 'x' } })).toBeNull();
   });
 
   it('routes a valid status frame and drops a malformed one', () => {
