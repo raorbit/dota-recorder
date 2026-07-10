@@ -35,9 +35,11 @@ import org.junit.jupiter.api.io.TempDir;
  * bounded {@link MatchFsm#retryOrphanedStop()} ticks. Proves: the retained state exists after the
  * give-up; a consistent (still-ours) output is stopped and its late-recovered file is attached to
  * the persisted row; the sameness guard aborts on a duration reset (a fresh, e.g. hand-started,
- * output must never be touched); an inactive output, a new match arming, and the user's manual
- * stopOrphanedRecording all cancel the retries; and an unanswerable OBS burns bounded attempts
- * rather than retrying forever.
+ * output must never be touched) AND on the elapsed-time floor (a near-zero baseline makes the
+ * ratchet vacuous, so a fresh output that happens to clear it must still be refused -- while a
+ * genuinely continuous output tracks monotonic elapsed time across ticks, within the slack); an
+ * inactive output, a new match arming, and the user's manual stopOrphanedRecording all cancel the
+ * retries; and an unanswerable OBS burns bounded attempts rather than retrying forever.
  */
 class OrphanedStopRetryTest {
 
@@ -120,11 +122,21 @@ class OrphanedStopRetryTest {
      * row. Afterwards OBS still reports recording and the FSM retains orphan ownership.
      */
     private MatchSummary giveUp() {
+        return giveUpAfter(RECORDED_NANOS);
+    }
+
+    /**
+     * {@link #giveUp()} with a controllable recorded span: the monotonic clock advances by
+     * {@code recordedNanos} between OUTPUT_STARTED and finalize, so the retained duration baseline
+     * is {@code recordedNanos} in ms. A tiny span models the vacuous-ratchet case (a stop that
+     * failed seconds after OUTPUT_STARTED).
+     */
+    private MatchSummary giveUpAfter(long recordedNanos) {
         obs.stopFailuresRemaining = 2;
         fsm.onFrame(frame().matchId(111L).state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")
                 .activity("playing").hero("npc_dota_hero_lina").build());
         assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
-        nano.set(ANCHOR_NANOS + RECORDED_NANOS);
+        nano.set(ANCHOR_NANOS + recordedNanos);
         fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_POST_GAME").noHero().build());
 
         assertThat(fsm.getState()).isEqualTo(MatchState.IDLE);
@@ -176,6 +188,68 @@ class OrphanedStopRetryTest {
         assertThat(obs.recording).isTrue();
         assertThat(fsm.hasOrphanedStopRetry()).isFalse();
         assertThat(matches.findById(row.id()).orElseThrow().videoPath()).isNull();
+    }
+
+    @Test
+    void retry_abortsOnTheElapsedFloor_whenANearZeroBaselineWouldLetAnyOutputPass() {
+        // The stop failed 3s after OUTPUT_STARTED, so the ratchet baseline is only 3_000ms and ANY
+        // active output clears it. 30s later (the watchdog cadence) the wedged output has ended on
+        // its own and a hand-started recording, 8s old, holds the output: 8_000ms >= the 3_000ms
+        // ratchet, but far below the elapsed floor (3s + 30s - 5s slack = 28s). The floor must
+        // refuse it -- stopping here would cut the USER'S recording and mis-attach their file.
+        MatchSummary row = giveUpAfter(3L * 1_000_000_000L);
+        nano.addAndGet(30L * 1_000_000_000L);
+        obs.recordStatus = new MatchFsm.RecordOutputStatus(true, 8_000L);
+
+        fsm.retryOrphanedStop();
+
+        assertThat(obs.stopCalls).as("an output below the elapsed floor is never stopped").isEqualTo(2);
+        assertThat(obs.recording).as("the user's fresh recording keeps rolling").isTrue();
+        assertThat(fsm.hasOrphanedStopRetry()).isFalse();
+        assertThat(matches.findById(row.id()).orElseThrow().videoPath()).isNull();
+    }
+
+    @Test
+    void continuousOutput_trackingElapsedAcrossTicks_isStillStoppedAndAttached() {
+        MatchSummary row = giveUp();
+        // Tick 1, 30s after the give-up: the output grew with elapsed time (300s -> 330s), so it
+        // clears ratchet and floor (325s) -- but this StopRecord fails too, which must re-anchor
+        // the observation (duration AND instant) instead of cancelling.
+        obs.stopFailuresRemaining = 1;
+        nano.addAndGet(30L * 1_000_000_000L);
+        obs.recordStatus = new MatchFsm.RecordOutputStatus(true, 330_000L);
+        fsm.retryOrphanedStop();
+        assertThat(fsm.hasOrphanedStopRetry()).as("a failed stop burns the attempt, not the state").isTrue();
+
+        // Tick 2, another 30s: still growing with elapsed time against the re-anchored observation
+        // (floor 330s + 30s - 5s = 355s). Were the instant not re-anchored, the stale floor
+        // (330s + 60s - 5s = 385s) would wrongly cancel here.
+        nano.addAndGet(30L * 1_000_000_000L);
+        obs.recordStatus = new MatchFsm.RecordOutputStatus(true, 360_000L);
+        fsm.retryOrphanedStop();
+
+        assertThat(obs.recording).isFalse();
+        assertThat(fsm.hasOrphanedStopRetry()).isFalse();
+        assertThat(matches.findById(row.id()).orElseThrow().videoPath())
+                .as("a continuously-running output is still recovered and attached")
+                .isEqualTo("C:\\videos\\match.mkv");
+    }
+
+    @Test
+    void floorSlack_toleratesADurationLaggingAFewSecondsUnderExactElapsed() {
+        MatchSummary row = giveUp();
+        // 30s of monotonic time elapsed but OBS reports only +27s of output growth -- probe
+        // latency, second-granularity truncation, scheduler jitter. That lag sits inside the 5s
+        // slack (floor 325s), so the output is still attributed to us and recovered.
+        nano.addAndGet(30L * 1_000_000_000L);
+        obs.recordStatus = new MatchFsm.RecordOutputStatus(true, 327_000L);
+
+        fsm.retryOrphanedStop();
+
+        assertThat(obs.recording).isFalse();
+        assertThat(fsm.hasOrphanedStopRetry()).isFalse();
+        assertThat(matches.findById(row.id()).orElseThrow().videoPath())
+                .isEqualTo("C:\\videos\\match.mkv");
     }
 
     @Test

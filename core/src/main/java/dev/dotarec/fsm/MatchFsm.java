@@ -108,6 +108,22 @@ public class MatchFsm {
     /** Bounded orphaned-stop retries: one per {@code ForceStopWatchdog} orphan tick, then give up loudly. */
     static final int ORPHAN_STOP_MAX_ATTEMPTS = 10;
 
+    /**
+     * Slack for the orphaned-stop duration floor. Our abandoned output never stopped, so between
+     * observations its OBS-reported duration must have grown by about the MONOTONIC time elapsed:
+     * each retry tick demands {@code durationMs >= lastKnownDurationMs + elapsedMs - SLACK}. The
+     * ratchet alone ({@code durationMs >= lastKnownDurationMs}) is vacuous off a near-zero baseline
+     * (a stop that failed seconds after OUTPUT_STARTED): ANY active output passes it, including a
+     * recording the user hand-started in the managed OBS window after the wedged output ended on
+     * its own -- which the retry would then cut and mis-attach. The slack is kept TIGHT -- just the
+     * probe timeout (1s), scheduler jitter, and the second-granularity finalize baseline -- because
+     * the two failure directions are asymmetric: slack too small falsely cancels and the file is
+     * simply adopted at next boot, while slack too large lets a hand-started recording within
+     * {@code SLACK - baseline} of the last observation pass the floor and be cut. Every widening
+     * of this constant widens that mis-attach window one-for-one.
+     */
+    static final long ORPHAN_STOP_FLOOR_SLACK_MS = 5_000;
+
     private volatile MatchState state = MatchState.IDLE;
     private RecordingSession session;
 
@@ -726,7 +742,11 @@ public class MatchFsm {
             // The stop "failed" but the output ended anyway (or OBS is gone): nothing left to own.
             return;
         }
-        this.orphanedStop = new OrphanedStop(matchRowId, thumbPath, durationS * 1_000L, now);
+        // The duration baseline (durationS) was derived from time.nanoTime() moments ago in
+        // finalize, so stamping the observation instant here skews the floor by at most the
+        // persist round-trip -- well inside ORPHAN_STOP_FLOOR_SLACK_MS.
+        this.orphanedStop =
+                new OrphanedStop(matchRowId, thumbPath, durationS * 1_000L, now, time.nanoTime());
         log.warn(
                 "StopRecord gave up but OBS still reports the output active; retaining orphan "
                         + "ownership of match row {} for bounded stop retries",
@@ -739,8 +759,11 @@ public class MatchFsm {
      * never the GSI request path. Each tick re-checks that the active output is still plausibly
      * OURS: active, with an OBS-reported duration at or beyond our last observation (a reset below
      * it means a FRESH output, e.g. one hand-started in the managed OBS window, which an automatic
-     * stop must never touch -- the same objection that rejected a generic scheduled kill). Only
-     * then is another StopRecord issued. A success that reports the output path attaches the file
+     * stop must never touch -- the same objection that rejected a generic scheduled kill) AND at
+     * or beyond the elapsed-time floor {@code lastKnownDurationMs + monotonicElapsed - slack} (our
+     * output never stopped, so its duration must track elapsed time; a duration far short of that
+     * is a fresh output even when a near-zero baseline lets it clear the ratchet -- see
+     * {@link #ORPHAN_STOP_FLOOR_SLACK_MS}). Only then is another StopRecord issued. A success that reports the output path attaches the file
      * to the retained row (full recovery); on an inactive output, an unattributable output, or
      * exhausted attempts the state is cleared and the boot orphan scan stays the fallback --
      * {@code ObsHealth.recording} keeps telling the renderer the truth either way, so the manual
@@ -787,7 +810,24 @@ public class MatchFsm {
             this.orphanedStop = null;
             return;
         }
+        long nowNanos = time.nanoTime();
+        long elapsedMs = (nowNanos - o.lastObservationNanos) / 1_000_000L;
+        long floorMs = o.lastKnownDurationMs + elapsedMs - ORPHAN_STOP_FLOOR_SLACK_MS;
+        if (status.durationMs() < floorMs) {
+            // Below the elapsed-time floor: our output ran continuously since the last observation,
+            // so its duration must have grown by about the monotonic elapsed time. This one didn't
+            // -- it is a fresh output (the wedged one ended between ticks and, e.g., a hand-started
+            // recording took its place) that a near-zero baseline let past the ratchet. Same verdict
+            // as the ratchet reset: cancel, touch nothing.
+            log.warn(
+                    "Active OBS output is not the one finalize abandoned (duration {}ms is below "
+                            + "the elapsed-time floor {}ms); ending stop retries for match row {}",
+                    status.durationMs(), floorMs, o.matchRowId);
+            this.orphanedStop = null;
+            return;
+        }
         o.lastKnownDurationMs = status.durationMs();
+        o.lastObservationNanos = nowNanos;
         try {
             String path = obs.stopRecording();
             this.orphanedStop = null;
@@ -864,13 +904,28 @@ public class MatchFsm {
         final long abandonedAtWallMs;
         /** Ratchets up with each consistent observation; a reported duration below it aborts. */
         long lastKnownDurationMs;
+        /**
+         * MONOTONIC instant {@link #lastKnownDurationMs} was observed (never wall clock -- an NTP
+         * step must not warp the floor). Feeds the elapsed-time duration floor: a still-running
+         * output's duration grows with monotonic time, so a probed duration far short of
+         * {@code lastKnownDurationMs + elapsed} cannot be our output even when it clears the
+         * ratchet (see {@link #ORPHAN_STOP_FLOOR_SLACK_MS}). Re-anchored with the ratchet on each
+         * consistent observation.
+         */
+        long lastObservationNanos;
         int attempts;
 
-        OrphanedStop(long matchRowId, String thumbPath, long lastKnownDurationMs, long abandonedAtWallMs) {
+        OrphanedStop(
+                long matchRowId,
+                String thumbPath,
+                long lastKnownDurationMs,
+                long abandonedAtWallMs,
+                long lastObservationNanos) {
             this.matchRowId = matchRowId;
             this.thumbPath = thumbPath;
             this.lastKnownDurationMs = lastKnownDurationMs;
             this.abandonedAtWallMs = abandonedAtWallMs;
+            this.lastObservationNanos = lastObservationNanos;
         }
     }
 
