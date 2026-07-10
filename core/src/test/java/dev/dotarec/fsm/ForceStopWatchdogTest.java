@@ -86,4 +86,13 @@ class ForceStopWatchdogTest {
 
         verify(fsm, never()).forceFinalize();
     }
+
+    @Test
+    void orphanRetryTick_delegatesToTheFsm() {
+        // The cadence lives here; all the orphan state + the sameness guard live in the FSM, so the
+        // tick is an unconditional delegate (a no-op inside the FSM when nothing was retained).
+        watchdog.orphanRetryTick();
+
+        verify(fsm, times(1)).retryOrphanedStop();
+    }
 }
