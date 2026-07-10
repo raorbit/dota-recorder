@@ -14,7 +14,13 @@ export interface SupervisionDeps {
   startCore(): Promise<void>;
   /** Reap the core (graceful then hard), freeing its loopback ports. */
   stopCore(): Promise<void>;
-  /** Launch + adopt a fresh OBS supervisor (wires its onUnexpectedExit back to this controller). */
+  /**
+   * Launch + adopt a fresh OBS supervisor (wires its onUnexpectedExit back to this controller).
+   * Failures are expected to be handled internally (log + leave OBS down, surfaced via /status) —
+   * but unlike {@link startCore} this is not a MUST-reject contract, and a rejection is tolerated:
+   * {@link SupervisionController.launchObs} logs it and keeps draining any queued relaunch rather
+   * than letting it drop the relaunch or escape as an unhandled rejection.
+   */
   startObs(): Promise<void>;
   /** Stop + clear the current OBS supervisor (no-op if none). */
   stopObs(): Promise<void>;
@@ -68,7 +74,18 @@ export class SupervisionController {
       // past the budget queues nothing) — never an unbounded loop.
       do {
         this.obsRelaunchPending = false;
-        await this.deps.startObs();
+        try {
+          await this.deps.startObs();
+        } catch (err) {
+          // startObs is expected to handle its own failures internally, but its contract tolerates a
+          // rejection. One must not escape this loop: launchObs is fired via `void launchObs()` from
+          // the crash paths, so an escaping rejection would be unhandled AND would skip the remaining
+          // drain iterations — dropping a queued relaunch whose budget was already charged. Log it and
+          // keep draining.
+          this.deps.log(
+            `[obs] launch failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
       } while (this.obsRelaunchPending);
     } finally {
       this.obsLaunching = false;
