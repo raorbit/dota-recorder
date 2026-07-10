@@ -17,6 +17,7 @@ import { bucketLabelOf } from '../store/buckets';
 import { heroDisplayName } from '../data/heroes';
 import { clipLabel } from '../lib/clip-format';
 import { shouldShowVodOverlay } from '../lib/marker-overlay';
+import { shouldShowNoVideoPlaceholder, retentionAffectsMatch } from '../lib/video-availability';
 import { useLibraryStore } from '../store/library';
 import { PopupMenu } from './PopupMenu';
 import './video-player.css';
@@ -269,6 +270,23 @@ export function VideoPlayer({
         });
     };
 
+    // A retention pass may prune THIS match's VOD while it's open. On retention.swept, if the payload
+    // pruned this match, refresh full-VOD availability from the server rather than trusting the
+    // videoPath cached at selection time — the file may now be gone, so the stale videoUrl would 404.
+    const offEvents = socket.onEvent((evt) => {
+      if (cancelled) return;
+      if (evt.type !== 'retention.swept' || !retentionAffectsMatch(evt.payload, id)) return;
+      void fetchMatch(id)
+        .then((detail) => {
+          if (cancelled) return;
+          const path = detail.videoPath;
+          setVideoUrl(path != null && path.trim() !== '' ? videoStreamUrl(id) : null);
+        })
+        .catch(() => {
+          /* transient: a later frame / re-select reconciles */
+        });
+    });
+
     const off = socket.onClipEvent(id, (evt) => {
       if (cancelled) return;
       if (evt.type === 'clip.progress') {
@@ -297,6 +315,7 @@ export function VideoPlayer({
     return () => {
       cancelled = true;
       off();
+      offEvents();
       socket.close();
     };
   }, [matchId]);
@@ -643,7 +662,9 @@ export function VideoPlayer({
         preload="metadata"
       />
 
-      {videoUrl === null && (
+      {/* Only when there is neither a full VOD nor an active clip: a swept/pruned match (no VOD) that
+          is playing a clip still has video on screen, so the placeholder must not paint over it. */}
+      {shouldShowNoVideoPlaceholder(hasVideo, activeClipId) && (
         <div className="vp-placeholder">
           <div className="vp-placeholder-tag">[ no video · recording removed ]</div>
           <div className="vp-placeholder-sub">{caption}</div>

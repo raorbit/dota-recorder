@@ -656,10 +656,23 @@ export async function deleteMatch(id: number): Promise<MatchDeleteOutcome | null
 
 export type StatusListener = (status: Status) => void;
 export type StateListener = (connected: boolean) => void;
-// Receives raw /ws envelopes for library-mutating match.* events
-// (match.recorded / match.enriched / match.enrichFailed). The renderer reacts by
-// re-fetching the list + counts; the payload shape is intentionally opaque here.
+// Receives raw /ws envelopes for library-mutating events: the match.* frames
+// (match.recorded / match.enriched / match.enrichFailed) AND retention.swept (a
+// retention pass pruned VOD rows). The renderer reacts by re-fetching the list +
+// counts; the payload is intentionally opaque to onEvent subscribers, though
+// retention.swept carries a deletedIds array a scoped listener (the player) may read.
 export type MatchEventListener = (evt: { type: string; payload: unknown }) => void;
+
+// A low-disk warning frame — the core publishes it as a `{ type: "error" }` envelope with
+// `scope: "disk"` (see RetentionSweeper.checkFreeSpaceWarning). The renderer surfaces it as a
+// banner and a debounced OS notification. Keep the fields in sync with the core payload.
+export interface DiskWarning {
+  readonly freeBytes: number;
+  readonly thresholdBytes: number;
+  readonly message: string;
+}
+
+export type DiskWarningListener = (warning: DiskWarning) => void;
 
 // Clip lifecycle frames fanned out to onClipEvent() subscribers. Four kinds:
 //   'clip.created'  — payload is the new Clip (status 'pending')
@@ -774,6 +787,66 @@ function parseClipEvent(type: ClipEventType, payload: unknown): ClipEvent | null
   return { type, payload } as ClipEvent;
 }
 
+// Validate a disk-warning frame (core type "error", scope "disk") against the fields the banner +
+// notification read: freeBytes, thresholdBytes, message. Returns null for any other error scope (or a
+// malformed payload) so a non-disk error frame is ignored rather than surfaced as a bogus disk banner.
+function parseDiskWarning(payload: unknown): DiskWarning | null {
+  if (!isRecord(payload) || payload.scope !== 'disk') return null;
+  const { freeBytes, thresholdBytes, message } = payload;
+  if (
+    typeof freeBytes !== 'number' ||
+    typeof thresholdBytes !== 'number' ||
+    typeof message !== 'string'
+  ) {
+    return null;
+  }
+  return { freeBytes, thresholdBytes, message };
+}
+
+// The routing decision for a parsed /ws frame, split out as a PURE function so the fan-out in
+// StatusSocket.onmessage stays a thin switch and the routing itself is unit-testable without a live
+// socket. Returns null for a malformed envelope or an unknown/unhandled type — the same tolerance the
+// socket has always applied, so a server event kind added later degrades to "ignored" rather than a
+// throw. retention.swept rides the same 'libraryEvent' channel as the match.* frames: it is
+// library-mutating (it prunes VOD rows), so subscribers reload the list on it too.
+export type RoutedFrame =
+  | { readonly kind: 'status'; readonly status: Status }
+  | { readonly kind: 'libraryEvent'; readonly envelope: WsEnvelope }
+  | { readonly kind: 'clip'; readonly event: ClipEvent }
+  | { readonly kind: 'diskWarning'; readonly warning: DiskWarning };
+
+export function classifyWsFrame(parsed: unknown): RoutedFrame | null {
+  if (!isRecord(parsed) || typeof parsed.type !== 'string') return null;
+  const type = parsed.type;
+  const payload = parsed.payload;
+  if (type === 'status') {
+    const snapshot = parseStatusSnapshot(payload);
+    return snapshot === null ? null : { kind: 'status', status: toStatus(snapshot) };
+  }
+  if (
+    type === 'match.enriched' ||
+    type === 'match.enrichFailed' ||
+    type === 'match.recorded' ||
+    type === 'retention.swept'
+  ) {
+    return { kind: 'libraryEvent', envelope: { type, payload } };
+  }
+  if (
+    type === 'clip.created' ||
+    type === 'clip.progress' ||
+    type === 'clip.ready' ||
+    type === 'clip.deleted'
+  ) {
+    const event = parseClipEvent(type, payload);
+    return event === null ? null : { kind: 'clip', event };
+  }
+  if (type === 'error') {
+    const warning = parseDiskWarning(payload);
+    return warning === null ? null : { kind: 'diskWarning', warning };
+  }
+  return null;
+}
+
 /**
  * WebSocket client to the core's /ws endpoint with exponential-backoff reconnect.
  * Step 0: connects and forwards parsed JSON frames; full status schema is wired
@@ -787,6 +860,7 @@ export class StatusSocket {
   private readonly statusListeners = new Set<StatusListener>();
   private readonly stateListeners = new Set<StateListener>();
   private readonly matchEventListeners = new Set<MatchEventListener>();
+  private readonly diskWarningListeners = new Set<DiskWarningListener>();
   // Clip-event subscribers keyed by the match they care about; a 0 key means "all
   // matches". onClipEvent() adds to a per-match set and returns a detacher.
   private readonly clipEventListeners = new Map<number, Set<ClipEventListener>>();
@@ -817,6 +891,13 @@ export class StatusSocket {
   onEvent(listener: MatchEventListener): () => void {
     this.matchEventListeners.add(listener);
     return () => this.matchEventListeners.delete(listener);
+  }
+
+  // Subscribe to low-disk warning frames (core type "error", scope "disk"). Mirrors onStatus():
+  // returns a detacher. The library wiring turns these into a banner + a debounced OS notification.
+  onDiskWarning(listener: DiskWarningListener): () => void {
+    this.diskWarningListeners.add(listener);
+    return () => this.diskWarningListeners.delete(listener);
   }
 
   // Subscribe to clip lifecycle frames (clip.created / clip.progress / clip.ready /
@@ -864,41 +945,26 @@ export class StatusSocket {
       } catch {
         return; // ignore malformed (non-JSON) frames
       }
-      // Envelope guard: every /ws frame is { type: string, payload }. A frame missing a
-      // string `type` is dropped silently — same tolerance the router already applies to
-      // unknown types, so a shape drift degrades to "ignored" rather than a runtime throw.
-      if (!isRecord(parsed) || typeof parsed.type !== 'string') return;
-      const envelope: WsEnvelope = { type: parsed.type, payload: parsed.payload };
-
-      // Route by type; unknown types are intentionally ignored so the client
-      // tolerates server event kinds added in later steps.
-      if (envelope.type === 'status') {
-        // Validate before dereferencing; drop a malformed snapshot silently (matches the
-        // unknown-type tolerance) rather than feeding toStatus() an undefined field.
-        const snapshot = parseStatusSnapshot(envelope.payload);
-        if (snapshot === null) return;
-        const status = toStatus(snapshot);
-        for (const listener of this.statusListeners) listener(status);
-      } else if (
-        envelope.type === 'match.enriched' ||
-        envelope.type === 'match.enrichFailed' ||
-        envelope.type === 'match.recorded'
-      ) {
-        // Library-mutating events: fan out to onEvent() subscribers, which re-fetch the
-        // list + counts. Listeners never dereference the payload (they re-fetch), so a
-        // shallow envelope guard is all that's warranted — no payload validation here.
-        for (const listener of this.matchEventListeners) listener(envelope);
-      } else if (
-        envelope.type === 'clip.created' ||
-        envelope.type === 'clip.progress' ||
-        envelope.type === 'clip.ready' ||
-        envelope.type === 'clip.deleted'
-      ) {
-        // Clip lifecycle events: validate the payload carries a numeric parentMatchId (the
-        // one field routing reads), then fan out to onClipEvent() subscribers scoped by it.
-        // A payload without it is dropped silently.
-        const evt = parseClipEvent(envelope.type, envelope.payload);
-        if (evt !== null) this.emitClipEvent(evt);
+      // Route via the pure classifier; a null result (malformed envelope, a status/clip/disk frame
+      // that failed validation, or an unknown type) is ignored, so the client tolerates server event
+      // kinds added later and never feeds a listener an undefined field.
+      const routed = classifyWsFrame(parsed);
+      if (routed === null) return;
+      switch (routed.kind) {
+        case 'status':
+          for (const listener of this.statusListeners) listener(routed.status);
+          break;
+        case 'libraryEvent':
+          // Library-mutating events (match.* + retention.swept): fan out to onEvent() subscribers,
+          // which re-fetch the list + counts rather than trusting the payload.
+          for (const listener of this.matchEventListeners) listener(routed.envelope);
+          break;
+        case 'clip':
+          this.emitClipEvent(routed.event);
+          break;
+        case 'diskWarning':
+          for (const listener of this.diskWarningListeners) listener(routed.warning);
+          break;
       }
     };
 
