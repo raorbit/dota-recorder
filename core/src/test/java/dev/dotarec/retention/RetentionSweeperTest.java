@@ -27,8 +27,10 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 
@@ -169,7 +171,7 @@ class RetentionSweeperTest {
         // Cap 1 GiB. Two non-starred clips over a parent match with no VOD file (budget is all clips).
         // The OLDEST clip's on-disk size (0.6 GiB) is much larger than its stale DB file_size_bytes
         // (0.1 GiB); the newer clip's disk and DB agree at 0.6 GiB. Real total on disk = 1.2 GiB > cap.
-        // The seed (reachableClipBytes) and the loop decrement must BOTH use real disk size: only then
+        // The seed (measureStoredBytes) and the loop decrement must BOTH use real disk size: only then
         // is the budget seen as over cap and exactly the oldest evicted (0.6 GiB left, under cap). Seeded
         // from the drifted DB size instead, total would read as 0.7 GiB and the sweep would under-evict.
         settings.get().retentionCapGb = 1;
@@ -591,6 +593,186 @@ class RetentionSweeperTest {
         assertThat(result.freedBytes()).isEqualTo(gib);
         assertThat(Files.exists(videoDir.resolve("in-root.mp4"))).isFalse();
         assertThat(matches.findById(inRootId).orElseThrow().videoPath()).isNull();
+    }
+
+    @Test
+    void missingVideoOnReachableDriveCountsZeroAndReconcilesTheRow() throws Exception {
+        // The oldest row's .mp4 is GONE from the (present) video dir — deleted outside the app — but
+        // its stale 2 GiB DB size remains. Counted at DB size those phantom bytes would put the
+        // 0.5 GiB real VOD over the 1 GiB cap and evict it to offset bytes that don't exist. The
+        // sweep must count the missing file as 0, reconcile its row to the post-sweep shape (kept,
+        // paths/size nulled, markers intact), and delete nothing.
+        settings.get().retentionCapGb = 1;
+        long gib = 1024L * 1024 * 1024;
+
+        Path phantomFile = videoDir.resolve("phantom.mp4"); // never created
+        long phantomId = matches.insert(new NewMatch(
+                null, "match", "enriched", "puck",
+                1, 2, 3, 400, 500, 10000, 120,
+                "win", 7, 22, null, null, 1800,
+                1_000L, phantomFile.toString(), null, 2 * gib, false, 1_000L, null));
+        markers.insert(phantomId, "death", 42.0, 60, null, "gsi");
+        long realId = seedWithFiles("real.mp4", "real.jpg", gib / 2, 2_000L, false);
+
+        RetentionSweeper.SweepResult result = sweeper.sweep(null);
+
+        // Nothing evicted: without the phantom bytes the real 0.5 GiB VOD is under the 1 GiB cap.
+        assertThat(result.deletedIds()).isEmpty();
+        assertThat(result.freedBytes()).isZero();
+        assertThat(Files.exists(videoDir.resolve("real.mp4")))
+                .as("a real VOD must never be evicted to offset phantom bytes")
+                .isTrue();
+        assertThat(matches.findById(realId).orElseThrow().videoPath()).isNotNull();
+        // The phantom row is reconciled like a swept row: kept, with markers, paths/size nulled.
+        var reconciled = matches.findById(phantomId).orElseThrow();
+        assertThat(reconciled.videoPath()).isNull();
+        assertThat(reconciled.thumbPath()).isNull();
+        assertThat(reconciled.fileSizeBytes()).isNull();
+        assertThat(markers.findByMatchId(phantomId)).hasSize(1);
+    }
+
+    @Test
+    void missingStarredVideoAlsoReconcilesWithoutAnyDeletion() throws Exception {
+        // A STARRED row whose file is gone is never a sweep candidate, so without reconciliation its
+        // stale DB bytes would shrink the budget FOREVER — every sweep would evict real unstarred
+        // VODs to offset them. The measurement pass must reconcile it too (the star protects the
+        // file, but the file is already gone) while deleting nothing.
+        settings.get().retentionCapGb = 1;
+        long gib = 1024L * 1024 * 1024;
+
+        Path phantomFile = videoDir.resolve("starred-phantom.mp4"); // never created
+        long starredId = matches.insert(new NewMatch(
+                null, "match", "enriched", "puck",
+                1, 2, 3, 400, 500, 10000, 120,
+                "win", 7, 22, null, null, 1800,
+                1_000L, phantomFile.toString(), null, 2 * gib, true, 1_000L, null));
+        long realId = seedWithFiles("real.mp4", "real.jpg", gib / 2, 2_000L, false);
+
+        RetentionSweeper.SweepResult result = sweeper.sweep(null);
+
+        assertThat(result.deletedIds()).isEmpty();
+        assertThat(result.freedBytes()).isZero();
+        assertThat(Files.exists(videoDir.resolve("real.mp4"))).isTrue();
+        assertThat(matches.findById(realId).orElseThrow().videoPath()).isNotNull();
+        // The starred row is reconciled (paths nulled) but kept, still starred.
+        var reconciled = matches.findById(starredId).orElseThrow();
+        assertThat(reconciled.videoPath()).isNull();
+        assertThat(reconciled.fileSizeBytes()).isNull();
+        assertThat(reconciled.starred()).isTrue();
+    }
+
+    @Test
+    void missingClipOnReachableDriveCountsZeroAndDropsItsRow() throws Exception {
+        // A clip row whose .mp4 is gone from the (present) video dir but whose stale 2 GiB DB size
+        // remains. Phantom clip bytes must not evict the real under-cap VOD; the clip row (which has
+        // nothing left to reference) is dropped, matching the eviction phase's file-gone semantics.
+        settings.get().retentionCapGb = 1;
+        long gib = 1024L * 1024 * 1024;
+
+        long realVod = seedWithFiles("keep.mp4", "keep.jpg", gib / 2, 2_000L, false);
+        Path phantomClipFile = videoDir.resolve("phantom-clip.mp4"); // never created
+        long phantomClip = clips.insert(realVod, "manual", null, 0.0, 10.0, null,
+                phantomClipFile.toString(), null, 2 * gib, "ready", null, 100L);
+
+        RetentionSweeper.SweepResult result = sweeper.sweep(null);
+
+        assertThat(result.deletedIds()).isEmpty();
+        assertThat(result.freedBytes()).isZero();
+        assertThat(Files.exists(videoDir.resolve("keep.mp4")))
+                .as("a real VOD must not be evicted to offset a phantom clip's bytes")
+                .isTrue();
+        assertThat(matches.findById(realVod).orElseThrow().videoPath()).isNotNull();
+        assertThat(clips.findById(phantomClip)).isEmpty();
+    }
+
+    @Test
+    void matchStarredAfterCandidateSnapshotIsNeverDeleted() throws Exception {
+        // The user stars the oldest match in the instant between the sweeper's candidate snapshot and
+        // that row's eviction turn (a star PATCH commits outside the maintenance lock). The atomic
+        // claim re-checks starred INSIDE the pruning UPDATE, so the claim fails, the file survives,
+        // and eviction moves on to the next candidate.
+        settings.get().retentionCapGb = 1;
+        long gib = 1024L * 1024 * 1024;
+
+        long oldest = seedWithFiles("old.mp4", "old.jpg", 2 * gib, 1_000L, false);
+        long newer = seedWithFiles("new.mp4", "new.jpg", gib, 2_000L, false);
+
+        MatchRepository racingMatches = spy(matches);
+        doAnswer(inv -> {
+            Object candidates = inv.callRealMethod();
+            matches.setStarred(oldest, true); // the star lands right after the snapshot
+            return candidates;
+        }).when(racingMatches).findSweepCandidates();
+        RetentionSweeper racy = new RetentionSweeper(racingMatches, clips, settings, events);
+
+        RetentionSweeper.SweepResult result = racy.sweep(null);
+
+        // The freshly-starred oldest match survives: file intact, row untouched, no freed credit.
+        assertThat(Files.exists(videoDir.resolve("old.mp4")))
+                .as("a match starred after the candidate snapshot must never be deleted")
+                .isTrue();
+        var survivor = matches.findById(oldest).orElseThrow();
+        assertThat(survivor.videoPath()).isNotNull();
+        assertThat(survivor.starred()).isTrue();
+        // The pass still evicted the next (non-starred) candidate.
+        assertThat(result.deletedIds()).containsExactly(newer);
+        assertThat(result.freedBytes()).isEqualTo(gib);
+        assertThat(Files.exists(videoDir.resolve("new.mp4"))).isFalse();
+    }
+
+    @Test
+    void ambiguousStatFailureSkipsEvictionForTheCycle() throws Exception {
+        // One reachable file's stat fails for a reason OTHER than the file being gone (e.g. an I/O
+        // error), so its size is only the DB snapshot — a guess. Evicting real recordings against a
+        // guessed total is worse than sweeping an hour late: the whole eviction pass is skipped and
+        // every file survives untouched until a clean measurement.
+        settings.get().retentionCapGb = 1;
+        long gib = 1024L * 1024 * 1024;
+
+        long flaky = seedWithFiles("flaky.mp4", "flaky.jpg", 2 * gib, 1_000L, false);
+        long healthy = seedWithFiles("healthy.mp4", "healthy.jpg", gib, 2_000L, false);
+
+        RetentionSweeper.FileSizeProbe failingStat = file -> {
+            if (file.getFileName().toString().equals("flaky.mp4")) {
+                throw new java.io.IOException("simulated I/O error");
+            }
+            return Files.size(file);
+        };
+        RetentionSweeper cautious = new RetentionSweeper(
+                matches, clips, settings, events, new StorageMaintenanceLock(),
+                dir -> Files.getFileStore(dir).getTotalSpace(),
+                dir -> Files.getFileStore(dir).getUsableSpace(),
+                failingStat);
+
+        RetentionSweeper.SweepResult result = cautious.sweep(null);
+
+        // Over cap (3 GiB measured vs 1 GiB) but ambiguous: nothing is deleted this cycle.
+        assertThat(result.deletedIds()).isEmpty();
+        assertThat(result.freedBytes()).isZero();
+        assertThat(Files.exists(videoDir.resolve("flaky.mp4"))).isTrue();
+        assertThat(Files.exists(videoDir.resolve("healthy.mp4"))).isTrue();
+        assertThat(matches.findById(flaky).orElseThrow().videoPath()).isNotNull();
+        assertThat(matches.findById(healthy).orElseThrow().videoPath()).isNotNull();
+        verify(events, never()).publish(eq("retention.swept"), any());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void scheduledSweepPassRunsTheFreeSpaceCheck() {
+        long gib = 1024L * 1024 * 1024;
+        // Inject a low-disk usable-space probe and drive the SCHEDULED no-arg entry point: the pass
+        // must run the free-space check so its {scope:"disk"} warning actually reaches the bridge WS
+        // (the check previously had only test callers).
+        RetentionSweeper.UsableSpaceProbe lowDisk = dir -> gib;
+        RetentionSweeper scheduled = new RetentionSweeper(
+                matches, clips, settings, events, new StorageMaintenanceLock(),
+                dir -> 100L * gib, lowDisk);
+
+        scheduled.sweep();
+
+        ArgumentCaptor<Object> payload = ArgumentCaptor.forClass(Object.class);
+        verify(events).publish(eq("error"), payload.capture());
+        assertThat(((Map<String, Object>) payload.getValue()).get("scope")).isEqualTo("disk");
     }
 
     @Test
