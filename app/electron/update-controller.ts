@@ -63,6 +63,11 @@ export class UpdateController {
   // Guards against issuing a second downloadUpdate for the same available update (e.g. a
   // retry firing after the download already started).
   private downloading = false;
+  // Latched once an install is committed, so rapid "Restart to update" clicks can't each run a
+  // supervisor teardown / spawn a second NSIS installer. Cleared only on a recording-deferral
+  // (where the user will retry after the match); once doInstall runs it stays latched — the
+  // process is exiting.
+  private installing = false;
   private cancelCheck: Cancel | null = null;
   private cancelRetry: Cancel | null = null;
   private started = false;
@@ -113,8 +118,14 @@ export class UpdateController {
    * UI shows the deferral copy. Otherwise it hands off to doInstall(), which exits the process.
    */
   async installNow(): Promise<void> {
+    if (this.installing) return;
     if (this.snapshot.status !== 'downloaded') return;
+    // Latch synchronously BEFORE the await so two near-simultaneous clicks can't both pass the
+    // busy check and both call doInstall (concurrent teardowns / a duplicate NSIS installer).
+    this.installing = true;
     if (await this.deps.isBusy()) {
+      // Not installing after all — release the latch so the user can retry once the match ends.
+      this.installing = false;
       this.deps.log('[updater] install requested while recording; deferring');
       this.set({ ...this.snapshot, recording: true });
       // Poll the recording gate so the "can't restart now" flag clears once the match ends,
@@ -126,6 +137,28 @@ export class UpdateController {
     }
     this.deps.log('[updater] installing downloaded update');
     this.deps.doInstall();
+  }
+
+  /**
+   * React to an autoUpdate pref change. Enabling re-checks (an already-available update then starts
+   * downloading). Disabling drops a deferred-download retry and its stale "download will start once
+   * you're not recording" promise — a fully downloaded update is left installable regardless.
+   */
+  onAutoUpdateChanged(enabled: boolean): void {
+    if (enabled) {
+      this.check();
+      return;
+    }
+    if (this.snapshot.status === 'available') {
+      this.clearRetry();
+      if (this.snapshot.recording) {
+        this.set({
+          status: 'available',
+          ...(this.snapshot.version !== undefined ? { version: this.snapshot.version } : {}),
+          ...(this.snapshot.notesUrl !== undefined ? { notesUrl: this.snapshot.notesUrl } : {}),
+        });
+      }
+    }
   }
 
   /**
