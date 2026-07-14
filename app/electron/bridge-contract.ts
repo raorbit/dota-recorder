@@ -22,4 +22,10 @@ export interface DotaRecBridge {
   // right-click "Reveal in folder" action. A blank/missing path is a no-op. The renderer
   // is sandboxed and has no shell access, so this round-trips to the main process.
   readonly revealPath: (path: string) => Promise<void>;
+  // Window controls for the frameless window's custom title bar (WindowFrame).
+  // Close hides to the tray, not quits — it goes through the same close handler
+  // as the (removed) native X.
+  readonly minimizeWindow: () => Promise<void>;
+  readonly maximizeToggleWindow: () => Promise<void>;
+  readonly closeWindow: () => Promise<void>;
 }

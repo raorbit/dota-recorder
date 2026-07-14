@@ -9,9 +9,10 @@ interface WindowFrameProps {
 // chrome (section 07): a CSS-diamond logo mark on a red gradient, the wordmark, and
 // the min / max / close window glyphs on the right.
 //
-// The control glyphs are visual placeholders for now — real window controls would
-// route through the Electron main process. They are kept inert (non-interactive)
-// so the chrome reads correctly without pretending to work.
+// The window is frameless (BrowserWindow frame: false), so these are the real
+// controls, routed to the main process over the preload bridge. Close hides to the
+// tray, matching the app's close-to-tray behavior. Outside Electron (plain browser
+// dev) the bridge is absent and the buttons no-op.
 export function WindowFrame({ children }: WindowFrameProps): React.JSX.Element {
   return (
     <div className="wf-root">
@@ -21,10 +22,31 @@ export function WindowFrame({ children }: WindowFrameProps): React.JSX.Element {
         </span>
         <span className="wf-title">DOTA 2 RECORDER</span>
         <span className="wf-spacer" />
-        <div className="wf-controls" aria-hidden="true">
-          <span className="wf-ctl">&#x2013;</span>
-          <span className="wf-ctl">&#x25A2;</span>
-          <span className="wf-ctl wf-ctl-close">&#x2715;</span>
+        <div className="wf-controls">
+          <button
+            type="button"
+            className="wf-ctl"
+            aria-label="Minimize"
+            onClick={() => void window.dotarec?.minimizeWindow()}
+          >
+            &#x2013;
+          </button>
+          <button
+            type="button"
+            className="wf-ctl"
+            aria-label="Maximize or restore"
+            onClick={() => void window.dotarec?.maximizeToggleWindow()}
+          >
+            &#x25A2;
+          </button>
+          <button
+            type="button"
+            className="wf-ctl wf-ctl-close"
+            aria-label="Close to tray"
+            onClick={() => void window.dotarec?.closeWindow()}
+          >
+            &#x2715;
+          </button>
         </div>
       </header>
       <div className="wf-body">{children}</div>
