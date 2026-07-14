@@ -94,8 +94,23 @@ nsis:
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
-  artifactName: ${productName}-Setup-${version}.${ext}
+  # Hardcoded dashed name (not ${productName}, which contains spaces; not ${name}, which is the
+  # scoped @dota-recorder/app). latest.yml records electron-builder's *safeArtifactName* — the
+  # dashed form — so a spaced on-disk filename diverges from the manifest and electron-updater
+  # 404s against the GitHub release asset. Keeping the artifact name space-free makes disk name,
+  # latest.yml url, and uploaded asset name identical. scripts/verify-release.mjs enforces this.
+  artifactName: Dota-2-Recorder-Setup-${version}.${ext}
   # Custom install/uninstall hooks (project-root-relative; the default build/installer.nsh
   # would miss our build-resources/ buildResources dir). Adds an elevated Windows Firewall
   # rule scoping the managed OBS websocket port (4466) to loopback — issue #14.
   include: build-resources/installer.nsh
+
+# Bakes app-update.yml (electron-updater's feed config) into resources/ at package time — without
+# it the updater has no feed and errors at runtime. This does NOT upload anything: publishing
+# stays manual (`gh release create` with the .exe + .exe.blockmap + latest.yml, all from the same
+# build), and the dist script passes --publish never so a stray GH_TOKEN in the env can never
+# trigger an accidental upload.
+publish:
+  provider: github
+  owner: raorbit
+  repo: dota-recorder
