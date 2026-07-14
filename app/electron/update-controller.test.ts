@@ -231,6 +231,32 @@ describe('UpdateController', () => {
     expect(h.deps.triggerDownload).toHaveBeenCalledTimes(1);
   });
 
+  it('serializes concurrent install requests (no double doInstall)', async () => {
+    const h = harness({ busy: false });
+    h.controller.onUpdateDownloaded('7.0.0');
+    await Promise.all([h.controller.installNow(), h.controller.installNow()]);
+    expect(h.deps.doInstall).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears a deferred-download deferral (and its retry) when auto-update is disabled', async () => {
+    const h = harness({ enabled: true, busy: true });
+    h.controller.onUpdateAvailable('8.0.0', 'url');
+    await flush();
+    expect(h.controller.getState()).toMatchObject({ status: 'available', recording: true });
+    h.setEnabled(false);
+    h.controller.onAutoUpdateChanged(false);
+    expect(h.controller.getState().status).toBe('available');
+    expect(h.controller.getState().recording).toBeUndefined();
+    // The pending retry was cancelled.
+    expect(h.tasks.find((t) => t.ms === 2000 && !t.cancelled)).toBeUndefined();
+  });
+
+  it('re-checks when auto-update is re-enabled', () => {
+    const h = harness({ enabled: false });
+    h.controller.onAutoUpdateChanged(true);
+    expect(h.deps.triggerCheck).toHaveBeenCalledTimes(1);
+  });
+
   it('clears the install-deferral recording flag once the match ends (without auto-installing)', async () => {
     const h = harness({ busy: true });
     h.controller.onUpdateDownloaded('6.0.0');
