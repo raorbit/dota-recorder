@@ -105,3 +105,77 @@
   font-weight: 600;
   color: var(--text);
 }
+
+/* Update status card: a title row with an inline "Check now" link, optional refusal copy,
+   and (when downloaded) a "Restart to update" action button. Reuses the .gen-note surface. */
+.gen-update-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.gen-note-title[data-ready='true'] {
+  color: var(--accent);
+}
+
+.gen-update-warn {
+  margin-top: 8px;
+  color: var(--gold);
+}
+
+.gen-update-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+/* Accent action button, mirroring the sidebar's stop button. */
+.gen-action-btn {
+  padding: 7px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--accent);
+  background: var(--accent-tint-strong);
+  color: var(--accent);
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition:
+    background 120ms ease,
+    color 120ms ease;
+}
+
+.gen-action-btn:hover:not(:disabled) {
+  background: var(--accent);
+  color: #fff;
+}
+
+.gen-action-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* Muted inline text button ("Check now", "Release notes"). */
+.gen-linkbtn {
+  flex: none;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  font-family: var(--font-body);
+  font-size: 12px;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.gen-linkbtn:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.gen-linkbtn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
