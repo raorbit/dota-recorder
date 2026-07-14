@@ -42,6 +42,15 @@ dependencyManagement {
             entry("jetty-alpn-client")
             entry("jetty-xml")
         }
+        // Keep the websocket jars on the SAME 9.4 patch as the support jars above. The
+        // obs-websocket client's transitive websocket-client/common/api otherwise stay at
+        // the 9.4.49 they were declared against, mixing 9.4 patch levels on one classpath --
+        // exactly the skew shape this pin block exists to prevent.
+        dependencySet("org.eclipse.jetty.websocket:9.4.58.v20250814") {
+            entry("websocket-client")
+            entry("websocket-common")
+            entry("websocket-api")
+        }
     }
 }
 
