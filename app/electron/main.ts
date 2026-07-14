@@ -16,8 +16,10 @@ import { SupervisionController } from './supervision';
 import { pathIsAccessible, revealablePath } from './reveal-path-guard';
 import {
   applyLaunchAtLogin,
+  getAutoUpdate,
   getLaunchAtLogin,
   HIDDEN_LAUNCH_ARG,
+  setAutoUpdate,
   setLaunchAtLogin,
 } from './app-prefs';
 import {
@@ -28,6 +30,9 @@ import {
   logDir,
   packagedIndexHtml,
 } from './paths';
+import { UpdateController } from './update-controller';
+import { initUpdater, releaseNotesUrl, type UpdaterHandle } from './updater';
+import type { UpdateState } from './bridge-contract';
 
 const isDev = process.env.DOTAREC_DEV === '1' || !app.isPackaged;
 const DEV_SERVER_URL = 'http://localhost:5173';
@@ -51,9 +56,22 @@ let obsSupervisor: ObsSupervisor | null = null;
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let shuttingDown = false;
+// Set once the supervisors have been torn down for an in-progress quitAndInstall, so the
+// before-quit handler lets Electron actually quit (rather than preventDefault + re-teardown)
+// and the pending NSIS installer — already spawned, waiting for our process to exit — can
+// replace the files. Without this, quitAndInstall's internal app.quit() deadlocks against
+// before-quit's preventDefault (shutdown() early-returns on shuttingDown, so nothing ever
+// calls app.exit()).
+let supervisorsStopped = false;
 // True once a REAL quit is underway (tray Quit / menu Quit / before-quit), so the
 // window 'close' handler knows to actually close instead of hiding to the tray.
 let isQuitting = false;
+// Auto-update policy + electron-updater handle, wired in initAutoUpdate() (packaged only).
+// null in dev / before init. latestUpdateState is the last pushed snapshot, served to the
+// renderer's one-shot updates:getState poll.
+let updateController: UpdateController | null = null;
+let updaterHandle: UpdaterHandle | null = null;
+let latestUpdateState: UpdateState = { status: 'idle' };
 // One-time "we're still in the tray" hint, shown the first time the window is hidden so
 // closing the window doesn't look like the app vanished.
 let trayHintShown = false;
@@ -94,6 +112,13 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(bootstrap).catch(fatal);
 
   app.on('before-quit', (event) => {
+    if (supervisorsStopped) {
+      // An update install is underway: installUpdateNow() already tore the supervisors down
+      // and called quitAndInstall, whose internal app.quit() lands here. Let the quit proceed
+      // so the pending installer can replace the files — do NOT preventDefault (that would
+      // deadlock the install).
+      return;
+    }
     // Mark a real quit so the window 'close' handler stops hiding to the tray, then
     // defer the actual exit until the JVM/OBS are stopped so we never orphan them.
     isQuitting = true;
@@ -123,6 +148,45 @@ async function bootstrap(): Promise<void> {
   // Launch OBS in the background so a slow or failed OBS never blocks the UI; the
   // status card reflects OBS connectivity from /status as the core connects to it.
   void supervision.launchObs();
+  // electron-updater only works in a packaged build (needs app-update.yml); in dev the
+  // whole update stack stays dormant and the renderer's update UI degrades to "unavailable".
+  if (!isDev) initAutoUpdate();
+}
+
+/**
+ * Wire the electron-updater adapter to the (testable) UpdateController and arm the check
+ * cadence. Packaged builds only. The controller decides WHEN to download/install (gated on
+ * "not recording" via the core's /status); the adapter performs the electron-updater calls.
+ */
+function initAutoUpdate(): void {
+  updaterHandle = initUpdater(
+    {
+      onChecking: () => updateController?.onCheckingForUpdate(),
+      onAvailable: (version, notesUrl) => updateController?.onUpdateAvailable(version, notesUrl),
+      onNotAvailable: () => updateController?.onUpdateNotAvailable(),
+      onProgress: (percent) => updateController?.onDownloadProgress(percent),
+      onDownloaded: (version) => updateController?.onUpdateDownloaded(version),
+      onError: (message) => updateController?.onError(message),
+    },
+    logLine,
+  );
+  updateController = new UpdateController({
+    triggerCheck: () => updaterHandle?.check(),
+    triggerDownload: () => updaterHandle?.download(),
+    isBusy: isRecordingBusy,
+    doInstall: () => void installUpdateNow(),
+    emit: (state) => {
+      latestUpdateState = state;
+      mainWindow?.webContents.send('updates:state', state);
+    },
+    log: logLine,
+    isEnabled: () => getAutoUpdate(),
+    schedule: (fn, ms) => {
+      const timer = setTimeout(fn, ms);
+      return () => clearTimeout(timer);
+    },
+  });
+  updateController.start();
 }
 
 /** Renderer-driven get/set for the app-level prefs (currently launch-at-login). */
@@ -133,6 +197,31 @@ function registerPrefsIpc(): void {
   ipcMain.handle('prefs:setLaunchAtLogin', (_event, value: unknown) =>
     setLaunchAtLogin(value === true),
   );
+  // Auto-update pref + lifecycle. getAutoUpdate/setAutoUpdate own the background-download
+  // gate; enabling it kicks a check so an already-available update starts downloading.
+  ipcMain.removeHandler('prefs:getAutoUpdate');
+  ipcMain.handle('prefs:getAutoUpdate', () => getAutoUpdate());
+  ipcMain.removeHandler('prefs:setAutoUpdate');
+  ipcMain.handle('prefs:setAutoUpdate', (_event, value: unknown) => {
+    const applied = setAutoUpdate(value === true);
+    if (applied) updateController?.check();
+    return applied;
+  });
+  ipcMain.removeHandler('updates:getState');
+  ipcMain.handle('updates:getState', () => latestUpdateState);
+  ipcMain.removeHandler('updates:check');
+  ipcMain.handle('updates:check', () => updateController?.check() ?? latestUpdateState);
+  ipcMain.removeHandler('updates:installNow');
+  // Refusal while recording is surfaced via a pushed {recording:true} state, not the return.
+  ipcMain.handle('updates:installNow', async () => {
+    await updateController?.installNow();
+  });
+  // Release notes open in the OS browser; the main process builds the URL from the version so
+  // the renderer can't point shell.openExternal at an arbitrary target.
+  ipcMain.removeHandler('shell:openReleaseNotes');
+  ipcMain.handle('shell:openReleaseNotes', async (_event, version: unknown) => {
+    await shell.openExternal(releaseNotesUrl(typeof version === 'string' ? version : undefined));
+  });
   // Reveal a recording in Explorer (right-click "Reveal in folder"): selects the file in its folder.
   // shell.showItemInFolder only opens the OS file manager — it never reads, writes, or executes the
   // target — but the path is renderer-supplied (ultimately a DB video_path), so revealablePath()
@@ -428,20 +517,72 @@ function createWindow(): void {
   }
 }
 
+/**
+ * Tear down OBS then the core (best-effort). Shared by the normal quit path ({@link shutdown})
+ * and the update-install path ({@link installUpdateNow}) so both reap the children before the
+ * process exits — neither may orphan obs64.exe / javaw.exe holding locks under the install dir
+ * (which would make the NSIS update fail its atomic-rename and roll back).
+ */
+async function stopSupervisors(): Promise<void> {
+  // Stop OBS first so the core can observe a clean disconnect, then the core.
+  await stopObsSupervisor();
+  try {
+    await supervisor.stop();
+  } catch {
+    /* best-effort - we are exiting regardless. */
+  }
+}
+
 async function shutdown(): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
   try {
-    // Stop OBS first so the core can observe a clean disconnect, then the core.
-    if (obsSupervisor) {
-      await obsSupervisor.stop();
-    }
-    await supervisor.stop();
-  } catch {
-    /* best-effort - we are exiting regardless. */
+    await stopSupervisors();
   } finally {
     app.exit(0);
   }
+}
+
+/**
+ * The recording gate for auto-update: true when a match is recording, arming, or stopping, so an
+ * update download/install never interrupts a match. Reads the core's GET /status (idle ⇔
+ * !obs.recording && fsm.state === 'IDLE'; ARMED/RECORDING/STOPPING all count as busy — OBS may
+ * already be rolling in ARMED). FAIL-SAFE TO BUSY: any timeout / non-200 / unparseable body
+ * returns true, so an unreachable or 401ing core never green-lights an install.
+ */
+async function isRecordingBusy(): Promise<boolean> {
+  try {
+    const res = await fetch(`${BRIDGE_BASE}/status`, {
+      signal: AbortSignal.timeout(1_500),
+      headers: { [BRIDGE_TOKEN_HEADER]: bridgeToken },
+    });
+    if (!res.ok) return true;
+    const body = (await res.json()) as {
+      obs?: { recording?: boolean };
+      fsm?: { state?: string };
+    };
+    const recording = body.obs?.recording === true;
+    const idleFsm = body.fsm?.state === 'IDLE';
+    return recording || !idleFsm;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Install a downloaded update: tear the supervisors down ourselves, then quitAndInstall. The
+ * recording gate was already checked by {@link UpdateController.installNow}. supervisorsStopped is
+ * set BEFORE quitAndInstall so the before-quit handler (which quitAndInstall's internal app.quit()
+ * triggers) lets the quit proceed rather than re-running shutdown() — otherwise the two deadlock.
+ * shuttingDown is set too so crash supervision treats the teardown as intentional, not a crash.
+ */
+async function installUpdateNow(): Promise<void> {
+  logLine('[updater] installing update: stopping supervisors then quitAndInstall');
+  isQuitting = true;
+  shuttingDown = true;
+  supervisorsStopped = true;
+  await stopSupervisors();
+  updaterHandle?.quitAndInstall();
 }
 
 function fatal(err: unknown): void {
