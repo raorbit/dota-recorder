@@ -10,9 +10,12 @@ import * as path from 'node:path';
 export interface AppPrefs {
   // Start the app automatically when the user signs in to Windows (hidden in the tray).
   readonly launchAtLogin: boolean;
+  // Download app updates in the background and offer a one-click "Restart to update".
+  // Defaults ON (unlike launchAtLogin) so users stay current without opting in.
+  readonly autoUpdate: boolean;
 }
 
-const DEFAULTS: AppPrefs = { launchAtLogin: false };
+const DEFAULTS: AppPrefs = { launchAtLogin: false, autoUpdate: true };
 
 // Arg the auto-start (login) launch carries so the app knows to start hidden in the
 // tray rather than popping a window on every sign-in.
@@ -25,7 +28,12 @@ function prefsPath(): string {
 export function readPrefs(): AppPrefs {
   try {
     const parsed = JSON.parse(fs.readFileSync(prefsPath(), 'utf8')) as Partial<AppPrefs>;
-    return { launchAtLogin: parsed.launchAtLogin === true };
+    return {
+      launchAtLogin: parsed.launchAtLogin === true,
+      // Default TRUE: a missing/undefined value means "on" (opt-out), so coerce with
+      // !== false rather than === true.
+      autoUpdate: parsed.autoUpdate !== false,
+    };
   } catch {
     // Missing or unreadable prefs are normal on first run: fall back to defaults.
     return { ...DEFAULTS };
@@ -48,6 +56,17 @@ export function setLaunchAtLogin(value: boolean): boolean {
   writePrefs({ ...readPrefs(), launchAtLogin: value });
   applyLaunchAtLogin();
   return getLaunchAtLogin();
+}
+
+export function getAutoUpdate(): boolean {
+  return readPrefs().autoUpdate;
+}
+
+// Unlike launchAtLogin there is no OS side-effect to reconcile: whichever module owns
+// electron-updater reads getAutoUpdate() when deciding whether to auto-download.
+export function setAutoUpdate(value: boolean): boolean {
+  writePrefs({ ...readPrefs(), autoUpdate: value });
+  return getAutoUpdate();
 }
 
 /**
