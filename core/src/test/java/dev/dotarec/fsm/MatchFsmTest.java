@@ -66,6 +66,8 @@ class MatchFsmTest {
         Runnable duringStart;
         /** When true, startRecording() throws ObsException while connected (a rejected/timeout start). */
         boolean startThrows;
+        /** When true, startRecording() throws a non-ObsException RuntimeException (a raw library fault). */
+        boolean startThrowsRuntime;
 
         @Override public void connect() { }
         @Override public boolean ensureConnected() { return connected; }
@@ -81,6 +83,9 @@ class MatchFsmTest {
             }
             if (startThrows) {
                 throw new ObsException("StartRecord rejected by OBS");
+            }
+            if (startThrowsRuntime) {
+                throw new IllegalStateException("obs-websocket library failure");
             }
             confirmedAt = nextConfirmedAt != null ? nextConfirmedAt : Instant.now();
             recording = true;
@@ -190,6 +195,20 @@ class MatchFsmTest {
         // A StartRecord that never confirms (throws) must leave the FSM back at IDLE: onFrame's
         // default case no-ops on ARMED, so a lingering ARMED would wedge recording for the session.
         obs.startThrows = true;
+
+        fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
+
+        assertThat(fsm.getState()).isEqualTo(MatchState.IDLE);
+        assertThat(obs.startCalls).isEqualTo(1);
+    }
+
+    @Test
+    void failedStart_nonObsRuntimeException_alsoResetsToIdle_notStuckArmed() {
+        // A non-ObsException escaping the OBS client (e.g. the library rethrowing an interrupt as a
+        // bare RuntimeException) must ALSO un-arm the FSM. Otherwise, now that we flip to ARMED before
+        // the blocking start, it would linger in ARMED forever — silently killing recording for the
+        // whole session and pinning the auto-update gate busy.
+        obs.startThrowsRuntime = true;
 
         fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
 
