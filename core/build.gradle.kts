@@ -32,9 +32,9 @@ dependencyManagement {
         // Jetty 10+. Spring Boot's BOM otherwise bumps the transitive jetty support artifacts
         // (util/io/http/client/...) to 12.x, so the 9.4 websocket-client fails to initialize at
         // runtime (NoClassDefFoundError) and OBS never connects -> no recording. Nothing else uses
-        // Jetty (Spring runs on embedded Tomcat), so pin the whole support graph to the matching
-        // 9.4.49 line that the websocket-client expects.
-        dependencySet("org.eclipse.jetty:9.4.49.v20220914") {
+        // Jetty (Spring runs on embedded Tomcat), so pin the whole support graph to the 9.4
+        // line the websocket-client expects (9.4.58 is the final 9.4 release; the line is EOL).
+        dependencySet("org.eclipse.jetty:9.4.58.v20250814") {
             entry("jetty-util")
             entry("jetty-io")
             entry("jetty-http")
@@ -54,7 +54,7 @@ dependencies {
 
     // SQLite access via plain JDBC. JOOQ codegen is a documented TODO below
     // and is intentionally NOT wired for the v0.1 foundation.
-    implementation("org.xerial:sqlite-jdbc:3.46.1.0")
+    implementation("org.xerial:sqlite-jdbc:3.53.2.0")
 
     // Connection pool for the SQLite DataSource. The GSI feed drives ~10Hz journal writes during a
     // recording; an unpooled SQLiteDataSource opens/closes a physical file handle (re-running the
