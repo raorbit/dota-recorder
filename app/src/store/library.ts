@@ -28,6 +28,7 @@ import {
   type DiskWarning,
 } from '../api/client';
 import type { Bucket } from './buckets';
+import type { UpdateState } from '../../electron/bridge-contract';
 import { mergeLibraryLoad } from '../lib/library-load';
 import {
   isOrphanedRecording,
@@ -73,6 +74,10 @@ export interface LibraryState {
   // is outstanding. Backs a visible banner; the wiring also fires a debounced OS notification. Set by
   // the socket subscription in startLibrary; cleared via setDiskWarning(null) when a banner is dismissed.
   readonly diskWarning: DiskWarning | null;
+  // Latest app-update snapshot pushed by the Electron main process (electron-updater), or null
+  // outside Electron / before the first push. Drives the Settings update row + the Sidebar
+  // "update ready" dot. Fed by startLibrary's onUpdateState subscription.
+  readonly update: UpdateState | null;
 
   // --- filters / selection ---
   readonly bucket: Bucket;
@@ -111,6 +116,7 @@ export interface LibraryState {
   // Permanently delete one clip (the Clips bucket's right-click delete).
   readonly deleteClip: (id: number) => Promise<void>;
   readonly setDiskWarning: (warning: DiskWarning | null) => void;
+  readonly setUpdate: (update: UpdateState | null) => void;
   // A `silent` reload (reconnect reconciliation) refreshes in the background without flipping the
   // table to its loading spinner, so an open player isn't torn down on every reconnect.
   readonly load: (opts?: { readonly silent?: boolean }) => Promise<void>;
@@ -141,6 +147,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
     status: null,
     loadState: 'idle',
     diskWarning: null,
+    update: null,
 
     bucket: 'ranked',
     resultFilter: 'all',
@@ -166,6 +173,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
       })),
     setStatus: (status) => set({ status }),
     setDiskWarning: (diskWarning) => set({ diskWarning }),
+    setUpdate: (update) => set({ update }),
 
     // Star/unstar a match: flip it locally for instant feedback, then persist via
     // PATCH /matches/{id}. Starred recordings are exempt from the retention sweep, so
@@ -354,6 +362,17 @@ export function startLibrary(): () => void {
   };
   void primeStatus();
 
+  // App-update state (Electron only): prime the current snapshot from the main process, then
+  // subscribe to pushes as the update lifecycle advances. window.dotarec is absent in
+  // plain-browser dev, so both calls no-op there (offUpdate stays undefined).
+  void (async () => {
+    const state = await window.dotarec?.getUpdateState?.();
+    if (state) useLibraryStore.getState().setUpdate(state);
+  })();
+  const offUpdate = window.dotarec?.onUpdateState?.((state) => {
+    useLibraryStore.getState().setUpdate(state);
+  });
+
   const socket = new StatusSocket();
 
   // Orphaned-recording notification: fire a single OS notification once OBS has been recording an
@@ -454,6 +473,7 @@ export function startLibrary(): () => void {
     offDisk();
     off();
     offClips();
+    offUpdate?.();
     clearOrphanTimer();
     if (reloadTimer !== null) clearTimeout(reloadTimer);
     socket.close();

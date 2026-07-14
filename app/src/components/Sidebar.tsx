@@ -81,6 +81,8 @@ export function Sidebar({
   const activeBucket = useLibraryStore((s) => s.bucket);
   const status = useLibraryStore((s) => s.status);
   const setBucket = useLibraryStore((s) => s.setBucket);
+  // An update that's downloaded and waiting to install lights an accent dot on the version pill.
+  const updateReady = useLibraryStore((s) => s.update?.status === 'downloaded');
 
   const card = deriveStatus(status);
 
@@ -218,7 +220,16 @@ export function Sidebar({
         ))}
       </div>
 
-      <div className="sb-version">v{__APP_VERSION__}</div>
+      <div className="sb-version">
+        v{__APP_VERSION__}
+        {updateReady && (
+          <span
+            className="sb-version-dot"
+            title="An update is ready — open General settings to restart and install"
+            aria-label="Update ready"
+          />
+        )}
+      </div>
     </aside>
   );
 }
