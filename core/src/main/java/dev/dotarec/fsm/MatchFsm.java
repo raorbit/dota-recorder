@@ -392,6 +392,16 @@ public class MatchFsm {
             this.state = MatchState.IDLE;
             log.warn("Recording not confirmed by OBS: {}; staying IDLE", e.getMessage());
             return;
+        } catch (RuntimeException e) {
+            // Any OTHER unchecked failure from the OBS client (e.g. the obs-websocket library
+            // rethrowing a thread interrupt as a bare RuntimeException) must ALSO un-arm the FSM.
+            // Since we now flip to ARMED before this blocking call, a throw that escaped would strand
+            // the FSM in ARMED forever -- onFrame no-ops on ARMED, so recording silently dies for the
+            // whole session AND the auto-update recording gate reads busy forever. Reset to IDLE and
+            // retry on the next frame, mirroring the stop path's RuntimeException tolerance.
+            this.state = MatchState.IDLE;
+            log.warn("Unexpected error starting recording; staying IDLE", e);
+            return;
         }
 
         RecordingSession s = new RecordingSession();
