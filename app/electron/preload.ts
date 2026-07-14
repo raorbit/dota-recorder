@@ -11,7 +11,7 @@
 // (the loopback host/port and token arg prefix are frozen by the runtime contract),
 // and DotaRecBridge is a type-only import (elided at compile time, no require).
 import { contextBridge, ipcRenderer } from 'electron';
-import type { DotaRecBridge } from './bridge-contract';
+import type { DotaRecBridge, UpdateState } from './bridge-contract';
 
 const BRIDGE_HOST = '127.0.0.1';
 const BRIDGE_PORT = 3224;
@@ -39,6 +39,23 @@ const bridge: DotaRecBridge = {
   minimizeWindow: () => ipcRenderer.invoke('window:minimize') as Promise<void>,
   maximizeToggleWindow: () => ipcRenderer.invoke('window:maximizeToggle') as Promise<void>,
   closeWindow: () => ipcRenderer.invoke('window:close') as Promise<void>,
+  getAutoUpdate: () => ipcRenderer.invoke('prefs:getAutoUpdate') as Promise<boolean>,
+  setAutoUpdate: (value: boolean) =>
+    ipcRenderer.invoke('prefs:setAutoUpdate', value) as Promise<boolean>,
+  getUpdateState: () => ipcRenderer.invoke('updates:getState') as Promise<UpdateState>,
+  checkForUpdates: () => ipcRenderer.invoke('updates:check') as Promise<UpdateState>,
+  installUpdateNow: () => ipcRenderer.invoke('updates:installNow') as Promise<void>,
+  onUpdateState: (cb: (state: UpdateState) => void) => {
+    // Wrap so the raw IpcRendererEvent never reaches the callback, and return an unsubscribe
+    // so a React effect can detach on unmount (ipcRenderer.on otherwise leaks per remount).
+    const listener = (_event: unknown, state: UpdateState): void => cb(state);
+    ipcRenderer.on('updates:state', listener);
+    return () => {
+      ipcRenderer.removeListener('updates:state', listener);
+    };
+  },
+  openReleaseNotes: (version?: string) =>
+    ipcRenderer.invoke('shell:openReleaseNotes', version) as Promise<void>,
 };
 
 contextBridge.exposeInMainWorld('dotarec', bridge);

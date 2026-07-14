@@ -2,6 +2,32 @@
 // renderer. A pure type with NO electron/node imports, so it can be referenced
 // type-only by both the preload (producer) and the renderer's window typing
 // (consumer) without dragging main-process code into the browser bundle.
+
+// Snapshot of the app-update lifecycle the main process pushes to the renderer.
+// `status` drives the update UI; the other fields populate as the flow advances.
+// Shared verbatim by the main-process UpdateController (its own state) and the
+// renderer store, so the wire shape can never drift between producer and consumer.
+export interface UpdateState {
+  readonly status:
+    | 'idle'
+    | 'checking'
+    | 'available'
+    | 'downloading'
+    | 'downloaded'
+    | 'not-available'
+    | 'error';
+  // The available/downloaded version (no leading "v"), when known.
+  readonly version?: string;
+  // 0..100 while status === 'downloading'.
+  readonly percent?: number;
+  // GitHub release-notes URL for `version`, when known.
+  readonly notesUrl?: string;
+  // Human-readable message when status === 'error'.
+  readonly error?: string;
+  // True when a download or install is being held back because a match is recording.
+  readonly recording?: boolean;
+}
+
 export interface DotaRecBridge {
   readonly bridgeBase: string;
   readonly healthUrl: string;
@@ -28,4 +54,21 @@ export interface DotaRecBridge {
   readonly minimizeWindow: () => Promise<void>;
   readonly maximizeToggleWindow: () => Promise<void>;
   readonly closeWindow: () => Promise<void>;
+  // App-update pref the main process owns: gates whether electron-updater downloads
+  // in the background. Both resolve the effective value the main process stored.
+  readonly getAutoUpdate: () => Promise<boolean>;
+  readonly setAutoUpdate: (value: boolean) => Promise<boolean>;
+  // Update lifecycle. getUpdateState returns the current snapshot; checkForUpdates
+  // kicks off a manual check (resolving the snapshot after it starts — real results
+  // arrive via onUpdateState); installUpdateNow quits-and-installs a downloaded update
+  // (no-op, surfaced as recording:true, while a match is recording).
+  readonly getUpdateState: () => Promise<UpdateState>;
+  readonly checkForUpdates: () => Promise<UpdateState>;
+  readonly installUpdateNow: () => Promise<void>;
+  // Main → renderer push of update-state transitions. Returns an unsubscribe fn for
+  // React effect cleanup (ipcRenderer.on otherwise leaks a listener per remount).
+  readonly onUpdateState: (cb: (state: UpdateState) => void) => () => void;
+  // Opens the GitHub release-notes page for a version in the OS browser. The main
+  // process constructs the URL itself, preserving the window's navigation lockdown.
+  readonly openReleaseNotes: (version?: string) => Promise<void>;
 }
