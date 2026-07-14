@@ -372,6 +372,13 @@ public class MatchFsm {
                     orphanedStop.matchRowId);
             this.orphanedStop = null;
         }
+        // Mark the start in-flight BEFORE the blocking OBS call so the recording gate consumed by the
+        // app's auto-update install guard (GET /status -> fsm.state) sees a non-IDLE state during the
+        // StartRecord -> OUTPUT_STARTED window. Otherwise state stays IDLE (and obs.recording stays
+        // false) for up to the OBS start timeout, and an install approved in that window could tear OBS
+        // down mid-arm and lose the opening of the match. Reset to IDLE on a failed start so onFrame
+        // retries on the next frame (onFrame's default case no-ops on ARMED, so it must not linger).
+        this.state = MatchState.ARMED;
         long confirmedNanos;
         try {
             // startRecording() blocks until OBS confirms OUTPUT_STARTED (or throws on timeout/reject),
@@ -382,6 +389,7 @@ public class MatchFsm {
             // immune to an OS/NTP wall-clock step (the wall anchor below is for storage/display only).
             confirmedNanos = time.nanoTime();
         } catch (ObsException e) {
+            this.state = MatchState.IDLE;
             log.warn("Recording not confirmed by OBS: {}; staying IDLE", e.getMessage());
             return;
         }

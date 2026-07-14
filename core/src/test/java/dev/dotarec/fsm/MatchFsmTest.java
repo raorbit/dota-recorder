@@ -61,6 +61,11 @@ class MatchFsmTest {
         String savedPath = "C:\\videos\\match.mkv";
         /** What probeRecordStatus answers; null models an unanswerable OBS. Tests drive it directly. */
         MatchFsm.RecordOutputStatus recordStatus;
+        /** Hook run inside startRecording() BEFORE recording flips true, so a test can observe the
+         *  FSM's state during the (real: blocking) StartRecord -> OUTPUT_STARTED window. */
+        Runnable duringStart;
+        /** When true, startRecording() throws ObsException while connected (a rejected/timeout start). */
+        boolean startThrows;
 
         @Override public void connect() { }
         @Override public boolean ensureConnected() { return connected; }
@@ -71,6 +76,12 @@ class MatchFsmTest {
                 throw new ObsException("OBS is not connected");
             }
             startCalls++;
+            if (duringStart != null) {
+                duringStart.run();
+            }
+            if (startThrows) {
+                throw new ObsException("StartRecord rejected by OBS");
+            }
             confirmedAt = nextConfirmedAt != null ? nextConfirmedAt : Instant.now();
             recording = true;
             return confirmedAt.toString();
@@ -157,6 +168,32 @@ class MatchFsmTest {
         fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
 
         assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
+        assertThat(obs.startCalls).isEqualTo(1);
+    }
+
+    @Test
+    void arming_reportsArmedDuringTheBlockingStart_soTheGateSeesBusy() {
+        // The real OBS StartRecord blocks until OUTPUT_STARTED; during that window OBS is not yet
+        // recording. The FSM must expose a non-IDLE state so the app's auto-update install gate
+        // (GET /status -> fsm.state) treats the arming match as busy and can't tear OBS down mid-start.
+        MatchState[] during = { null };
+        obs.duringStart = () -> during[0] = fsm.getState();
+
+        fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
+
+        assertThat(during[0]).isEqualTo(MatchState.ARMED);
+        assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
+    }
+
+    @Test
+    void failedStart_resetsToIdle_soOnFrameRetriesRatherThanWedgingArmed() {
+        // A StartRecord that never confirms (throws) must leave the FSM back at IDLE: onFrame's
+        // default case no-ops on ARMED, so a lingering ARMED would wedge recording for the session.
+        obs.startThrows = true;
+
+        fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
+
+        assertThat(fsm.getState()).isEqualTo(MatchState.IDLE);
         assertThat(obs.startCalls).isEqualTo(1);
     }
 
