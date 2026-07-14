@@ -57,15 +57,36 @@
 
 .wf-controls {
   display: flex;
-  gap: 16px;
+  gap: 4px;
   color: var(--text-faint);
   font-size: 15px;
   -webkit-app-region: no-drag;
+  /* Bleed the buttons to the bar's right edge so close sits in the corner. */
+  margin-right: -14px;
+  align-self: stretch;
 }
 
 .wf-ctl {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
   line-height: 1;
   cursor: default;
+}
+
+.wf-ctl:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+}
+
+.wf-ctl-close:hover {
+  background: #c42b1c;
+  color: #fff;
 }
 
 .wf-body {

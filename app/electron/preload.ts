@@ -36,6 +36,9 @@ const bridge: DotaRecBridge = {
   setLaunchAtLogin: (value: boolean) =>
     ipcRenderer.invoke('prefs:setLaunchAtLogin', value) as Promise<boolean>,
   revealPath: (path: string) => ipcRenderer.invoke('shell:revealPath', path) as Promise<void>,
+  minimizeWindow: () => ipcRenderer.invoke('window:minimize') as Promise<void>,
+  maximizeToggleWindow: () => ipcRenderer.invoke('window:maximizeToggle') as Promise<void>,
+  closeWindow: () => ipcRenderer.invoke('window:close') as Promise<void>,
 };
 
 contextBridge.exposeInMainWorld('dotarec', bridge);

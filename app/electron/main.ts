@@ -345,6 +345,9 @@ function createWindow(): void {
     minWidth: 1024,
     minHeight: 640,
     backgroundColor: '#0e0f12',
+    // Frameless: the renderer draws its own title bar (WindowFrame) and drives
+    // minimize/maximize/close over IPC. Resize borders stay native (thickFrame).
+    frame: false,
     show: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -376,6 +379,23 @@ function createWindow(): void {
   // Native folder picker for the recording output-folder Browse button. Renderer-driven over
   // IPC because the renderer is sandboxed and can't open dialogs itself. Registered with handle()
   // (idempotent re-register on window re-create) and parented to the window so it's modal.
+  // Window controls for the frameless window's custom title bar. Close routes
+  // through window.close() so the hide-to-tray close handler above still applies.
+  ipcMain.removeHandler('window:minimize');
+  ipcMain.handle('window:minimize', () => {
+    mainWindow?.minimize();
+  });
+  ipcMain.removeHandler('window:maximizeToggle');
+  ipcMain.handle('window:maximizeToggle', () => {
+    if (!mainWindow) return;
+    if (mainWindow.isMaximized()) mainWindow.unmaximize();
+    else mainWindow.maximize();
+  });
+  ipcMain.removeHandler('window:close');
+  ipcMain.handle('window:close', () => {
+    mainWindow?.close();
+  });
+
   ipcMain.removeHandler('dialog:selectFolder');
   ipcMain.handle('dialog:selectFolder', async (): Promise<string | null> => {
     if (!mainWindow) return null;
