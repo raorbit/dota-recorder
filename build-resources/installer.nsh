@@ -12,13 +12,26 @@
 ;
 ; The two netsh calls are chained in a single elevated cmd (delete-any-stale then add) so install
 ; raises at most one UAC prompt.
+;
+; Both macros are skipped when the installer/uninstaller runs with --updated (electron-updater's
+; silent auto-update path; ${isUpdated} is electron-builder's generated LogicLib predicate for
+; that flag). During an update the OLD version's uninstaller is re-run with --updated before the
+; new files land, so without these guards every auto-update would raise two UAC prompts (the
+; "runas" verb shows the UAC dialog even under /S — SW_HIDE only hides the cmd window) and
+; ExecShellWait blocks the silent installer until each dialog is answered. The rule needs no
+; per-update churn anyway: it is keyed to the port, not the install path, so it stays valid
+; across updates and is only added on a real install and removed on a real uninstall.
 
 !macro customInstall
-  DetailPrint "Scoping the OBS control port (4466) to loopback (may prompt for administrator)..."
-  ExecShellWait "runas" "cmd.exe" '/c netsh advfirewall firewall delete rule name="Dota 2 Recorder OBS WebSocket" protocol=TCP localport=4466 & netsh advfirewall firewall add rule name="Dota 2 Recorder OBS WebSocket" dir=in action=block protocol=TCP localport=4466' SW_HIDE
+  ${ifNot} ${isUpdated}
+    DetailPrint "Scoping the OBS control port (4466) to loopback (may prompt for administrator)..."
+    ExecShellWait "runas" "cmd.exe" '/c netsh advfirewall firewall delete rule name="Dota 2 Recorder OBS WebSocket" protocol=TCP localport=4466 & netsh advfirewall firewall add rule name="Dota 2 Recorder OBS WebSocket" dir=in action=block protocol=TCP localport=4466' SW_HIDE
+  ${endIf}
 !macroend
 
 !macro customUnInstall
-  DetailPrint "Removing the OBS control port firewall rule..."
-  ExecShellWait "runas" "cmd.exe" '/c netsh advfirewall firewall delete rule name="Dota 2 Recorder OBS WebSocket" protocol=TCP localport=4466' SW_HIDE
+  ${ifNot} ${isUpdated}
+    DetailPrint "Removing the OBS control port firewall rule..."
+    ExecShellWait "runas" "cmd.exe" '/c netsh advfirewall firewall delete rule name="Dota 2 Recorder OBS WebSocket" protocol=TCP localport=4466' SW_HIDE
+  ${endIf}
 !macroend
