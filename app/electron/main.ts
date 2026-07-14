@@ -204,7 +204,9 @@ function registerPrefsIpc(): void {
   ipcMain.removeHandler('prefs:setAutoUpdate');
   ipcMain.handle('prefs:setAutoUpdate', (_event, value: unknown) => {
     const applied = setAutoUpdate(value === true);
-    if (applied) updateController?.check();
+    // Enabling re-checks (and downloads an already-available update); disabling drops a deferred
+    // download + its stale "will download after recording" status.
+    updateController?.onAutoUpdateChanged(applied);
     return applied;
   });
   ipcMain.removeHandler('updates:getState');
@@ -580,8 +582,13 @@ async function installUpdateNow(): Promise<void> {
   logLine('[updater] installing update: stopping supervisors then quitAndInstall');
   isQuitting = true;
   shuttingDown = true;
-  supervisorsStopped = true;
   await stopSupervisors();
+  // Set this ONLY after teardown completes, immediately before quitAndInstall. If it were set
+  // before the (possibly multi-second) await, a tray Quit landing during teardown would see it in
+  // before-quit and let Electron exit before quitAndInstall ran — silently abandoning the update. A
+  // tray Quit during teardown instead routes through shutdown(), which no-ops on shuttingDown=true,
+  // so the app is held alive until quitAndInstall drives the real exit.
+  supervisorsStopped = true;
   updaterHandle?.quitAndInstall();
 }
 
