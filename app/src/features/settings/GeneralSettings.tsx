@@ -31,9 +31,12 @@ function updateSummary(u: UpdateState | null, autoOn: boolean): { title: string;
     case 'error':
       return { title: 'Update check failed', desc: u.error ?? 'Something went wrong.' };
     case 'not-available':
+      return { title: 'Up to date', desc: "You're on the latest version." };
     case 'idle':
     default:
-      return { title: 'Up to date', desc: "You're on the latest version." };
+      // Before the first check completes (and all session, if auto-update is off) — don't claim
+      // "up to date" without having actually checked.
+      return { title: 'Not checked yet', desc: 'No update check has completed yet.' };
   }
 }
 
