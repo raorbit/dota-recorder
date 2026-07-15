@@ -284,6 +284,36 @@ describe('JvmSupervisor', () => {
 
     expect(lines).toEqual(['line one', 'line two', 'line three']);
   });
+
+  it('redacts a secret split across two stdout chunks (chunk-boundary buffering)', async () => {
+    // A secret straddling two 'data' events must still be scrubbed: the supervisor buffers the partial
+    // trailing line and rejoins the halves before the per-line scrub runs. Without buffering, each half
+    // is scrubbed alone (matching neither) and the secret would leak into the durable electron.log.
+    const lines: string[] = [];
+    const sup = new JvmSupervisor({ bridgeToken: 'secrettoken', onLog: (line) => lines.push(line) });
+    await sup.start();
+
+    children[0].stdout.emit('data', Buffer.from('before secret')); // first half, no newline yet
+    expect(lines).toHaveLength(0); // still buffered — a partial line is not emitted as complete
+    children[0].stdout.emit('data', Buffer.from('token after\n')); // second half completes the line
+
+    expect(lines).toContain('before *** after');
+  });
+
+  it('flushes a buffered partial final line (no trailing newline) on exit, scrubbed', async () => {
+    // A last log line the core wrote without a trailing newline before exiting must still reach the log
+    // — and be scrubbed. It sits in the partial-line buffer until the 'exit' flush.
+    const lines: string[] = [];
+    const sup = new JvmSupervisor({ bridgeToken: 'secrettoken', onLog: (line) => lines.push(line) });
+    await sup.start();
+
+    children[0].stdout.emit('data', Buffer.from('trailing secrettoken')); // no newline
+    expect(lines).not.toContain('trailing ***'); // still buffered, not yet emitted
+
+    children[0].emit('exit', 1, null); // flush the remainder
+
+    expect(lines).toContain('trailing ***');
+  });
 });
 
 describe('JvmSupervisor.stop — hard-kill escalation', () => {

@@ -389,4 +389,43 @@ describe('ObsSupervisor', () => {
 
     expect(lines).toContain('hello world');
   });
+
+  it('redacts a secret split across two stdout chunks (chunk-boundary buffering)', async () => {
+    // A secret straddling two 'data' events must still be scrubbed: the supervisor buffers the partial
+    // trailing line and rejoins the halves before the per-line scrub runs. Without buffering, each half
+    // is scrubbed alone (matching neither) and the password would leak into the durable electron.log.
+    const lines: string[] = [];
+    const sup = new ObsSupervisor({
+      ...baseOpts,
+      password: 'supersecret',
+      onLog: (line) => lines.push(line),
+    });
+    await sup.start();
+    lines.length = 0; // drop the firewall-scoping line start() logs; assert only on the stdout below
+
+    children[0].stdout.emit('data', Buffer.from('pw super')); // first half, no newline yet
+    expect(lines).toHaveLength(0); // still buffered — a partial line is not emitted as complete
+    children[0].stdout.emit('data', Buffer.from('secret done\n')); // second half completes the line
+
+    expect(lines).toContain('pw *** done');
+  });
+
+  it('flushes a buffered partial final line (no trailing newline) on exit, scrubbed', async () => {
+    // A last log line OBS wrote without a trailing newline before exiting must still reach the log —
+    // and be scrubbed. It sits in the partial-line buffer until the 'exit' flush.
+    const lines: string[] = [];
+    const sup = new ObsSupervisor({
+      ...baseOpts,
+      password: 'supersecret',
+      onLog: (line) => lines.push(line),
+    });
+    await sup.start();
+
+    children[0].stdout.emit('data', Buffer.from('bye supersecret')); // no newline
+    expect(lines).not.toContain('bye ***'); // still buffered, not yet emitted
+
+    children[0].emit('exit', 0, null); // flush the remainder
+
+    expect(lines).toContain('bye ***');
+  });
 });

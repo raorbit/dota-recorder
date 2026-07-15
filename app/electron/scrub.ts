@@ -14,3 +14,34 @@ export function scrubSecrets(line: string, secrets: ReadonlyArray<string | undef
   }
   return safe;
 }
+
+export interface ScrubbedChunk {
+  /** Complete, newline-terminated log lines from this chunk (blank lines dropped), each scrubbed. */
+  readonly lines: string[];
+  /** The trailing incomplete segment (after the last newline) to carry into the next chunk. */
+  readonly leftover: string;
+}
+
+// Turn one raw stdout/stderr chunk — with any partial line carried over from the previous chunk
+// prepended — into scrubbed complete lines plus the new trailing partial line to buffer. Buffering
+// that partial line is what closes the chunk-boundary hole: a child's stdout arrives in arbitrary
+// slices, so a secret can straddle two 'data' events. Scrubbing each slice independently would match
+// neither half and leak the secret into the durable electron.log, and would emit a partial line as if
+// it were complete. Only newline-terminated lines are emitted here; the caller flushes the residual
+// `leftover` when the stream ends (a final line the child wrote without a trailing newline).
+export function scrubChunk(
+  leftover: string,
+  chunk: string,
+  secrets: ReadonlyArray<string | undefined>,
+): ScrubbedChunk {
+  const parts = (leftover + chunk).split(/\r?\n/);
+  // The last element is the segment after the final newline: empty when the chunk ended on a newline,
+  // otherwise an incomplete line. Hold it back for the next chunk instead of emitting it.
+  const nextLeftover = parts.pop() ?? '';
+  const lines: string[] = [];
+  for (const part of parts) {
+    if (part.length === 0) continue; // drop blank lines, mirroring the old per-line emit
+    lines.push(scrubSecrets(part, secrets));
+  }
+  return { lines, leftover: nextLeftover };
+}
