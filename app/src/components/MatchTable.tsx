@@ -147,9 +147,16 @@ function HeroIcon({ hero }: { readonly hero: string | null }): React.JSX.Element
     [hero],
   );
   const [srcIndex, setSrcIndex] = useState(0);
-  // Reset to the preferred source whenever the hero changes: this component instance can be
-  // reused for a different row when the table re-sorts or filters.
-  useEffect(() => setSrcIndex(0), [hero]);
+  // Reset to the preferred source when the hero changes (this instance can be reused for a
+  // different row on re-sort/filter). Done as derived-state-during-render, not in a useEffect: an
+  // effect resets AFTER the render commits, so the first post-change render would use the stale
+  // index — briefly fetching the new hero's CDN URL (or flashing the chip) before snapping back to
+  // the bundled icon.
+  const [prevHero, setPrevHero] = useState(hero);
+  if (hero !== prevHero) {
+    setPrevHero(hero);
+    setSrcIndex(0);
+  }
   const src = sources[srcIndex];
   if (src === undefined) {
     return <span className="mt-hero-chip" aria-hidden="true" />;
