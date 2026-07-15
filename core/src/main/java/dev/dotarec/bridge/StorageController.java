@@ -22,10 +22,13 @@ import org.springframework.web.bind.annotation.RestController;
  *
  * <p>{@code GET /storage/usage} → an ordered list: the active recording drive first (role
  * {@code active}, cap = {@code retentionCapGb}), then each archive drive (role {@code archive}).
- * {@code usedBytes} is the stored VOD + clip bytes under that path (from the DB), matching what the
- * retention sweeper and archiver count against the caps; {@code freeBytes}/{@code totalBytes} come
- * from the filesystem and are null when the drive can't be stat'd (e.g. a configured path that
- * doesn't exist yet).
+ * {@code usedBytes} is the sum of the DB-recorded {@code file_size_bytes} for the stored VODs + clips
+ * under that path — a lightweight approximation for the settings UI, NOT the authoritative figure the
+ * retention sweeper enforces the caps against: the sweeper measures each file's real on-disk size via
+ * {@link Files#size}, so this DB-recorded total can diverge (e.g. a size that drifted since it was
+ * recorded, or a row whose file is gone). {@code freeBytes}/{@code totalBytes} come from the
+ * filesystem and are null when the drive can't be stat'd (e.g. a configured path that doesn't exist
+ * yet).
  */
 @RestController
 public class StorageController {

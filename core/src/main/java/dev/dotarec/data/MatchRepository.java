@@ -226,23 +226,6 @@ public class MatchRepository {
     // ---- retention helpers -------------------------------------------------
 
     /**
-     * Total bytes of currently-stored video, i.e. {@code SUM(file_size_bytes)} over rows that still
-     * have a {@code video_path} (pruned rows have a null path and don't count). Returns 0 on an
-     * empty DB or when every file size is null.
-     */
-    public long totalVideoBytes() {
-        String sql = "SELECT COALESCE(SUM(file_size_bytes), 0) FROM matches "
-                + "WHERE video_path IS NOT NULL";
-        try (Connection conn = dataSource.getConnection();
-             Statement st = conn.createStatement();
-             ResultSet rs = st.executeQuery(sql)) {
-            return rs.next() ? rs.getLong(1) : 0L;
-        } catch (SQLException e) {
-            throw new IllegalStateException("Failed to sum video bytes", e);
-        }
-    }
-
-    /**
      * Sweep candidates oldest-first: rows still holding a video file ({@code video_path NOT NULL})
      * that are not starred. Ordered by {@code COALESCE(played_at, created_at)} then id ascending so
      * the retention sweeper deletes the oldest recordings first.
