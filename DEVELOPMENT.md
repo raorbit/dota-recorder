@@ -49,6 +49,21 @@ and got cropped. Dev machines at 1080p never showed it. The fix
 Capture scene item on *every* connect — resolution-agnostic, and it repairs pre-existing broken
 scene items rather than only newly created ones.
 
+### The recording that captured the wrong app entirely
+
+Symptom: two consecutive recordings contained a fullscreen media player (Jellyfin) instead of Dota,
+while audio (from separate WASAPI inputs) was correct.
+
+The Game Capture source was created with `capture_mode=any_fullscreen` — "capture any fullscreen
+application" — which hooks whatever app happens to be fullscreen when the hook activates, not the
+game specifically. If anything else was fullscreen (a media player, a browser video), OBS latched
+onto it. The fix (`ObsSceneConfigurer.gameCaptureSettings`) switches to `capture_mode=window` with
+window `::dota2.exe` and exe priority, i.e. match by executable, so capture binds only to the Dota
+process — the same window-match encoding already used for Dota's process-audio capture in
+`SettingsStore`. Like the crop fix, it is re-asserted on *every* connect, so an already-installed
+source stuck on `any_fullscreen` is corrected in place on the next launch, not only on fresh
+installs.
+
 ## Validation timeline
 
 - **2026-06-28** — full `detect → record → tag → store → seek` loop proven live against OBS in a
