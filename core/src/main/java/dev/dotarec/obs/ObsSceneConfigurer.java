@@ -214,7 +214,28 @@ public class ObsSceneConfigurer {
             } else {
                 log.debug("Ensured '{}' is locked to dota2.exe (capture_mode=window)", GAME_CAPTURE_INPUT);
             }
-            return;
+            // Input names are GLOBAL in OBS v5, so an existing "Game Capture" may live only in some
+            // OTHER scene (a user re-parented it, or a hand-edited/restored scene collection). Then the
+            // recorded "Dota" program scene has no game-capture item and records pure BLACK — a failure
+            // neither the source-level checks nor the black-frame guard reliably catch. Verify it is
+            // actually a scene item of SCENE_NAME; if not, remove the orphan and fall through to
+            // recreate it in the Dota scene (createInput adds it as a scene item of SCENE_NAME).
+            if (isGameCaptureInScene(controller)) {
+                return;
+            }
+            log.warn(
+                    "'{}' exists but is not in scene '{}'; re-attaching so the recording is not black",
+                    GAME_CAPTURE_INPUT,
+                    SCENE_NAME);
+            RemoveInputResponse orphan = controller.removeInput(GAME_CAPTURE_INPUT, REQUEST_TIMEOUT_MS);
+            if (orphan == null || !orphan.isSuccessful()) {
+                log.warn(
+                        "Failed to remove orphaned '{}'; scene '{}' may record black",
+                        GAME_CAPTURE_INPUT,
+                        SCENE_NAME);
+                return;
+            }
+            // fall through to createInput below.
         }
         CreateInputResponse resp =
                 controller.createInput(
@@ -230,6 +251,18 @@ public class ObsSceneConfigurer {
         log.info(
                 "Created game capture input '{}' locked to dota2.exe (capture_mode=window)",
                 GAME_CAPTURE_INPUT);
+    }
+
+    /**
+     * True when {@link #GAME_CAPTURE_INPUT} is a scene item of {@link #SCENE_NAME}. Input names are
+     * global in OBS v5, so an existing input can be absent from the Dota scene (orphaned into another
+     * scene), and a Dota scene with no game-capture item records black. Uses the same {@code
+     * getSceneItemId} probe as {@link #fitGameCaptureToCanvas}: a successful id means it is in the scene.
+     */
+    private boolean isGameCaptureInScene(OBSRemoteController controller) {
+        GetSceneItemIdResponse id =
+                controller.getSceneItemId(SCENE_NAME, GAME_CAPTURE_INPUT, 0, REQUEST_TIMEOUT_MS);
+        return id != null && id.isSuccessful() && id.getSceneItemId() != null;
     }
 
     /**
