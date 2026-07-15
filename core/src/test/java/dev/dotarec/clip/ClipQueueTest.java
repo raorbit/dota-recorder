@@ -12,7 +12,6 @@ import dev.dotarec.data.ClipRepository;
 import dev.dotarec.data.ClipRow;
 import java.lang.reflect.Field;
 import java.util.List;
-import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 import org.springframework.core.task.TaskRejectedException;
 
@@ -32,9 +31,12 @@ class ClipQueueTest {
      */
     @Test
     void staleCutoffExceedsThreeProcessCeilings() throws Exception {
+        // The Clipper per-run timeout scales with clip length but is capped at MAX_TIMEOUT_MS; the stale
+        // cutoff must strictly exceed three of those ceilings (copy + re-encode + thumbnail) so a
+        // legitimately slow long render is never re-pended mid-flight and double-cut.
         long staleMs = readLongStatic(ClipQueue.class, "STALE_GENERATING_MS");
-        long processTimeoutMin = readLongStatic(Clipper.class, "PROCESS_TIMEOUT_MINUTES");
-        long threeCeilingsMs = TimeUnit.MINUTES.toMillis(3L * processTimeoutMin);
+        long maxRunCeilingMs = readLongStatic(Clipper.class, "MAX_TIMEOUT_MS");
+        long threeCeilingsMs = 3L * maxRunCeilingMs;
 
         assertThat(staleMs).isGreaterThan(threeCeilingsMs);
     }
