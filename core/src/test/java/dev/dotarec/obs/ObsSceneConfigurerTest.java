@@ -96,6 +96,19 @@ class ObsSceneConfigurerTest {
     }
 
     @Test
+    void gameCaptureSettings_lockCaptureToTheDotaWindowByExecutable() {
+        // Regression: the game-capture source must target the Dota window specifically, never
+        // capture_mode=any_fullscreen (which hooks whatever app is fullscreen and recorded e.g. a
+        // media player instead of the game). "::dota2.exe" + priority 2 = match by executable, the
+        // same encoding SettingsStore pairs with Dota's process-audio capture.
+        JsonObject settings = ObsSceneConfigurer.gameCaptureSettings();
+
+        assertThat(settings.get("capture_mode").getAsString()).isEqualTo("window");
+        assertThat(settings.get("window").getAsString()).isEqualTo("::dota2.exe");
+        assertThat(settings.get("priority").getAsInt()).isEqualTo(2);
+    }
+
+    @Test
     void kindToObsKind_mapsTheThreeWasapiKinds() {
         assertThat(ObsSceneConfigurer.kindToObsKind("application"))
                 .isEqualTo("wasapi_process_output_capture");
