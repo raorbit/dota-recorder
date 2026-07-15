@@ -517,20 +517,27 @@ public class MatchFsm {
             long now = time.wallMillis();
             // Finalize duration MUST come from the MONOTONIC clock, the same anchor the marker offsets
             // are measured against ({@code getRecordConfirmedNanos} / VideoOffsetCalculator) -- NOT the
-            // wall clock. durationS is the clamp upper bound for every marker (persistFinalized +
+            // wall clock. This is the clamp upper bound for every marker (persistFinalized +
             // maybeAutoClipRampages) and the stored duration_s, so if it were wall-derived a backward
             // NTP/clock step during the match would shrink it and clamp late markers to the wrong seek
             // point while the offsets themselves stayed monotonic. The wall stamps below (played_at,
             // recordStartedWallMs) are storage/display only.
-            int durationS =
-                    (int) Math.max(0, (time.nanoTime() - s.getRecordConfirmedNanos()) / 1_000_000_000L);
+            long elapsedNanos = Math.max(0L, time.nanoTime() - s.getRecordConfirmedNanos());
+            // Stored/displayed duration is floored to whole seconds (the duration_s column is an int).
+            int durationS = (int) (elapsedNanos / 1_000_000_000L);
+            // UNFLOORED elapsed seconds, used ONLY as the clamp upper bound for marker offsets + the
+            // auto-clip bounds. Flooring the clamp (as duration_s is) would pull a marker that landed
+            // in the final partial second back by up to <1s and seek early; the stored duration_s stays
+            // the floored int above.
+            double durationClampS = elapsedNanos / 1_000_000_000.0;
             Long fileSizeBytes = fileSizeOrNull(videoPath);
             updateJournalSnapshot(s, "stopping", videoPath, thumbPath);
 
             // Persist the match row + its markers + pauses in ONE transaction so a child-write
             // failure can't leave an orphan match row. publishRecorded runs only after commit, so the
             // UI never sees a match that rolled back.
-            long matchRowId = persistFinalized(s, videoPath, thumbPath, fileSizeBytes, durationS, now);
+            long matchRowId =
+                    persistFinalized(s, videoPath, thumbPath, fileSizeBytes, durationS, durationClampS, now);
 
             if (videoPath == null) {
                 retainOrphanedStop(matchRowId, thumbPath, durationS, now);
@@ -541,7 +548,7 @@ public class MatchFsm {
             // Auto-clip rampages off the just-persisted markers. Fully guarded: createAuto dispatches
             // @Async so this stays cheap on the GSI thread, and any failure here must never break a
             // finalize that already committed (the match row + markers are safely persisted above).
-            maybeAutoClipRampages(matchRowId, s, durationS);
+            maybeAutoClipRampages(matchRowId, s, durationClampS);
 
             log.info("Recording finalized -> match row {} ({} markers, {}s)",
                     matchRowId, s.getMarkers().size(), durationS);
@@ -573,6 +580,7 @@ public class MatchFsm {
             String thumbPath,
             Long fileSizeBytes,
             int durationS,
+            double durationClampS,
             long now) {
         try (Connection conn = dataSource.getConnection()) {
             conn.setAutoCommit(false);
@@ -594,8 +602,10 @@ public class MatchFsm {
                 long matchRowId = matches.insert(conn, row);
                 for (PendingMarker m : s.getMarkers()) {
                     // Re-clamp the live offset to the now-known real duration so a marker can't sit
-                    // past the end of the file (live tagging used a generous bound).
-                    double offset = Math.min(m.videoOffsetS(), durationS);
+                    // past the end of the file (live tagging used a generous bound). Clamp against the
+                    // UNFLOORED elapsed duration -- flooring it (as the stored duration_s is) would pull
+                    // a marker in the final partial second back by up to <1s and seek early.
+                    double offset = Math.min(m.videoOffsetS(), durationClampS);
                     markers.insert(conn, matchRowId, m.type(), offset, m.gameClock(), m.label(),
                             m.source());
                 }
@@ -624,11 +634,12 @@ public class MatchFsm {
      * After a finalize commits, optionally carve a highlight clip around each detected rampage. Gated
      * on {@code autoClipOnRampage}; the kill offsets come straight from the just-persisted in-memory
      * markers (the same {@code videoOffsetS} base {@link ClipService} clamps), so no DB re-read. Each
-     * span's bounds are padded by {@code clipPaddingSeconds} and clamped to {@code [0, durationS]}, then
+     * span's bounds are padded by {@code clipPaddingSeconds} and clamped to {@code [0, durationClampS]}
+     * (the UNFLOORED elapsed duration, so a span in the final partial second isn't pulled short), then
      * handed to {@link ClipService#createAuto} (which dispatches @Async). Wrapped whole in try/catch: a
      * clip failure must never strand the FSM or undo a committed match.
      */
-    private void maybeAutoClipRampages(long matchRowId, RecordingSession s, int durationS) {
+    private void maybeAutoClipRampages(long matchRowId, RecordingSession s, double durationClampS) {
         try {
             if (!settings.get().autoClipOnRampage) {
                 return;
@@ -646,8 +657,8 @@ public class MatchFsm {
             }
             int pad = settings.get().clipPaddingSeconds;
             for (RampageSpan span : spans) {
-                double startS = clamp(span.firstOffsetS() - pad, 0.0, durationS);
-                double endS = clamp(span.lastOffsetS() + pad, 0.0, durationS);
+                double startS = clamp(span.firstOffsetS() - pad, 0.0, durationClampS);
+                double endS = clamp(span.lastOffsetS() + pad, 0.0, durationClampS);
                 clipService.createAuto(matchRowId, startS, endS, "rampage");
             }
             log.info("Auto-clipped {} rampage span(s) for match row {}", spans.size(), matchRowId);
