@@ -270,12 +270,10 @@ export function VideoPlayer({
         });
     };
 
-    // A retention pass may prune THIS match's VOD while it's open. On retention.swept, if the payload
-    // pruned this match, refresh full-VOD availability from the server rather than trusting the
-    // videoPath cached at selection time — the file may now be gone, so the stale videoUrl would 404.
-    const offEvents = socket.onEvent((evt) => {
-      if (cancelled) return;
-      if (evt.type !== 'retention.swept' || !retentionAffectsMatch(evt.payload, id)) return;
+    // Re-derive full-VOD availability from a FRESH match detail rather than trusting the videoPath
+    // cached at selection time: a retention pass may have pruned the file (the stale videoUrl would
+    // then 404 on play). Shared by the retention.swept handler and the reconnect reconcile below.
+    const refreshVideoUrl = (): void => {
       void fetchMatch(id)
         .then((detail) => {
           if (cancelled) return;
@@ -285,6 +283,34 @@ export function VideoPlayer({
         .catch(() => {
           /* transient: a later frame / re-select reconciles */
         });
+    };
+
+    // A retention pass may prune THIS match's VOD while it's open. On retention.swept, if the payload
+    // pruned this match, refresh full-VOD availability from the server rather than trusting the
+    // videoPath cached at selection time — the file may now be gone, so the stale videoUrl would 404.
+    const offEvents = socket.onEvent((evt) => {
+      if (cancelled) return;
+      if (evt.type !== 'retention.swept' || !retentionAffectsMatch(evt.payload, id)) return;
+      refreshVideoUrl();
+    });
+
+    // Reconnect reconciliation: clip.* / retention.swept frames delivered while this socket was
+    // momentarily down are lost — a finished clip left stuck "generating", or a stale videoUrl that
+    // now 404s because retention pruned the file while we were disconnected. onConnectionChange fires
+    // true on the FIRST connect too, but the per-selection fetch above already primed everything then;
+    // only a reconnect (a `true` that follows a drop) needs reconciling. Track the down edge so the
+    // initial connect is a no-op, then refresh the clip strip + re-derive videoUrl to catch up.
+    let wasDown = false;
+    const offConn = socket.onConnectionChange((connected) => {
+      if (cancelled) return;
+      if (!connected) {
+        wasDown = true;
+        return;
+      }
+      if (!wasDown) return; // initial connect — nothing missed yet
+      wasDown = false;
+      refreshClips();
+      refreshVideoUrl();
     });
 
     const off = socket.onClipEvent(id, (evt) => {
@@ -316,6 +342,7 @@ export function VideoPlayer({
       cancelled = true;
       off();
       offEvents();
+      offConn();
       socket.close();
     };
   }, [matchId]);
