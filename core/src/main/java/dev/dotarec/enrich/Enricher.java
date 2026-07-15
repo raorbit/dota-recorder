@@ -121,6 +121,23 @@ public class Enricher {
                 return;
             }
 
+            // A row recorded on a hero the bundled map cannot name yet is HELD pending (see
+            // fullEnrich's newer-hero branch): our own OpenDota row hides behind an unmappable hero
+            // id, so attribution can't succeed until an app update refreshes the map. Re-check that
+            // BEFORE the fetch -- once such a row is in the hold, every ~30-min dispatch would
+            // otherwise burn a real OpenDota GET only to re-discover the identical unattributable
+            // state. Short-circuit to the same capped hold WITHOUT touching the API, so the
+            // forever-hold costs zero quota. A hero the map already knows falls through to the fetch:
+            // its attribution can still resolve either way on the response.
+            String recordedSlug = heroSlug(row.hero());
+            if (recordedSlug != null && !KNOWN_HERO_SLUGS.contains(recordedSlug)) {
+                log.debug("Match row {} (dota {}) recorded on hero '{}' the bundled map cannot name; "
+                        + "holding without an OpenDota fetch until the map is refreshed",
+                        matchRowId, dotaMatchId, row.hero());
+                matches.applyRetry(matchRowId, "pending", 0, backoffNextAfterMs(MAX_ATTEMPTS));
+                return;
+            }
+
             FetchResult result = matchSource.fetch(dotaMatchId);
             int attempts = matches.enrichAttempts(matchRowId);
 
@@ -154,6 +171,10 @@ public class Enricher {
         if (me == null) {
             String recordedSlug = heroSlug(row.hero());
             if (recordedSlug != null && !KNOWN_HERO_SLUGS.contains(recordedSlug)) {
+                // Defensive: enrich() short-circuits an unmappable-hero row to this same hold BEFORE
+                // the fetch, so this branch is normally unreached -- but it stays the source of truth
+                // for the hold decision whenever a fetch DID happen (mirroring the accountId re-check
+                // above).
                 // OUR recorded hero is newer than the bundled map, so its OpenDota row carries an
                 // id the hero join can't name yet -- a data gap on our side, not proof the row is
                 // unattributable. Hold at the capped backoff without consuming attempts; an app

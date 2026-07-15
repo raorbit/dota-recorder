@@ -221,11 +221,17 @@ class EnricherTest {
                 null, 0, 999, 5, 5, 5, 300, 400, 12000, 100, 60);
         OpenDotaMatch match = new OpenDotaMatch(917L, true, 1800, 1000L, 7, 22,
                 List.of(onNewHero, player(55555555L, 128)));
-        enricher(FetchResult.ready(match)).enrich(id, 917L);
+        // A source that records whether it was hit: the forever-hold must cost zero API quota, so the
+        // enricher short-circuits to the hold BEFORE any OpenDota fetch for this unmappable-hero row.
+        TrackingSource source = new TrackingSource(FetchResult.ready(match));
+        new Enricher(source, repo, settings, events).enrich(id, 917L);
 
         assertThat(repo.findById(id).orElseThrow().enrichmentState()).isEqualTo("pending");
         assertThat(repo.enrichAttempts(id)).isEqualTo(0);
         assertThat(events.types()).isEmpty();
+        assertThat(source.fetched)
+                .as("an unattributable newer-hero hold must not hit OpenDota")
+                .isFalse();
     }
 
     @Test
@@ -468,6 +474,22 @@ class EnricherTest {
         public FetchResult fetch(long dotaMatchId) {
             fetched = true;
             return FetchResult.Transient.INSTANCE;
+        }
+    }
+
+    /** MatchSource that records whether fetch ran and returns a canned result if it does. */
+    private static final class TrackingSource implements MatchSource {
+        private final FetchResult result;
+        boolean fetched = false;
+
+        TrackingSource(FetchResult result) {
+            this.result = result;
+        }
+
+        @Override
+        public FetchResult fetch(long dotaMatchId) {
+            fetched = true;
+            return result;
         }
     }
 
