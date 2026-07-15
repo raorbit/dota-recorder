@@ -36,14 +36,17 @@ public class ClipQueue {
      * finalize), so the {@code @Async} method's exception escaped and the row never reached a terminal
      * state. Must strictly EXCEED a single {@code generateAsync} run's true worst case: THREE
      * back-to-back {@code Clipper} process ceilings — the copy attempt, the re-encode retry, and the
-     * thumbnail grab ({@code Clipper.PROCESS_TIMEOUT_MINUTES} = 10 min each, so up to 30 min) — plus
-     * generous margin, or a legitimately slow render would be re-pended while its original worker is
-     * still finalizing and the same sweep would dispatch a SECOND concurrent cut to the identical
-     * {@code -y} output path. The cutoff is measured from {@code generation_started_at} (set when the
-     * row was claimed), NOT {@code created_at}, so a clip that sat {@code pending} in a saturated queue
-     * for longer than this before being claimed is never re-pended mid-render (and double-cut).
+     * thumbnail grab, each capped at {@code Clipper.MAX_TIMEOUT_MS} (30 min), so up to 90 min — plus
+     * generous margin, or a legitimately slow render (a long manual clip whose re-encode fallback runs
+     * for many minutes) would be re-pended while its original worker is still finalizing and the same
+     * sweep would dispatch a SECOND concurrent cut to the identical {@code -y} output path. Because the
+     * {@code Clipper} timeout now scales with clip length up to that ceiling, this cutoff is sized to
+     * 3x it (co-designed — see {@code Clipper.MAX_TIMEOUT_MS}). Measured from {@code
+     * generation_started_at} (set when the row was claimed), NOT {@code created_at}, so a clip that sat
+     * {@code pending} in a saturated queue for longer than this before being claimed is never re-pended
+     * mid-render (and double-cut).
      */
-    private static final long STALE_GENERATING_MS = 60L * 60_000L;
+    private static final long STALE_GENERATING_MS = 120L * 60_000L;
 
     private final ClipRepository clips;
     private final ClipService clipService;

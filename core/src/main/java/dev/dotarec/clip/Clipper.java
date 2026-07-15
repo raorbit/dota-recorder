@@ -29,8 +29,28 @@ public class Clipper {
 
     private static final Logger log = LoggerFactory.getLogger(Clipper.class);
 
-    /** Generous wall-clock cap so a hung ffmpeg can't pin a pool thread forever. */
-    private static final long PROCESS_TIMEOUT_MINUTES = 10L;
+    /**
+     * Floor wall-clock cap for any single ffmpeg run, so a hung process can never pin a pool thread
+     * (which also holds the StorageMaintenanceLock) forever. Enough for a stream-copy cut or a
+     * thumbnail of any length.
+     */
+    private static final long MIN_TIMEOUT_MS = TimeUnit.MINUTES.toMillis(10);
+
+    /**
+     * Wall-clock budget per second of requested clip for the re-encode fallback. A long MANUAL clip
+     * that can't stream-copy falls back to an x264 veryfast re-encode whose cost scales with length, so
+     * a fixed cap would kill a legitimate long clip mid-encode. 3x realtime is comfortably above
+     * veryfast even on weak hardware while still bounding a genuinely hung process.
+     */
+    private static final long REENCODE_MS_PER_SECOND = 3_000L;
+
+    /**
+     * Absolute ceiling regardless of requested length, so a pathological request can't pin a pool
+     * thread forever. Deliberately modest (supports up to a ~10-min clip re-encoded at 3x realtime):
+     * {@code ClipQueue.STALE_GENERATING_MS} must strictly exceed 3x this so a legitimately long render
+     * is never reclaimed as stale and double-cut — the two constants are co-designed.
+     */
+    private static final long MAX_TIMEOUT_MS = TimeUnit.MINUTES.toMillis(30);
 
     private final FfmpegLocator ffmpeg;
 
@@ -58,9 +78,12 @@ public class Clipper {
         String ffmpegCmd = ffmpeg.command();
         String start = formatSeconds(Math.max(0.0, startSeconds));
         String duration = formatSeconds(Math.max(0.0, durationSeconds));
+        // Scale the per-run cap to the requested length so the re-encode fallback of a long clip isn't
+        // killed mid-encode (see REENCODE_MS_PER_SECOND); a short clip still gets the MIN_TIMEOUT_MS floor.
+        long timeoutMs = clipTimeoutMs(durationSeconds);
 
         // Fast path: stream copy.
-        Attempt copy = run(buildCopyCommand(ffmpegCmd, source, start, duration, output), output);
+        Attempt copy = run(buildCopyCommand(ffmpegCmd, source, start, duration, output), output, timeoutMs);
         if (copy.succeeded()) {
             return new Result(output, copy.size());
         }
@@ -69,14 +92,16 @@ public class Clipper {
 
         // Retry once with a re-encode.
         Attempt reencode =
-                run(buildReencodeCommand(ffmpegCmd, source, start, duration, output), output);
+                run(buildReencodeCommand(ffmpegCmd, source, start, duration, output), output, timeoutMs);
         if (reencode.succeeded()) {
             return new Result(output, reencode.size());
         }
+        boolean timedOut = copy.timedOut() || reencode.timedOut();
         throw new IllegalStateException(
                 "ffmpeg failed to generate clip " + output + " (copy exit=" + copy.exitCode()
-                        + ", re-encode exit=" + reencode.exitCode() + "). Last output:\n"
-                        + reencode.tail());
+                        + ", re-encode exit=" + reencode.exitCode()
+                        + (timedOut ? ", timed out after " + (timeoutMs / 60_000) + " min" : "")
+                        + "). Last output:\n" + reencode.tail());
     }
 
     /**
@@ -93,7 +118,7 @@ public class Clipper {
     public Path thumbnail(Path source, double atSeconds, Path output) {
         // See clip(): use command() (bundled/configured, else bare "ffmpeg" on PATH), not isAvailable().
         String at = formatSeconds(Math.max(0.0, atSeconds));
-        Attempt grab = run(buildThumbnailCommand(ffmpeg.command(), source, at, output), output);
+        Attempt grab = run(buildThumbnailCommand(ffmpeg.command(), source, at, output), output, MIN_TIMEOUT_MS);
         if (grab.succeeded()) {
             return output;
         }
@@ -162,7 +187,7 @@ public class Clipper {
      * non-empty output. A non-zero exit, a timeout, an interruption, or a missing/zero-byte output all
      * count as failure.
      */
-    private Attempt run(List<String> command, Path output) {
+    private Attempt run(List<String> command, Path output, long timeoutMs) {
         log.debug("Running ffmpeg: {}", String.join(" ", command));
         ProcessBuilder pb = new ProcessBuilder(command);
         pb.redirectErrorStream(true);
@@ -171,7 +196,7 @@ public class Clipper {
             proc = pb.start();
         } catch (IOException e) {
             log.warn("Failed to run ffmpeg for {}: {}", output, e.getMessage());
-            return new Attempt(-1, 0L, e.getMessage() == null ? "" : e.getMessage());
+            return new Attempt(-1, 0L, e.getMessage() == null ? "" : e.getMessage(), false);
         }
         // Drain the merged stdout/stderr on a SEPARATE thread. Reading it inline before waitFor() would
         // block forever on a hung ffmpeg that stops emitting output but never exits (its pipe never
@@ -195,14 +220,13 @@ public class Clipper {
         drainer.setDaemon(true);
         drainer.start();
         try {
-            boolean finished = proc.waitFor(PROCESS_TIMEOUT_MINUTES, TimeUnit.MINUTES);
+            boolean finished = proc.waitFor(timeoutMs, TimeUnit.MILLISECONDS);
             if (!finished) {
                 proc.destroyForcibly();
                 drainer.join(TimeUnit.SECONDS.toMillis(5));
-                log.warn("ffmpeg timed out after {} min, killed: {}",
-                        PROCESS_TIMEOUT_MINUTES, output);
+                log.warn("ffmpeg timed out after {} min, killed: {}", timeoutMs / 60_000, output);
                 synchronized (out) {
-                    return new Attempt(-1, 0L, out.toString());
+                    return new Attempt(-1, 0L, out.toString(), true);
                 }
             }
             drainer.join(TimeUnit.SECONDS.toMillis(5));
@@ -210,7 +234,7 @@ public class Clipper {
             long size = outputSize(output);
             boolean ok = exit == 0 && size > 0L;
             synchronized (out) {
-                return new Attempt(ok ? 0 : (exit == 0 ? -1 : exit), size, out.toString());
+                return new Attempt(ok ? 0 : (exit == 0 ? -1 : exit), size, out.toString(), false);
             }
         } catch (InterruptedException e) {
             proc.destroyForcibly();
@@ -222,7 +246,7 @@ public class Clipper {
             }
             Thread.currentThread().interrupt();
             log.warn("Interrupted while running ffmpeg for {}", output);
-            return new Attempt(-1, 0L, "interrupted");
+            return new Attempt(-1, 0L, "interrupted", false);
         }
     }
 
@@ -239,12 +263,22 @@ public class Clipper {
         return String.format(Locale.ROOT, "%.3f", seconds);
     }
 
+    /**
+     * Per-run wall-clock cap for a clip of {@code durationSeconds}: the {@link #MIN_TIMEOUT_MS} floor,
+     * or {@link #REENCODE_MS_PER_SECOND} per requested second when longer, capped at
+     * {@link #MAX_TIMEOUT_MS} so a pathological request can't pin a pool thread indefinitely.
+     */
+    private static long clipTimeoutMs(double durationSeconds) {
+        long scaled = (long) Math.ceil(Math.max(0.0, durationSeconds) * REENCODE_MS_PER_SECOND);
+        return Math.min(MAX_TIMEOUT_MS, Math.max(MIN_TIMEOUT_MS, scaled));
+    }
+
     /** The path and byte size of a successfully rendered clip. */
     public record Result(Path output, long sizeBytes) {
     }
 
     /** Outcome of one ffmpeg invocation. {@code exitCode == 0 && size > 0} means success. */
-    private record Attempt(int exitCode, long size, String capturedOutput) {
+    private record Attempt(int exitCode, long size, String capturedOutput, boolean timedOut) {
         boolean succeeded() {
             return exitCode == 0 && size > 0L;
         }
