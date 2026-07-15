@@ -17,7 +17,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as assignJob from './job-object';
 import { BRIDGE_BASE, BRIDGE_TOKEN_HEADER } from './paths';
-import { scrubSecrets } from './scrub';
+import { scrubChunk, scrubSecrets } from './scrub';
 
 export interface ObsSupervisorOptions {
   /** Writable OBS dir (%LOCALAPPDATA%/dota-recorder/obs) — obs64.exe lives under bin/64bit. */
@@ -60,6 +60,11 @@ export class ObsSupervisor {
   private readonly scene: string;
   private readonly healthTimeoutMs: number;
   private readonly bridgeToken: string | undefined;
+  // Residual partial log line held back between stdout/stderr 'data' events. OBS output arrives in
+  // arbitrary slices, so a secret (e.g. the echoed --websocket_password) can straddle a chunk boundary;
+  // buffering the trailing incomplete segment and prepending it to the next chunk lets emitLines scrub
+  // whole lines only. Flushed on 'exit' so a final unterminated line still reaches the log.
+  private logLineBuffer = '';
   private readonly onLog: (line: string) => void;
   private readonly onUnexpectedExit: ((info: ObsExitInfo) => void) | undefined;
 
@@ -151,6 +156,10 @@ export class ObsSupervisor {
     child.on('exit', (code, signal) => {
       // Only clear the handle if THIS child is still current (a newer start() may have replaced it).
       if (this.child === child) {
+        // Flush any buffered partial final line (a last line OBS wrote without a trailing newline),
+        // scrubbed like any other. Gated on the current-child check so a superseded child's late exit
+        // can't flush — and clear — the live child's in-progress buffer.
+        this.flushLogBuffer();
         this.child = null;
       }
       if (!this.stopping) {
@@ -307,13 +316,24 @@ export class ObsSupervisor {
   }
 
   private emitLines(buf: Buffer): void {
-    const text = buf.toString('utf8');
-    for (const line of text.split(/\r?\n/)) {
-      if (line.length === 0) continue;
-      // OBS echoes its --websocket_password arg on startup and can surface the bridge token if it ever
-      // logs the core's env; scrub both before they reach electron.log.
-      this.onLog(scrubSecrets(line, [this.password, this.bridgeToken]));
-    }
+    // OBS echoes its --websocket_password arg on startup and can surface the bridge token if it ever
+    // logs the core's env; scrub both before they reach electron.log. scrubChunk buffers a partial
+    // trailing line across chunks so a secret split over two 'data' events is still rejoined and redacted.
+    const { lines, leftover } = scrubChunk(this.logLineBuffer, buf.toString('utf8'), [
+      this.password,
+      this.bridgeToken,
+    ]);
+    this.logLineBuffer = leftover;
+    for (const line of lines) this.onLog(line);
+  }
+
+  // Flush a buffered partial final line (a last log line OBS wrote without a trailing newline before
+  // exiting), scrubbed like any other so a trailing secret can't slip through unredacted.
+  private flushLogBuffer(): void {
+    const line = this.logLineBuffer;
+    this.logLineBuffer = '';
+    if (line.length === 0) return;
+    this.onLog(scrubSecrets(line, [this.password, this.bridgeToken]));
   }
 
   private async waitForObs(child: ChildProcess): Promise<void> {

@@ -11,7 +11,7 @@
 // loud status-card error on crash are later steps; this is the Step 0 skeleton.
 import { spawn, type ChildProcess } from 'node:child_process';
 import * as assignJob from './job-object';
-import { scrubSecrets } from './scrub';
+import { scrubChunk, scrubSecrets } from './scrub';
 import {
   BRIDGE_TOKEN_ENV,
   BRIDGE_TOKEN_HEADER,
@@ -57,6 +57,11 @@ export class JvmSupervisor {
   // construction); the OBS websocket password is core-owned and only knowable after boot, so it's
   // appended later via addScrubSecret once main.ts fetches it from /obs/launch-args.
   private readonly logSecrets: Array<string | undefined>;
+  // Residual partial log line held back between stdout/stderr 'data' events. A child's output arrives
+  // in arbitrary slices, so a secret (or any line) can straddle a chunk boundary; buffering the
+  // trailing incomplete segment and prepending it to the next chunk lets emitLines scrub whole lines
+  // only. Flushed on 'exit' (see the exit handler) so a final unterminated line still reaches the log.
+  private logLineBuffer = '';
   private readonly onLog: (line: string) => void;
   private readonly onUnexpectedExit: ((info: ExitInfo) => void) | undefined;
 
@@ -143,6 +148,10 @@ export class JvmSupervisor {
       // restart) may already have replaced it. Clearing it FIRST lets onUnexpectedExit restart cleanly.
       const isCurrent = this.child === child;
       if (isCurrent) {
+        // Flush any buffered partial final line (a last line the core wrote without a trailing newline),
+        // scrubbed like any other. Gated on isCurrent so a superseded child's late exit can't flush —
+        // and clear — the live child's in-progress buffer.
+        this.flushLogBuffer();
         this.child = null;
       }
       // Gate on isCurrent too: a superseded child's late exit (stop()'s taskkill landing after the
@@ -232,14 +241,22 @@ export class JvmSupervisor {
   }
 
   private emitLines(buf: Buffer): void {
-    const text = buf.toString('utf8');
-    for (const line of text.split(/\r?\n/)) {
-      if (line.length === 0) continue;
-      // The bridge token and the core-minted OBS websocket password both live in / flow through the
-      // core; if it ever echoes them (a debug bean, a verbose stack trace, a settings dump) they would
-      // otherwise land in electron.log in plaintext.
-      this.onLog(scrubSecrets(line, this.logSecrets));
-    }
+    // The bridge token and the core-minted OBS websocket password both live in / flow through the
+    // core; if it ever echoes them (a debug bean, a verbose stack trace, a settings dump) they would
+    // otherwise land in electron.log in plaintext. scrubChunk buffers a partial trailing line across
+    // chunks so a secret split over two 'data' events is still rejoined and redacted.
+    const { lines, leftover } = scrubChunk(this.logLineBuffer, buf.toString('utf8'), this.logSecrets);
+    this.logLineBuffer = leftover;
+    for (const line of lines) this.onLog(line);
+  }
+
+  // Flush a buffered partial final line (a last log line the core wrote without a trailing newline
+  // before exiting), scrubbed like any other so a trailing secret can't slip through unredacted.
+  private flushLogBuffer(): void {
+    const line = this.logLineBuffer;
+    this.logLineBuffer = '';
+    if (line.length === 0) return;
+    this.onLog(scrubSecrets(line, this.logSecrets));
   }
 
   private async waitForHealth(child: ChildProcess): Promise<void> {
