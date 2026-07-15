@@ -26,6 +26,9 @@ export interface UpdateState {
   readonly error?: string;
   // True when a download or install is being held back because a match is recording.
   readonly recording?: boolean;
+  // True when a download or install is being held back because the core isn't responding (down /
+  // hung / non-200) — distinct from `recording` so the UI doesn't falsely blame a match.
+  readonly unreachable?: boolean;
 }
 
 export interface DotaRecBridge {

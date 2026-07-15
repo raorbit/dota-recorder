@@ -99,6 +99,7 @@ export function GeneralSettings(): React.JSX.Element {
   const checking = status === 'checking' || status === 'downloading';
   const downloaded = status === 'downloaded';
   const deferredByRecording = downloaded && update?.recording === true;
+  const deferredByUnreachable = downloaded && update?.unreachable === true;
 
   return (
     <section className="gen-panel" aria-label="General settings">
@@ -170,6 +171,11 @@ export function GeneralSettings(): React.JSX.Element {
         {deferredByRecording && (
           <p className="gen-row-desc gen-update-warn">
             Can't restart while a match is recording — try again once it ends.
+          </p>
+        )}
+        {deferredByUnreachable && (
+          <p className="gen-row-desc gen-update-warn">
+            Can't restart right now — the recorder isn't responding. Try again in a moment.
           </p>
         )}
         {downloaded && (

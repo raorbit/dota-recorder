@@ -30,7 +30,7 @@ import {
   logDir,
   packagedIndexHtml,
 } from './paths';
-import { UpdateController } from './update-controller';
+import { UpdateController, type BusyResult } from './update-controller';
 import { initUpdater, releaseNotesUrl, type UpdaterHandle } from './updater';
 import type { UpdateState } from './bridge-contract';
 
@@ -72,6 +72,10 @@ let isQuitting = false;
 let updateController: UpdateController | null = null;
 let updaterHandle: UpdaterHandle | null = null;
 let latestUpdateState: UpdateState = { status: 'idle' };
+// Grace period after quitAndInstall(): if the process is still alive this long afterward, the
+// install did not proceed (a failed/invalid staged installer), so recover instead of sitting as a
+// torn-down zombie. Comfortably longer than a real quit-and-relaunch, which exits within ~1-2s.
+const INSTALL_QUIT_GRACE_MS = 10_000;
 // One-time "we're still in the tray" hint, shown the first time the window is hidden so
 // closing the window doesn't look like the app vanished.
 let trayHintShown = false;
@@ -546,28 +550,31 @@ async function shutdown(): Promise<void> {
 }
 
 /**
- * The recording gate for auto-update: true when a match is recording, arming, or stopping, so an
+ * The recording gate for auto-update: busy when a match is recording, arming, or stopping, so an
  * update download/install never interrupts a match. Reads the core's GET /status (idle ⇔
  * !obs.recording && fsm.state === 'IDLE'; ARMED/RECORDING/STOPPING all count as busy — OBS may
- * already be rolling in ARMED). FAIL-SAFE TO BUSY: any timeout / non-200 / unparseable body
- * returns true, so an unreachable or 401ing core never green-lights an install.
+ * already be rolling in ARMED). FAIL-SAFE TO BUSY: any timeout / non-200 / unparseable body returns
+ * busy, so an unreachable or 401ing core never green-lights an install. The `reason` distinguishes a
+ * live match ('recording') from a core that didn't answer ('unreachable') so the UI can explain a
+ * deferral truthfully instead of always blaming a recording.
  */
-async function isRecordingBusy(): Promise<boolean> {
+async function isRecordingBusy(): Promise<BusyResult> {
   try {
     const res = await fetch(`${BRIDGE_BASE}/status`, {
       signal: AbortSignal.timeout(1_500),
       headers: { [BRIDGE_TOKEN_HEADER]: bridgeToken },
     });
-    if (!res.ok) return true;
+    if (!res.ok) return { busy: true, reason: 'unreachable' };
     const body = (await res.json()) as {
       obs?: { recording?: boolean };
       fsm?: { state?: string };
     };
     const recording = body.obs?.recording === true;
     const idleFsm = body.fsm?.state === 'IDLE';
-    return recording || !idleFsm;
+    if (recording || !idleFsm) return { busy: true, reason: 'recording' };
+    return { busy: false };
   } catch {
-    return true;
+    return { busy: true, reason: 'unreachable' };
   }
 }
 
@@ -591,6 +598,33 @@ async function installUpdateNow(): Promise<void> {
   // so the app is held alive until quitAndInstall drives the real exit.
   supervisorsStopped = true;
   updaterHandle?.quitAndInstall();
+  // quitAndInstall is fire-and-forget: if electron-updater's internal install() returns false (a
+  // missing/invalid staged installer), the process is NOT scheduled to quit and we would sit here
+  // with the supervisors torn down — recording dead, crash-recovery disarmed, the UI wedged on
+  // "connecting…" with no way to record or retry until a manual kill. Arm a watchdog: if we're still
+  // alive after the grace period, the install did not proceed, so recover.
+  setTimeout(() => void recoverFromFailedInstall(), INSTALL_QUIT_GRACE_MS);
+}
+
+/**
+ * Recovery for a quitAndInstall that never quit (see {@link installUpdateNow}). Restart the
+ * supervisors we tore down, clear the shutdown latches so normal operation (and crash recovery)
+ * resume, and tell the controller the install was aborted so it releases its install latch and
+ * leaves the still-staged update installable for a retry. No-op if a real quit already proceeded.
+ */
+async function recoverFromFailedInstall(): Promise<void> {
+  if (!supervisorsStopped) return; // a real quit already proceeded, or recovery already ran
+  logLine('[updater] quitAndInstall did not exit within the grace period; recovering supervisors');
+  supervisorsStopped = false;
+  shuttingDown = false;
+  isQuitting = false;
+  try {
+    await supervisor.start();
+    void supervision.launchObs();
+  } catch (err) {
+    logLine(`[updater] failed to restart core after an aborted install: ${String(err)}`);
+  }
+  updateController?.onInstallAborted('the updater did not restart the app');
 }
 
 function fatal(err: unknown): void {
