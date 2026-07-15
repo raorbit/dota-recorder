@@ -56,6 +56,37 @@ domains, crash recovery, storage, and the security model — and
 - **Demo matches** — Hero Demo sessions are skipped by default (real matches only); a
   *Record demo matches* setting captures them too.
 
+## Network activity
+
+No server, no account, no telemetry — your recordings, markers, match database, and Dota account id
+all stay on your machine. The app does make a small, fully enumerable set of outbound calls, listed
+here in full. The only thing ever sent to a third party is public Dota **match IDs**.
+
+**On your machine only (loopback).** How the app's own processes talk to each other — all bound to
+`127.0.0.1`, which is also why installing doesn't trip a Windows firewall prompt:
+
+| Channel | Address | Purpose |
+| --- | --- | --- |
+| Dota 2 → core | `127.0.0.1:3223` | Game State Integration (token-authenticated) |
+| renderer ↔ core | `127.0.0.1:3224` | UI ↔ core REST + status WebSocket (per-launch bearer token) |
+| core ↔ OBS | `127.0.0.1:4466` | obs-websocket, to drive the bundled OBS |
+
+**External, at runtime:**
+
+| Host | When | What's sent | Control |
+| --- | --- | --- | --- |
+| `api.opendota.com` | After each match is recorded | The public **match ID** — plus your optional OpenDota API key only if you set one. Fetches the official scoreboard for result/stats. Your Dota **account id stays local** (used to find your row in the scoreboard) and is never sent. | Automatic; leave the API-key field blank for anonymous requests |
+| `cdn.cloudflare.steamstatic.com` | **Fallback only** — a hero portrait not in the bundled set (e.g. a hero newer than your build) | One `<hero>.png` image request (your IP + which hero). Portraits ship bundled, so normal use requests nothing here. | Only reached for a not-yet-bundled hero |
+| `github.com` | **Packaged builds only** — update checks (~2 min after launch, then every 4 h) and any update download you choose to install; also opening release notes | Your IP + the current app version | Settings → **Auto-update** (on by default) |
+
+**External, at build time only** — on the build machine; the shipped app never calls these:
+`npm run fetch:obs` pulls OBS from GitHub, `npm run fetch:ffmpeg` pulls ffmpeg from `gyan.dev`, and
+`npm run fetch:hero-icons` pulls the hero list from OpenDota plus every portrait from the Steam CDN
+(bundled so icons render offline).
+
+A Content-Security-Policy further restricts the renderer to the loopback core and to images from the
+app itself plus the Steam CDN, so even a bug can't exfiltrate to an arbitrary host.
+
 ## Install
 
 1. Download the latest `Dota 2 Recorder-Setup-*.exe` from the
@@ -82,6 +113,8 @@ Two build pipelines converge in electron-builder: **Gradle** for the JVM core an
 ```sh
 # one-time: download the pinned portable OBS used in dev (~hundreds of MB)
 npm run fetch:obs
+# optional in dev — hero icons otherwise fall back to the Steam CDN at runtime
+npm run fetch:hero-icons
 
 # dev (hot UI + Electron; build the core jar first)
 cd core && ./gradlew bootJar && cd ..
@@ -93,7 +126,7 @@ npm run typecheck
 # core unit tests
 cd core && ./gradlew test
 
-# full Windows installer (NSIS): fetches OBS + ffmpeg, then builds
+# full Windows installer (NSIS): fetches OBS + ffmpeg + hero icons, then builds
 # core jar + trimmed JRE + renderer + electron
 npm run dist
 ```
