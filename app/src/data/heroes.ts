@@ -9,10 +9,30 @@
 
 const HERO_PREFIX = 'npc_dota_hero_';
 
-// Valve's dota_react hero portraits (landscape). Same CDN OpenDota links to. Allowed in
-// the renderer CSP img-src; if it's unreachable (offline) the <img> onError degrades to
-// the placeholder chip.
-const HERO_IMG_BASE = 'https://cdn.cloudflare.steamstatic.com/apps/dota2/images/dota_react/heroes/';
+// Hero portraits, bundled locally at build time (scripts/fetch-hero-icons.mjs) so icons render
+// offline with no runtime CDN dependency. Vite hashes each PNG into the renderer bundle via this
+// eager glob and rewrites the values to relative URLs that resolve under the packaged file:// load
+// (base: './'). A tracked .gitkeep keeps the directory present, so the glob resolves to an empty
+// map — every hero then falls back to the CDN — when the portraits haven't been fetched (e.g. in
+// dev before `npm run fetch:hero-icons`, or in CI, which never runs the fetch).
+const LOCAL_PORTRAITS = import.meta.glob('./hero-portraits/*.png', {
+  eager: true,
+  import: 'default',
+  query: '?url',
+}) as Record<string, string>;
+
+// slug ("drow_ranger") -> bundled asset URL, keyed by each PNG's filename stem.
+const PORTRAIT_BY_SLUG: Readonly<Record<string, string>> = Object.fromEntries(
+  Object.entries(LOCAL_PORTRAITS).map(([file, url]) => [
+    file.slice(file.lastIndexOf('/') + 1, -'.png'.length),
+    url,
+  ]),
+);
+
+// Valve's dota_react CDN (landscape portraits) — the source the local bundle mirrors, kept as a
+// render-time fallback for a hero missing from the bundle (e.g. released after the last build).
+// This host is the sole cross-origin entry in the renderer CSP img-src.
+const HERO_CDN_BASE = 'https://cdn.cloudflare.steamstatic.com/apps/dota2/images/dota_react/heroes/';
 
 // slug -> localized name. Only slugs whose pretty name differs from a naive title-case
 // MUST be here; the rest are included for completeness/offline-correctness.
@@ -169,8 +189,20 @@ export function heroDisplayName(hero: string | null | undefined): string {
   return HERO_NAMES[slug] ?? titleCase(slug);
 }
 
-/** Portrait URL for a raw GSI hero name, or null when there's no hero to show. */
+/**
+ * Bundled-local portrait URL for a raw GSI hero name, or null when there's no hero or the hero
+ * isn't in the local bundle (the caller then falls back to {@link heroIconCdnUrl}).
+ */
 export function heroIconUrl(hero: string | null | undefined): string | null {
   const slug = heroSlug(hero);
-  return slug === null ? null : `${HERO_IMG_BASE}${slug}.png`;
+  return slug === null ? null : (PORTRAIT_BY_SLUG[slug] ?? null);
+}
+
+/**
+ * Valve CDN portrait URL for a raw GSI hero name, or null when there's no hero. Render-time
+ * fallback for a hero absent from the local bundle; relies on the CDN host in the CSP img-src.
+ */
+export function heroIconCdnUrl(hero: string | null | undefined): string | null {
+  const slug = heroSlug(hero);
+  return slug === null ? null : `${HERO_CDN_BASE}${slug}.png`;
 }
