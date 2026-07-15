@@ -49,6 +49,7 @@ build-resources/.ffmpeg-*.ok
 # so they stay untracked; the tracked .gitkeep keeps the dir present so Vite's import.meta.glob
 # always resolves. Delete the marker (or bump HERO_ICONS_VERSION) to refresh when Valve adds a hero.
 app/src/data/hero-portraits/*.png
+app/src/data/hero-portraits/*.tmp
 app/src/data/hero-portraits/.hero-icons-*.ok
 
 # Local SQLite db + write-ahead files / migration backups
