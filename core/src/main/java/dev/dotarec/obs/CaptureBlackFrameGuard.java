@@ -1,6 +1,7 @@
 package dev.dotarec.obs;
 
 import io.obswebsocket.community.client.OBSRemoteController;
+import io.obswebsocket.community.client.message.response.scenes.GetCurrentProgramSceneResponse;
 import io.obswebsocket.community.client.message.response.sources.SaveSourceScreenshotResponse;
 import jakarta.annotation.PreDestroy;
 import java.awt.image.BufferedImage;
@@ -30,8 +31,8 @@ import org.springframework.stereotype.Component;
  *
  * <p>Mechanism: {@link #armCheck()} is called by {@link ObsEvents} the instant OBS confirms
  * {@code OUTPUT_STARTED}. It clears any prior warning and schedules a single, delayed, off-thread
- * check (the OBS event thread must never block). {@link #runCheck()} screenshots the Game Capture
- * source, measures its mean luminance, and if it is near-zero flips {@link ObsHealth#setCaptureBlack}
+ * check (the OBS event thread must never block). {@link #runCheck()} screenshots the current program
+ * scene, measures its mean luminance, and if it is near-zero flips {@link ObsHealth#setCaptureBlack}
  * and pushes a fresh status frame so the UI can warn the user mid-match. The check is a pure
  * <em>detector</em>: it never touches the recording, and any sampling failure is treated as "unknown"
  * (no false alarm).
@@ -119,7 +120,7 @@ public class CaptureBlackFrameGuard {
             // The recording already stopped within the delay window; nothing to warn about.
             return;
         }
-        Double luma = sampleGameCaptureLuma();
+        Double luma = sampleProgramSceneLuma();
         if (luma == null) {
             log.debug("Black-frame check: could not sample the capture; skipping");
             return;
@@ -140,22 +141,41 @@ public class CaptureBlackFrameGuard {
     }
 
     /**
-     * Screenshots the Game Capture source to a temp file, decodes it, and returns its mean luminance,
-     * or {@code null} if OBS is not connected or the screenshot/decoding failed (treated as "unknown").
-     * Package-visible and overridable purely as a test seam: a test can subclass and return a canned
+     * Screenshots the current OBS program SCENE to a temp file, decodes it, and returns its mean
+     * luminance, or {@code null} if OBS is not connected, has no active scene, or the
+     * screenshot/decoding failed (treated as "unknown").
+     *
+     * <p>Deliberately samples the SCENE, not the {@link ObsSceneConfigurer#GAME_CAPTURE_INPUT} source.
+     * When game capture fails to hook the Dota window — the exact pure-black failure this guard exists
+     * to catch — the source's base size is 0x0 and OBS refuses a zero-size {@code SaveSourceScreenshot},
+     * returning an unsuccessful response we would misread as "unknown" and never warn on. A scene is
+     * always canvas-sized and renderable, so it screenshots as a decodable BLACK frame when its only
+     * source is unhooked, and it faithfully measures what is actually encoded into the VOD. Mirrors
+     * {@link ThumbnailService#captureCurrentScene}.
+     *
+     * <p>Package-visible and overridable purely as a test seam: a test can subclass and return a canned
      * luminance to exercise {@link #runCheck()}'s decision without a live OBS.
      */
-    Double sampleGameCaptureLuma() {
+    Double sampleProgramSceneLuma() {
         OBSRemoteController c = obs.connectedController();
         if (c == null) {
             return null;
         }
+        GetCurrentProgramSceneResponse scene = c.getCurrentProgramScene(SCREENSHOT_TIMEOUT_MS);
+        if (scene == null
+                || !scene.isSuccessful()
+                || scene.getCurrentProgramSceneName() == null
+                || scene.getCurrentProgramSceneName().isBlank()) {
+            // No active scene to sample -> unknown, not black.
+            return null;
+        }
+        String sceneName = scene.getCurrentProgramSceneName();
         Path tmp = null;
         try {
             tmp = Files.createTempFile("dotarec-blackcheck-", "." + IMAGE_FORMAT);
             SaveSourceScreenshotResponse resp =
                     c.saveSourceScreenshot(
-                            ObsSceneConfigurer.GAME_CAPTURE_INPUT,
+                            sceneName,
                             IMAGE_FORMAT,
                             tmp.toString(),
                             SAMPLE_WIDTH,
