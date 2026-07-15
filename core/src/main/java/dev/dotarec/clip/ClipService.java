@@ -115,14 +115,15 @@ public class ClipService {
                             + ") for match " + parentMatchId);
         }
 
-        // Clamp to the recorded range. A null/absent duration just leaves the upper bound open.
+        // Normalize the range but do NOT clamp to match.durationS(): that column holds the real VIDEO
+        // length only until enrichment overwrites it with OpenDota's (shorter) IN-GAME duration, while
+        // clip offsets arrive in the VIDEO timebase — so clamping would silently truncate or reject a
+        // clip of a late-game/post-game moment once a match has been enriched (the marquee "clip the
+        // game-winning teamfight" case would 400 with no feedback). ffmpeg stops cleanly at EOF if the
+        // range runs past the file, and the MAX_CLIP_SECONDS cap below still bounds an unreasonable
+        // request; the recorded video's true end is the only real limit and we don't reliably know it.
         double lower = Math.max(0.0, Math.min(startS, endS));
         double upper = Math.max(startS, endS);
-        if (match.durationS() != null) {
-            double dur = match.durationS();
-            lower = Math.max(0.0, Math.min(lower, dur));
-            upper = Math.min(upper, dur);
-        }
         if (upper <= lower) {
             throw new IllegalArgumentException(
                     "Cannot create clip: empty range [" + startS + ", " + endS + "] for match "

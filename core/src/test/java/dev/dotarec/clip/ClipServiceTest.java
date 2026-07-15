@@ -164,6 +164,22 @@ class ClipServiceTest {
         verify(events).publish(eq("clip.ready"), any());
     }
 
+    @Test
+    void createManual_rangePastDurationS_isNotClampedOrRejected() throws Exception {
+        // Regression: durationS holds the real video length only until enrichment overwrites it with
+        // OpenDota's shorter in-game duration, while clip offsets are in the video timebase. A clip of a
+        // late-game/post-game moment (past durationS) must still be cut at the requested offsets, not
+        // truncated to durationS or rejected as an empty range.
+        long parent = seedMatchWithVideo(1800); // enriched in-game duration, shorter than the real VOD
+        stubClipperToWriteRealFiles(64L);
+
+        long clipId = service.createManual(parent, 2000.0, 2030.0, null); // entirely past durationS
+
+        // Cut at the requested offsets (start 2000, duration 30) — no clamp to 1800, no empty-range throw.
+        verify(clipper, times(1)).clip(any(), eq(2000.0), eq(30.0), any());
+        assertThat(clips.findById(clipId).orElseThrow().status()).isEqualTo("ready");
+    }
+
     // ---- generateAsync invariants -----------------------------------------------------------
 
     @Test
@@ -292,8 +308,9 @@ class ClipServiceTest {
         stubClipperToWriteRealFiles(64L);
 
         // Simulate a row wedged in 'generating' from a finalize-time double DB failure: its worker
-        // exited without ever flipping it to ready/failed. created_at is well past the stale cutoff.
-        long staleCreatedAt = System.currentTimeMillis() - (60L * 60_000L);
+        // exited without ever flipping it to ready/failed. created_at is well past the stale cutoff
+        // (which is 2h; use 3h so the row is unambiguously stale regardless of the exact threshold).
+        long staleCreatedAt = System.currentTimeMillis() - (3L * 60L * 60_000L);
         long clipId = clips.insert(parent, "manual", null, 30.0, 45.0, null,
                 null, null, null, "generating", null, staleCreatedAt);
 
