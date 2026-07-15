@@ -1,0 +1,3 @@
+# Keeps this directory present so the Vite `import.meta.glob('./hero-portraits/*.png')` in
+# ../heroes.ts always resolves (to an empty map when portraits haven't been fetched). The PNGs
+# themselves are fetched at build time by scripts/fetch-hero-icons.mjs and are gitignored.

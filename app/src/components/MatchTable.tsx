@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { PopupMenu } from './PopupMenu';
 import { useLibraryStore, type ResultFilter } from '../store/library';
 import { bucketLabelOf, matchesBucket, BUCKET_LABELS } from '../store/buckets';
-import { heroDisplayName, heroIconUrl } from '../data/heroes';
+import { heroDisplayName, heroIconUrl, heroIconCdnUrl } from '../data/heroes';
 import { clipThumbUrl, type MatchSummary, type Clip } from '../api/client';
 import {
   EMDASH,
@@ -138,22 +138,30 @@ const ALL_COLUMNS: readonly ColumnDef[] = COLUMN_META.map((meta) => ({
   ...CELL[meta.key],
 }));
 
-// Hero portrait with graceful fallback: shows the CDN icon, degrading to the plain chip
-// placeholder when there's no hero or the image can't load (e.g. offline / unknown hero).
+// Hero portrait with graceful fallback: prefers the locally-bundled icon, falls back to the Valve
+// CDN (covers a hero released after the last build), and finally degrades to the plain chip
+// placeholder when there's no hero or nothing loads (e.g. offline / unknown hero).
 function HeroIcon({ hero }: { readonly hero: string | null }): React.JSX.Element {
-  const url = heroIconUrl(hero);
-  const [failed, setFailed] = useState(false);
-  if (url === null || failed) {
+  const sources = useMemo(
+    () => [heroIconUrl(hero), heroIconCdnUrl(hero)].filter((u): u is string => u !== null),
+    [hero],
+  );
+  const [srcIndex, setSrcIndex] = useState(0);
+  // Reset to the preferred source whenever the hero changes: this component instance can be
+  // reused for a different row when the table re-sorts or filters.
+  useEffect(() => setSrcIndex(0), [hero]);
+  const src = sources[srcIndex];
+  if (src === undefined) {
     return <span className="mt-hero-chip" aria-hidden="true" />;
   }
   return (
     <img
       className="mt-hero-icon"
-      src={url}
+      src={src}
       alt=""
       aria-hidden="true"
       loading="lazy"
-      onError={() => setFailed(true)}
+      onError={() => setSrcIndex((i) => i + 1)}
     />
   );
 }
