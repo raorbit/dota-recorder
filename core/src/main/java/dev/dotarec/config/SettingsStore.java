@@ -296,8 +296,10 @@ public class SettingsStore {
         // install or a legacy settings.json predating audioSources) so the game's audio records out of
         // the box. An explicit empty list (the user cleared every source) is left empty and durable — we
         // do NOT resurrect the removed app capture. The window match "::dota2.exe" is the encoded
-        // "title:class:exe" string the scene configurer pairs with priority=2 (match by executable), so
-        // it binds whenever dota2.exe is running.
+        // "title:class:exe" string (empty title/class + exe, priority=2 match-by-executable); OBS's
+        // WASAPI process capture resolves this exe-only form to the live dota2.exe window. NOTE: video
+        // game capture needs the FULL "Dota 2:SDL_app:dota2.exe" instead (see ObsSceneConfigurer) — its
+        // window matcher rejects an empty class and would capture black; the two plugins match differently.
         if (loaded.audioSources == null) {
             loaded.audioSources =
                     new ArrayList<>(

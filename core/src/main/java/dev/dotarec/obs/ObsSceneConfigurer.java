@@ -36,8 +36,8 @@ import org.springframework.stereotype.Component;
  * <ul>
  *   <li>scene {@code "Dota"} exists;
  *   <li>input {@code "Game Capture"} of kind {@code game_capture} exists in that scene, locked to
- *       the Dota window ({@code capture_mode=window}, {@code window="::dota2.exe"}, exe priority) so
- *       it never hooks some other fullscreen app;
+ *       the Dota window ({@code capture_mode=window}, {@code window="Dota 2:SDL_app:dota2.exe"}, exe
+ *       priority) so it never hooks some other fullscreen app;
  *   <li>the user's audio source list is reconciled into {@code dotarec:<id>}-named WASAPI inputs;
  *   <li>{@code "Dota"} is the current program scene.
  * </ul>
@@ -72,13 +72,19 @@ public class ObsSceneConfigurer {
     static final String CAPTURE_MODE_WINDOW = "window";
 
     /**
-     * Encoded {@code "title:class:exe"} OBS window match for Dota, paired with {@link
-     * #WINDOW_PRIORITY_EXE}: an empty title/class plus the executable {@code dota2.exe}. Matching by
-     * executable binds capture whenever {@code dota2.exe} is running, regardless of the window's title
-     * or class. This is the same encoding {@code SettingsStore} uses for Dota's process-audio capture,
-     * kept identical so the video and audio window matches can't drift.
+     * Encoded {@code "title:class:exe"} OBS window match for the Dota window: {@code
+     * Dota 2:SDL_app:dota2.exe}, paired with {@link #WINDOW_PRIORITY_EXE}. The real title+class are
+     * REQUIRED, not cosmetic: OBS's {@code game_capture} window mode parses this string and, on an empty
+     * class, {@code ms_find_window} returns null <em>before</em> it ever scores candidates by priority —
+     * so an exe-only {@code "::dota2.exe"} selects no window at all, the graphics hook never fires, and
+     * every recording comes out pure black (confirmed from OBS logs: zero hook attempts across whole
+     * sessions). This is why the video match deliberately differs from the {@code "::dota2.exe"} that
+     * {@code SettingsStore} seeds for Dota's process-AUDIO capture: WASAPI process capture resolves an
+     * exe-only match through a different code path (no class guard), but game capture cannot. With the
+     * real title/class present, {@link #WINDOW_PRIORITY_EXE} still lets capture re-bind by executable
+     * should the window title ever drift.
      */
-    static final String GAME_CAPTURE_WINDOW_MATCH = "::dota2.exe";
+    static final String GAME_CAPTURE_WINDOW_MATCH = "Dota 2:SDL_app:dota2.exe";
 
     /** OBS window-match priority 2 = {@code WINDOW_PRIORITY_EXE} (match by executable name). */
     static final int WINDOW_PRIORITY_EXE = 2;
