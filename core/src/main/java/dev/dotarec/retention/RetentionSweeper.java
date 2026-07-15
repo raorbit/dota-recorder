@@ -336,15 +336,21 @@ public class RetentionSweeper {
                         continue; // starred (or repointed/pruned) since the snapshot — not deletable
                     }
                     boolean videoGone = deleteFileQuietly(m.videoPath());
-                    boolean thumbGone = deleteFileQuietly(m.thumbPath());
                     if (!videoGone) {
                         // The file is still on disk: undo the claim so the row keeps referencing its
-                        // intact VOD and the next sweep retries — never an invisibly orphaned file.
+                        // intact VOD and the next sweep retries — never an invisibly orphaned file. The
+                        // thumbnail is deliberately left untouched here — it is unlinked only AFTER the
+                        // video delete is confirmed below. Unlinking it first would strand a dangling
+                        // thumb_path: restoreVideoPath puts the (now-deleted) thumb path back on the row.
                         matches.restoreVideoPath(m.id(), m.videoPath(), m.thumbPath(), m.fileSizeBytes());
                         log.warn("Retention sweep left match {} intact because video deletion failed", m.id());
                         continue;
                     }
                     total -= size;
+                    // Video gone for good: only NOW unlink the thumbnail. Deferring it past the confirmed
+                    // video delete means a failed video delete (e.g. a locked .mp4) never leaves a
+                    // deleted thumb behind a restored thumb_path.
+                    boolean thumbGone = deleteFileQuietly(m.thumbPath());
                     if (!thumbGone) {
                         log.warn(
                                 "Retention sweep could not delete thumbnail for match {}; pruning video row anyway",

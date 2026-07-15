@@ -353,6 +353,35 @@ class RetentionSweeperTest {
     }
 
     @Test
+    void failedVideoDeleteLeavesThumbnailIntactAndDoesNotDangleThumbPath() throws Exception {
+        // F17: the oldest match's .mp4 can't be deleted (an open handle / locked file on Windows), but
+        // its thumbnail IS a normal deletable file. The thumbnail must be unlinked ONLY AFTER the video
+        // delete is confirmed — otherwise the thumb is gone yet restoreVideoPath puts its path back on
+        // the row, a permanent dangling thumb_path. A newer real VOD pushes over cap so the undeletable
+        // (oldest) match is tried first, then the pass continues to evict the real one.
+        settings.get().retentionCapGb = 1;
+        long gib = 1024L * 1024 * 1024;
+
+        long undeletable = seedMatchWithUndeletableVideo("u-video.mp4", "u-thumb.jpg", 1_000L);
+        long realVod = seedWithFiles("real.mp4", "real.jpg", 2 * gib, 2_000L, false);
+
+        sweeper.sweep(null);
+
+        // The undeletable match's thumbnail survives on disk...
+        Path thumb = videoDir.resolve("u-thumb.jpg");
+        assertThat(Files.exists(thumb))
+                .as("a failed video delete must leave the thumbnail intact, never dangling")
+                .isTrue();
+        // ...and its row keeps a VALID thumb_path (points at the still-existing file), not a dangling one.
+        var row = matches.findById(undeletable).orElseThrow();
+        assertThat(row.videoPath()).isEqualTo(videoDir.resolve("u-video.mp4").toString());
+        assertThat(row.thumbPath()).isEqualTo(thumb.toString());
+        // The pass was not aborted: the newer real VOD is still evicted.
+        assertThat(matches.findById(realVod).orElseThrow().videoPath()).isNull();
+        assertThat(Files.exists(videoDir.resolve("real.mp4"))).isFalse();
+    }
+
+    @Test
     void sweepNeverDeletesStarred() throws Exception {
         settings.get().retentionCapGb = 1;
         long gib = 1024L * 1024 * 1024;
@@ -1097,6 +1126,26 @@ class RetentionSweeperTest {
                 "win", 7, 22, null, null, 1800,
                 playedAt, videoPath.toString(), thumbPath.toString(), dbSizeBytes, starred, playedAt,
                 null));
+    }
+
+    /**
+     * Seeds a non-starred match whose {@code video_path} is UNDELETABLE on a present drive (a
+     * non-empty directory named like an .mp4, so {@code deleteFileQuietly} returns false) paired with
+     * a normal, deletable thumbnail file — isolating the "video delete fails but thumb is removable"
+     * case F17 guards. Its dir reports size 0, so it contributes nothing to the budget. Returns the id.
+     */
+    private long seedMatchWithUndeletableVideo(String video, String thumb, long playedAt)
+            throws Exception {
+        Path videoPath = videoDir.resolve(video);
+        Files.createDirectories(videoPath);
+        Files.writeString(videoPath.resolve("inner"), "x"); // non-empty -> deletion fails
+        Path thumbPath = videoDir.resolve(thumb);
+        Files.createFile(thumbPath);
+        return matches.insert(new NewMatch(
+                null, "match", "enriched", "puck",
+                1, 2, 3, 400, 500, 10000, 120,
+                "win", 7, 22, null, null, 1800,
+                playedAt, videoPath.toString(), thumbPath.toString(), null, false, playedAt, null));
     }
 
     /** Seeds a ready clip of {@code parentMatchId} with on-disk video + thumb files; returns its id. */
