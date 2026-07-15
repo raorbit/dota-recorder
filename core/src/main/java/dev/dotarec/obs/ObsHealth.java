@@ -26,6 +26,15 @@ public class ObsHealth {
     private volatile boolean sceneActive;
     private volatile boolean recording;
 
+    /**
+     * Whether the last black-frame check found the game capture to be black (near-zero luminance)
+     * while recording — the "OBS recording, but a black screen" failure that {@code isRecording}
+     * alone can't distinguish. Set by {@link CaptureBlackFrameGuard} a few seconds into a recording
+     * and cleared when a new recording arms or the current one stops. Independent volatile like the
+     * others; the status layer reports it as-is.
+     */
+    private volatile boolean captureBlack;
+
     public boolean isConnected() {
         return connected;
     }
@@ -48,5 +57,13 @@ public class ObsHealth {
 
     public void setRecording(boolean recording) {
         this.recording = recording;
+    }
+
+    public boolean isCaptureBlack() {
+        return captureBlack;
+    }
+
+    public void setCaptureBlack(boolean captureBlack) {
+        this.captureBlack = captureBlack;
     }
 }

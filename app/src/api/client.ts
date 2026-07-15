@@ -77,6 +77,9 @@ export interface StatusSnapshot {
     readonly connected: boolean;
     readonly sceneActive: boolean;
     readonly recording: boolean;
+    // True when a recording is live but the game capture was sampled as black (near-zero
+    // luminance) — a black-screen recording that `recording` alone can't reveal.
+    readonly captureBlack: boolean;
   };
   readonly fsm: {
     readonly state: string;
@@ -90,6 +93,8 @@ export interface Status {
   readonly fsmState: string;
   readonly matchId: number | null;
   readonly recording: boolean;
+  // True when recording but the game capture sampled black — the UI warns so a black VOD is never silent.
+  readonly captureBlack: boolean;
   readonly gsiConnected: boolean;
   readonly snapshot: StatusSnapshot;
 }
@@ -106,6 +111,7 @@ export function toStatus(snapshot: StatusSnapshot): Status {
     fsmState: snapshot.fsm.state,
     matchId: snapshot.fsm.activeMatchId,
     recording: snapshot.obs.recording,
+    captureBlack: snapshot.obs.captureBlack,
     gsiConnected: snapshot.gsi.connected,
     snapshot,
   };
@@ -758,9 +764,17 @@ function parseStatusSnapshot(payload: unknown): StatusSnapshot | null {
     return null;
   }
   if (typeof fsm.state !== 'string' || !isNullableNumber(fsm.activeMatchId)) return null;
+  // captureBlack is optional on the wire: a boolean when present, defaulted to false when a core
+  // predating the black-frame guard omits it — its absence must not reject the whole status frame.
+  const captureBlack = typeof obs.captureBlack === 'boolean' ? obs.captureBlack : false;
   return {
     gsi: { connected: gsi.connected, lastFrameAgoMs: gsi.lastFrameAgoMs ?? null },
-    obs: { connected: obs.connected, sceneActive: obs.sceneActive, recording: obs.recording },
+    obs: {
+      connected: obs.connected,
+      sceneActive: obs.sceneActive,
+      recording: obs.recording,
+      captureBlack,
+    },
     fsm: { state: fsm.state, activeMatchId: fsm.activeMatchId ?? null },
   };
 }

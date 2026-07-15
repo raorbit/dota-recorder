@@ -71,6 +71,20 @@
   color: var(--accent);
 }
 
+/* Black-capture alert: shown under the recording status when the game capture samples black
+   (the "recording, but a black screen" failure the black-frame guard detects). */
+.sb-status-warn {
+  margin-top: 8px;
+  padding: 6px 8px;
+  border-left: 2px solid var(--loss);
+  background: rgba(224, 122, 111, 0.12);
+  color: var(--loss);
+  font-family: var(--font-body);
+  font-size: 12px;
+  line-height: 1.35;
+  border-radius: 2px;
+}
+
 /* --- manual stop control (only rendered while recording) --- */
 .sb-stop-wrap {
   display: flex;
