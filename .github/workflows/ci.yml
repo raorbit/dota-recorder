@@ -51,3 +51,10 @@ jobs:
 
       - name: App unit tests (electron supervisors)
         run: npm --prefix app run test
+
+      # Guards the packaging config (electron-builder.yml layout + asarUnpack) without running the
+      # heavy electron-builder packaging, so a regression like the PR #22 flat `to: obs` or a koffi
+      # asarUnpack that misses @koromix fails here rather than at release time. Runs after the app
+      # deps install so it can cross-check the installed koffi layout.
+      - name: Packaging config check
+        run: node scripts/check-packaging-config.mjs
