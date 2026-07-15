@@ -35,8 +35,9 @@ import org.springframework.stereotype.Component;
  *
  * <ul>
  *   <li>scene {@code "Dota"} exists;
- *   <li>input {@code "Game Capture"} of kind {@code game_capture} (with {@code
- *       capture_mode=any_fullscreen}) exists in that scene;
+ *   <li>input {@code "Game Capture"} of kind {@code game_capture} exists in that scene, locked to
+ *       the Dota window ({@code capture_mode=window}, {@code window="::dota2.exe"}, exe priority) so
+ *       it never hooks some other fullscreen app;
  *   <li>the user's audio source list is reconciled into {@code dotarec:<id>}-named WASAPI inputs;
  *   <li>{@code "Dota"} is the current program scene.
  * </ul>
@@ -62,6 +63,25 @@ public class ObsSceneConfigurer {
     public static final String SCENE_NAME = "Dota";
     static final String GAME_CAPTURE_INPUT = "Game Capture";
     static final String GAME_CAPTURE_KIND = "game_capture";
+
+    /**
+     * OBS game-capture mode that captures one specific window (the Dota window), rather than {@code
+     * any_fullscreen} which hooks whatever application happens to be fullscreen — the bug where a
+     * fullscreen media player/browser (e.g. Jellyfin) got recorded instead of the game.
+     */
+    static final String CAPTURE_MODE_WINDOW = "window";
+
+    /**
+     * Encoded {@code "title:class:exe"} OBS window match for Dota, paired with {@link
+     * #WINDOW_PRIORITY_EXE}: an empty title/class plus the executable {@code dota2.exe}. Matching by
+     * executable binds capture whenever {@code dota2.exe} is running, regardless of the window's title
+     * or class. This is the same encoding {@code SettingsStore} uses for Dota's process-audio capture,
+     * kept identical so the video and audio window matches can't drift.
+     */
+    static final String GAME_CAPTURE_WINDOW_MATCH = "::dota2.exe";
+
+    /** OBS window-match priority 2 = {@code WINDOW_PRIORITY_EXE} (match by executable name). */
+    static final int WINDOW_PRIORITY_EXE = 2;
 
     /**
      * OBS bounds type that scales a source to fit inside its bounds box, preserving aspect ratio. We
@@ -173,25 +193,51 @@ public class ObsSceneConfigurer {
             throw new ObsException("Failed to fetch input list");
         }
         if (inputExists(inputs.getInputs(), GAME_CAPTURE_INPUT)) {
-            log.debug("Game capture input '{}' already exists", GAME_CAPTURE_INPUT);
+            // Already present — but an input created by an older build (or hand-made by the user) may
+            // be on capture_mode=any_fullscreen, which hooks whatever app is fullscreen and can record
+            // the wrong window. Re-assert the Dota window lock on every connect so a stale input is
+            // corrected in place (overlay merges our keys over its existing settings). Non-fatal: a
+            // failure warns rather than aborting scene config — mirrors fitGameCaptureToCanvas.
+            SetInputSettingsResponse fix =
+                    controller.setInputSettings(
+                            GAME_CAPTURE_INPUT, gameCaptureSettings(), true, REQUEST_TIMEOUT_MS);
+            if (fix == null || !fix.isSuccessful()) {
+                log.warn(
+                        "Failed to re-lock '{}' to dota2.exe; capture may hook the wrong window",
+                        GAME_CAPTURE_INPUT);
+            } else {
+                log.debug("Ensured '{}' is locked to dota2.exe (capture_mode=window)", GAME_CAPTURE_INPUT);
+            }
             return;
         }
-        JsonObject settings = new JsonObject();
-        settings.addProperty("capture_mode", "any_fullscreen");
         CreateInputResponse resp =
                 controller.createInput(
                         SCENE_NAME,
                         GAME_CAPTURE_INPUT,
                         GAME_CAPTURE_KIND,
-                        settings,
+                        gameCaptureSettings(),
                         true, // sceneItemEnabled
                         REQUEST_TIMEOUT_MS);
         if (resp == null || !resp.isSuccessful()) {
             throw new ObsException("Failed to create input " + GAME_CAPTURE_INPUT);
         }
         log.info(
-                "Created game capture input '{}' with capture_mode=any_fullscreen",
+                "Created game capture input '{}' locked to dota2.exe (capture_mode=window)",
                 GAME_CAPTURE_INPUT);
+    }
+
+    /**
+     * The OBS {@code game_capture} settings that pin capture to the Dota window: {@code
+     * capture_mode=window} matching {@link #GAME_CAPTURE_WINDOW_MATCH} by executable ({@link
+     * #WINDOW_PRIORITY_EXE}). Used for both the initial create and the every-connect re-lock, so the
+     * two paths can't disagree. Package-visible for a direct unit test of the produced JSON.
+     */
+    static JsonObject gameCaptureSettings() {
+        JsonObject settings = new JsonObject();
+        settings.addProperty("capture_mode", CAPTURE_MODE_WINDOW);
+        settings.addProperty("window", GAME_CAPTURE_WINDOW_MATCH);
+        settings.addProperty("priority", WINDOW_PRIORITY_EXE);
+        return settings;
     }
 
     /**
