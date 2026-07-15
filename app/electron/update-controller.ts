@@ -123,7 +123,18 @@ export class UpdateController {
     // Latch synchronously BEFORE the await so two near-simultaneous clicks can't both pass the
     // busy check and both call doInstall (concurrent teardowns / a duplicate NSIS installer).
     this.installing = true;
-    if (await this.deps.isBusy()) {
+    let busy: boolean;
+    try {
+      busy = await this.deps.isBusy();
+    } catch (err) {
+      // isBusy is contracted to fail-safe to true and never reject; if it somehow does, release the
+      // latch so "Restart to update" stays clickable instead of wedging dead for the whole session,
+      // and fail safe by NOT installing (an unknown gate is treated as busy).
+      this.installing = false;
+      this.deps.log(`[updater] install gate check threw; not installing: ${String(err)}`);
+      return;
+    }
+    if (busy) {
       // Not installing after all — release the latch so the user can retry once the match ends.
       this.installing = false;
       this.deps.log('[updater] install requested while recording; deferring');

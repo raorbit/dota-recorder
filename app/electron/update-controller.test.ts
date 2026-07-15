@@ -238,6 +238,17 @@ describe('UpdateController', () => {
     expect(h.deps.doInstall).toHaveBeenCalledTimes(1);
   });
 
+  it('releases the install latch (and does not install) when the recording gate check throws', async () => {
+    const h = harness({ busy: false });
+    h.controller.onUpdateDownloaded('7.0.0');
+    // A rejecting isBusy must not wedge the latch: no install this time, and a later click still can.
+    h.deps.isBusy.mockRejectedValueOnce(new Error('core unreachable'));
+    await h.controller.installNow();
+    expect(h.deps.doInstall).not.toHaveBeenCalled();
+    await h.controller.installNow();
+    expect(h.deps.doInstall).toHaveBeenCalledTimes(1);
+  });
+
   it('clears a deferred-download deferral (and its retry) when auto-update is disabled', async () => {
     const h = harness({ enabled: true, busy: true });
     h.controller.onUpdateAvailable('8.0.0', 'url');
