@@ -574,9 +574,10 @@ async function isRecordingBusy(): Promise<boolean> {
 /**
  * Install a downloaded update: tear the supervisors down ourselves, then quitAndInstall. The
  * recording gate was already checked by {@link UpdateController.installNow}. supervisorsStopped is
- * set BEFORE quitAndInstall so the before-quit handler (which quitAndInstall's internal app.quit()
- * triggers) lets the quit proceed rather than re-running shutdown() — otherwise the two deadlock.
- * shuttingDown is set too so crash supervision treats the teardown as intentional, not a crash.
+ * set AFTER teardown, immediately before quitAndInstall (see the inline note below for why not
+ * before the await), so the before-quit handler that quitAndInstall's internal app.quit() triggers
+ * lets the quit proceed rather than re-running shutdown() — otherwise the two deadlock. shuttingDown
+ * is set too so crash supervision treats the teardown as intentional, not a crash.
  */
 async function installUpdateNow(): Promise<void> {
   logLine('[updater] installing update: stopping supervisors then quitAndInstall');
