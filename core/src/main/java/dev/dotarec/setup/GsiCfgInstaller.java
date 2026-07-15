@@ -26,6 +26,14 @@ import org.springframework.stereotype.Component;
  * fallback, so the two can never drift. The token is minted (via {@link SecureRandom}) and persisted
  * to {@code settings.json} only on first install — never eagerly — so a token only ever exists
  * alongside a cfg that carries it.
+ *
+ * <p>{@link #install()} and {@link #manualInstructions()} are {@code synchronized} so the
+ * mint → cfg-write → persist sequence is atomic across concurrent callers. Without it, two racing
+ * FIRST installs each mint a distinct token: the cfg write is last-writer-wins while the FIRST
+ * persist wins, so the file on disk can carry a different token than the one committed to settings,
+ * silently 403'ing GSI (no recording). Once any token is persisted both paths read the same existing
+ * one, so contention only ever matters for that first install — cheap to serialize, this being a rare
+ * setup action.
  */
 @Component
 public class GsiCfgInstaller {
@@ -59,8 +67,12 @@ public class GsiCfgInstaller {
      * Discovers the Dota install, mints+persists the GSI auth token on first run, writes the cfg, and
      * verifies it by read-back. Returns {@code installed=false} (so the endpoint can answer 200) when
      * Dota cannot be found; throws only on a real write failure (permissions / disk).
+     *
+     * <p>{@code synchronized}: two concurrent FIRST installs must not each mint a distinct token and
+     * disagree between the cfg file (last write wins) and the persisted token (first persist wins).
+     * See the class Javadoc.
      */
-    public InstallResult install() {
+    public synchronized InstallResult install() {
         Optional<String> dota = steamPathDiscovery.findDotaInstallDir();
         if (dota.isEmpty()) {
             return new InstallResult(false, null, null);
@@ -90,8 +102,11 @@ public class GsiCfgInstaller {
      * The cfg body (byte-identical to what {@link #install()} writes) plus its filename and, if Dota is
      * discoverable, the directory to drop it in — for the manual fallback. Mints the token if needed so
      * the manual cfg carries the same secret the controller validates.
+     *
+     * <p>{@code synchronized} with {@link #install()} on the same monitor so the token this renders and
+     * the token an in-flight {@code install()} persists can never diverge (see the class Javadoc).
      */
-    public ManualInstructions manualInstructions() {
+    public synchronized ManualInstructions manualInstructions() {
         String token = mintTokenIfNeeded();
         String targetDir =
                 steamPathDiscovery

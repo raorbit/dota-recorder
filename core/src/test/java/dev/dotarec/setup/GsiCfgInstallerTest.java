@@ -9,7 +9,13 @@ import dev.dotarec.config.SettingsStore;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -71,6 +77,53 @@ class GsiCfgInstallerTest {
         assertThat(result.installed()).isFalse();
         assertThat(result.dotaDir()).isNull();
         assertThat(result.cfgPath()).isNull();
+    }
+
+    @Test
+    void concurrentFirstInstalls_agreeOnASingleTokenBetweenCfgAndSettings(
+            @TempDir Path dir, @TempDir Path dota) throws Exception {
+        SteamPathDiscovery discovery = mock(SteamPathDiscovery.class);
+        when(discovery.findDotaInstallDir()).thenReturn(Optional.of(dota.toString()));
+        SettingsStore settings = settings(dir);
+        GsiCfgInstaller installer = new GsiCfgInstaller(discovery, settings);
+
+        // Fire many concurrent FIRST installs. Because install() serializes the mint -> cfg-write ->
+        // persist sequence, the token the cfg file ends up carrying always equals the persisted token.
+        // Un-serialized, two racing installs each mint their own token: the last cfg write wins on disk
+        // while the first persist wins in settings, leaving the two disagreeing (a silent GSI 403).
+        int threads = 8;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CyclicBarrier gate = new CyclicBarrier(threads);
+        try {
+            List<Future<?>> futures = new ArrayList<>();
+            for (int i = 0; i < threads; i++) {
+                futures.add(pool.submit(() -> {
+                    await(gate);
+                    installer.install();
+                    return null;
+                }));
+            }
+            for (Future<?> f : futures) {
+                f.get();
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+
+        Path cfg = dota.resolve(GsiCfgInstaller.CFG_SUBDIR).resolve(GsiCfgInstaller.CFG_FILE_NAME);
+        String persisted = settings.get().gsiAuthToken;
+        assertThat(persisted).isNotBlank();
+        assertThat(Files.readString(cfg))
+                .as("the cfg on disk must carry the same token that was persisted to settings")
+                .contains(persisted);
+    }
+
+    private static void await(CyclicBarrier gate) {
+        try {
+            gate.await();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 
     @Test
