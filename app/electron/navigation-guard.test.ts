@@ -8,15 +8,28 @@ const PACKAGED = {
 };
 
 describe('isAllowedNavigation — dev', () => {
-  it('allows the dev server and paths under it', () => {
+  it('allows the dev-server origin on any path (HMR + deep links share it)', () => {
     expect(isAllowedNavigation('http://localhost:5173', DEV)).toBe(true);
     expect(isAllowedNavigation('http://localhost:5173/settings', DEV)).toBe(true);
+    expect(isAllowedNavigation('http://localhost:5173/#/library?x=1', DEV)).toBe(true);
   });
 
   it('blocks other origins and local files', () => {
     expect(isAllowedNavigation('http://localhost:9999/', DEV)).toBe(false);
     expect(isAllowedNavigation('https://example.com/', DEV)).toBe(false);
     expect(isAllowedNavigation('file:///C:/anything.html', DEV)).toBe(false);
+  });
+
+  it('blocks port-prefix collisions and userinfo-bypass lookalikes (origin match, not prefix)', () => {
+    // The old `url.startsWith('http://localhost:5173')` admitted both of these. :51730 shares the
+    // 5173 prefix but is a different port; the second smuggles evil.tld past the check as the real
+    // host (localhost:5173 is only userinfo). An origin comparison rejects both.
+    expect(isAllowedNavigation('http://localhost:51730/', DEV)).toBe(false);
+    expect(isAllowedNavigation('http://localhost:5173@evil.tld/', DEV)).toBe(false);
+  });
+
+  it('denies an unparseable url on the dev branch', () => {
+    expect(isAllowedNavigation('not a url', DEV)).toBe(false);
   });
 });
 

@@ -1,6 +1,6 @@
 // Navigation allow-list for the main window, extracted from main.ts so the policy is unit-testable
-// without Electron. Dev allows anything under the Vite dev server (prefix match — HMR and deep links
-// share that origin). Packaged allows ONLY the bundled index.html itself: the old bare `file://`
+// without Electron. Dev allows anything on the Vite dev server's ORIGIN (any path — HMR and deep
+// links share it). Packaged allows ONLY the bundled index.html itself: the old bare `file://`
 // prefix check let a navigation to ANY local file page inherit the preload bridge + token.
 
 export interface AllowedNavigation {
@@ -13,7 +13,19 @@ export interface AllowedNavigation {
 /** True when the main window may navigate to {@code url} under the given allow-list. */
 export function isAllowedNavigation(url: string, allowed: AllowedNavigation): boolean {
   if (allowed.devServerUrl) {
-    return url.startsWith(allowed.devServerUrl);
+    // Compare parsed ORIGINS, not a string prefix. `url.startsWith('http://localhost:5173')` also
+    // admitted look-alikes: a longer port sharing the prefix (http://localhost:51730/…) and a
+    // userinfo bypass (http://localhost:5173@evil.tld/, whose real host is evil.tld). An origin match
+    // pins scheme+host+port exactly while allowing any pathname (HMR and deep links share the origin).
+    let target: URL;
+    let dev: URL;
+    try {
+      target = new URL(url);
+      dev = new URL(allowed.devServerUrl);
+    } catch {
+      return false; // unparseable -> deny
+    }
+    return target.origin === dev.origin;
   }
   if (!allowed.packagedIndexUrl) {
     return false;
