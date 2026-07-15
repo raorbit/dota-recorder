@@ -771,6 +771,44 @@ class MatchFsmTest {
     }
 
     @Test
+    void markerInTheFinalPartialSecondIsNotFlooredByTheDurationClamp() {
+        // F15: duration_s is floored to whole seconds for storage, but the marker clamp must use the
+        // UNFLOORED elapsed duration. A kill 300.5s in, with a true 300.75s recording, must keep its
+        // 300.5s offset -- flooring the clamp to 300 would drag it to 300.0 and seek up to <1s early.
+        // The stored duration_s still reads the floored 300.
+        long anchorNanos = 2_000_000_000_000L;
+        long finalizeNanos = anchorNanos + 300_750_000_000L; // 300.75s of real elapsed time
+        // nanoClock is read exactly twice: once in startRecording (the anchor), once in finalize.
+        java.util.concurrent.atomic.AtomicInteger nanoReads = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.function.LongSupplier steppingNano =
+                () -> nanoReads.getAndIncrement() == 0 ? anchorNanos : finalizeNanos;
+        MatchFsm partialFsm = new MatchFsm(obs, obs, thumbs, new EventTagger(), matches, markers, pauses,
+                journal, events, ds, clipService, settings, new ObjectMapper(),
+                new TimeSource(steppingNano, System::currentTimeMillis));
+
+        partialFsm.onFrame(frame().mono(anchorNanos)
+                .state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing")
+                .hero("npc_dota_hero_lina").kills(0).deaths(0).assists(0).build());
+        // A kill 300.5s in -- inside the real 300.75s duration but past the floored 300s boundary.
+        partialFsm.onFrame(frame().mono(anchorNanos + 300_500_000_000L)
+                .state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing")
+                .hero("npc_dota_hero_lina").kills(1).deaths(0).assists(0).build());
+        partialFsm.onFrame(frame().state("DOTA_GAMERULES_STATE_POST_GAME").noHero().build());
+
+        MatchSummary row = matches.findAll().get(0);
+        assertThat(row.durationS())
+                .as("stored duration_s stays floored to whole seconds").isEqualTo(300);
+        assertThat(markers.findByMatchId(row.id()))
+                .singleElement()
+                .satisfies(marker -> {
+                    assertThat(marker.type()).isEqualTo("kill");
+                    assertThat(marker.videoOffsetS())
+                            .as("a marker in the final partial second is NOT floored to duration_s")
+                            .isCloseTo(300.5, offset(0.001));
+                });
+    }
+
+    @Test
     void finalizePersistsRealVideoFileSizeForRetention() throws Exception {
         Path video = tempDir.resolve("sized-video.mkv");
         Files.writeString(video, "pretend obs wrote these bytes");

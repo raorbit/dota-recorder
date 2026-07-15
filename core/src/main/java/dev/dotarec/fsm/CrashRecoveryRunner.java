@@ -137,13 +137,14 @@ public class CrashRecoveryRunner implements ApplicationRunner {
     private void recover(RecordingSessionRow session) {
         List<RecordingEventRow> events = journal.findEvents(session.sessionId());
         long recoveredAt = System.currentTimeMillis();
-        int durationS =
-                (int)
-                        Math.max(
-                                0,
-                                (Math.max(session.updatedAt(), session.recordConfirmedWallMs())
-                                                - session.recordConfirmedWallMs())
-                                        / 1000);
+        // Elapsed from the record-confirmed wall anchor to the last journal update (never negative).
+        long elapsedMs = Math.max(0L, session.updatedAt() - session.recordConfirmedWallMs());
+        // Stored/displayed duration is floored to whole seconds (the duration_s column is an int).
+        int durationS = (int) (elapsedMs / 1000L);
+        // UNFLOORED elapsed seconds, used ONLY to clamp recovered marker offsets: flooring the clamp
+        // (as duration_s is) would pull a marker in the final partial second back by up to <1s and seek
+        // early. The stored duration_s stays the floored int above.
+        double durationClampS = elapsedMs / 1000.0;
         String videoPath = session.videoPath();
         if (videoPath == null || videoPath.isBlank()) {
             // OBS reveals the recording path only on StopRecord, so a crash mid-recording leaves the
@@ -201,7 +202,7 @@ public class CrashRecoveryRunner implements ApplicationRunner {
                                         recoveredAt,
                                         session.recordStartedWallMs()));
 
-                recoverMarkers(conn, matchId, events, durationS);
+                recoverMarkers(conn, matchId, events, durationClampS);
                 recoverPauses(conn, matchId, events, session.updatedAt());
                 journal.delete(conn, session.sessionId());
                 conn.commit();
@@ -224,7 +225,7 @@ public class CrashRecoveryRunner implements ApplicationRunner {
     }
 
     private void recoverMarkers(
-            Connection conn, long matchId, List<RecordingEventRow> events, int durationS)
+            Connection conn, long matchId, List<RecordingEventRow> events, double durationClampS)
             throws SQLException {
         for (RecordingEventRow event : events) {
             if (!"marker".equals(event.type())) {
@@ -234,7 +235,9 @@ public class CrashRecoveryRunner implements ApplicationRunner {
             if (payload == null || payload.type() == null || payload.type().isBlank()) {
                 continue;
             }
-            double offset = Math.min(payload.videoOffsetS(), durationS);
+            // Clamp against the UNFLOORED elapsed duration -- flooring it (as the stored duration_s is)
+            // would pull a marker in the final partial second back by up to <1s and seek early.
+            double offset = Math.min(payload.videoOffsetS(), durationClampS);
             markers.insert(
                     conn,
                     matchId,
