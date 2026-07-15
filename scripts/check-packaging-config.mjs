@@ -65,6 +65,28 @@ check(
   'electron-builder.yml: nsis.artifactName must be space-free (a spaced name diverges from latest.yml and 404s the updater).',
 );
 
+// --- version-source parity -----------------------------------------------------------------------
+// The app version has TWO independent readers: core/build.gradle.kts reads the ROOT package.json for
+// the jar's Implementation-Version (and thus /health), while electron-builder reads app/package.json
+// (the appDir in this two-package layout) for the installer name + latest.yml/updater feed. If they
+// drift, the shipped build's /health and its updater identity disagree and a later real release can't
+// cleanly supersede the mislabeled one. Assert they match so a one-sided bump fails CI, not release.
+function pkgVersion(rel) {
+  const p = path.join(repoRoot, rel);
+  try {
+    return JSON.parse(readFileSync(p, 'utf8')).version;
+  } catch (e) {
+    failures.push(`Could not read version from ${rel}: ${e.message}`);
+    return null;
+  }
+}
+const rootVersion = pkgVersion('package.json');
+const appVersion = pkgVersion('app/package.json');
+check(
+  rootVersion != null && appVersion != null && rootVersion === appVersion,
+  `version drift: root package.json is ${rootVersion} but app/package.json is ${appVersion} — bump BOTH (root drives the jar/health version, app/ drives the installer + updater feed).`,
+);
+
 // --- koffi layout cross-check (only when installed; CI installs app deps on windows) --------------
 // If koffi resolved on this platform, assert the scoped @koromix package the asarUnpack glob targets
 // actually exists — so a koffi upgrade that relocated koffi.node fails here rather than at runtime.

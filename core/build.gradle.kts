@@ -5,10 +5,12 @@ plugins {
 }
 
 group = "dev.dotarec"
-// Single source of truth for the app version is the repo-root package.json (electron-builder
-// already derives the installer name and latest.yml from it). Reading it here keeps the jar's
-// Implementation-Version -- and therefore /health's version field -- from drifting behind the
-// npm side. Fails loudly rather than falling back: a silent default is what caused the skew.
+// The jar's version -- its Implementation-Version, and therefore /health's version field -- is read
+// from the repo-root package.json. NOTE: electron-builder does NOT read this file: in the two-package
+// layout it derives the installer name + latest.yml/updater feed from app/package.json (the appDir).
+// So root and app/package.json must be kept in lockstep (a bump touches BOTH); scripts/
+// check-packaging-config.mjs asserts they match in CI. Reading the version here rather than hardcoding
+// a default keeps the jar/health version from silently drifting; it fails loudly if it's missing.
 version = run {
     val pkg = rootDir.resolveSibling("package.json")
     val match = Regex("\"version\"\\s*:\\s*\"([^\"]+)\"").find(pkg.readText())
