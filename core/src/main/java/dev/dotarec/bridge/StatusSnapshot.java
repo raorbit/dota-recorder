@@ -21,8 +21,13 @@ public record StatusSnapshot(GsiStatus gsi, ObsStatus obs, FsmStatus fsm) {
     /** GSI feed liveness. {@code lastFrameAgoMs} is null before any frame has been received. */
     public record GsiStatus(boolean connected, Long lastFrameAgoMs) {}
 
-    /** OBS connection / scene / recording flags. */
-    public record ObsStatus(boolean connected, boolean sceneActive, boolean recording) {}
+    /**
+     * OBS connection / scene / recording flags. {@code captureBlack} is true when a recording is live
+     * but the game capture was sampled as black (near-zero luminance) — a black-screen recording that
+     * {@code recording} alone can't reveal; the UI warns on it.
+     */
+    public record ObsStatus(
+            boolean connected, boolean sceneActive, boolean recording, boolean captureBlack) {}
 
     /** FSM state name and the active match id (null when no match is in flight). */
     public record FsmStatus(String state, Long activeMatchId) {}

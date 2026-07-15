@@ -1,6 +1,8 @@
 package dev.dotarec.obs;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 
 import java.time.Instant;
 import org.junit.jupiter.api.BeforeEach;
@@ -17,12 +19,14 @@ import org.junit.jupiter.api.Test;
 class ObsEventsTest {
 
     private ObsHealth health;
+    private CaptureBlackFrameGuard blackFrameGuard;
     private ObsEvents events;
 
     @BeforeEach
     void setUp() {
         health = new ObsHealth();
-        events = new ObsEvents(health);
+        blackFrameGuard = mock(CaptureBlackFrameGuard.class);
+        events = new ObsEvents(health, blackFrameGuard);
     }
 
     @Test
@@ -55,6 +59,24 @@ class ObsEventsTest {
 
         assertThat(health.isRecording()).isFalse();
         assertThat(events.lastStoppedOutputPath()).isEqualTo("C:\\videos\\match.mkv");
+    }
+
+    @Test
+    void started_armsTheBlackFrameCheck() {
+        // Every confirmed start schedules the black-capture check, so a black recording can't stay silent.
+        events.onRecordStateChanged(ObsEvents.OUTPUT_STARTED, null);
+
+        verify(blackFrameGuard).armCheck();
+    }
+
+    @Test
+    void stopped_clearsAnyBlackCaptureWarning() {
+        // A prior recording flagged black; once it stops the warning is moot and must clear.
+        health.setCaptureBlack(true);
+
+        events.onRecordStateChanged(ObsEvents.OUTPUT_STOPPED, "C:\\videos\\match.mkv");
+
+        assertThat(health.isCaptureBlack()).isFalse();
     }
 
     @Test

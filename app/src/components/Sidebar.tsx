@@ -167,6 +167,11 @@ export function Sidebar({
         <div className="sb-status-text" data-state={card.state}>
           {card.text}
         </div>
+        {card.state === 'recording' && status?.captureBlack === true && (
+          <div className="sb-status-warn" role="alert">
+            ⚠ Capture looks black — the Dota window isn’t being recorded. Check OBS Game Capture.
+          </div>
+        )}
         {card.state === 'recording' && (
           <div className="sb-stop-wrap">
             <button

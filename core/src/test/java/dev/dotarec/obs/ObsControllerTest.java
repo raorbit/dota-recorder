@@ -49,7 +49,7 @@ class ObsControllerTest {
     @Test
     void startRecording_resetsStalePerRecordingAnchorBeforeStarting() {
         ObsHealth health = new ObsHealth();
-        ObsEvents events = new ObsEvents(health);
+        ObsEvents events = new ObsEvents(health, mock(CaptureBlackFrameGuard.class));
         // Simulate a PRIOR match: started, then stopped. OUTPUT_STOPPED leaves recordConfirmedAt set
         // -- exactly the sticky value that would otherwise become a second match's anchor.
         events.onRecordStateChanged(ObsEvents.OUTPUT_STARTED, null);
@@ -72,7 +72,7 @@ class ObsControllerTest {
     void startRecording_whenCorrectiveStopTimesOut_keepsRecordingFlagForRetry() {
         ObsHealth health = new ObsHealth();
         ObsController controller =
-                new ObsController(null, health, new ObsEvents(health), sceneConfigurer());
+                new ObsController(null, health, new ObsEvents(health, mock(CaptureBlackFrameGuard.class)), sceneConfigurer());
 
         OBSRemoteController obs = mock(OBSRemoteController.class);
         // A timed-out StopRecord returns null from the library -- it does NOT throw.
@@ -96,7 +96,7 @@ class ObsControllerTest {
     @Test
     void startRecording_whenCorrectiveStopSucceeds_clearsFlagThenStarts() {
         ObsHealth health = new ObsHealth();
-        ObsEvents events = new ObsEvents(health);
+        ObsEvents events = new ObsEvents(health, mock(CaptureBlackFrameGuard.class));
         ObsController controller = new ObsController(null, health, events, sceneConfigurer());
 
         OBSRemoteController obs = mock(OBSRemoteController.class);
@@ -130,7 +130,7 @@ class ObsControllerTest {
     @Test
     void startRecording_whenCorrectiveStopRacesANativeStop_proceedsWithTheNewRecording() {
         ObsHealth health = new ObsHealth();
-        ObsEvents events = new ObsEvents(health);
+        ObsEvents events = new ObsEvents(health, mock(CaptureBlackFrameGuard.class));
         ObsController controller = new ObsController(null, health, events, sceneConfigurer());
 
         OBSRemoteController obs = mock(OBSRemoteController.class);
@@ -178,7 +178,7 @@ class ObsControllerTest {
         when(settings.get()).thenReturn(s);
 
         ObsController controller =
-                new ObsController(settings, health, new ObsEvents(health), sceneConfigurer());
+                new ObsController(settings, health, new ObsEvents(health, mock(CaptureBlackFrameGuard.class)), sceneConfigurer());
         OBSRemoteController obs = mock(OBSRemoteController.class);
         GetCurrentProgramSceneResponse scene = mock(GetCurrentProgramSceneResponse.class);
         when(scene.isSuccessful()).thenReturn(true);
@@ -205,7 +205,7 @@ class ObsControllerTest {
         when(settings.get()).thenReturn(s);
 
         ObsController controller =
-                new ObsController(settings, health, new ObsEvents(health), sceneConfigurer());
+                new ObsController(settings, health, new ObsEvents(health, mock(CaptureBlackFrameGuard.class)), sceneConfigurer());
         OBSRemoteController obs = mock(OBSRemoteController.class);
         GetCurrentProgramSceneResponse scene = mock(GetCurrentProgramSceneResponse.class);
         when(scene.isSuccessful()).thenReturn(true);
@@ -239,7 +239,7 @@ class ObsControllerTest {
         when(settings.get()).thenReturn(s);
 
         ObsController controller =
-                new ObsController(settings, health, new ObsEvents(health), sceneConfigurer());
+                new ObsController(settings, health, new ObsEvents(health, mock(CaptureBlackFrameGuard.class)), sceneConfigurer());
         OBSRemoteController obs = mock(OBSRemoteController.class);
         GetCurrentProgramSceneResponse scene = mock(GetCurrentProgramSceneResponse.class);
         when(scene.isSuccessful()).thenReturn(true);
@@ -291,7 +291,7 @@ class ObsControllerTest {
         when(settings.get()).thenReturn(s);
 
         ObsController controller =
-                new ObsController(settings, health, new ObsEvents(health), sceneConfigurer());
+                new ObsController(settings, health, new ObsEvents(health, mock(CaptureBlackFrameGuard.class)), sceneConfigurer());
         OBSRemoteController obs = mock(OBSRemoteController.class);
         GetCurrentProgramSceneResponse scene = mock(GetCurrentProgramSceneResponse.class);
         when(scene.isSuccessful()).thenReturn(true);
@@ -318,7 +318,7 @@ class ObsControllerTest {
         when(settings.get()).thenReturn(s);
 
         ObsController controller =
-                new ObsController(settings, health, new ObsEvents(health), sceneConfigurer());
+                new ObsController(settings, health, new ObsEvents(health, mock(CaptureBlackFrameGuard.class)), sceneConfigurer());
         OBSRemoteController obs = mock(OBSRemoteController.class);
         GetCurrentProgramSceneResponse scene = mock(GetCurrentProgramSceneResponse.class);
         when(scene.isSuccessful()).thenReturn(true);
@@ -342,7 +342,7 @@ class ObsControllerTest {
         // parking startRecording mid-flight (inside the mocked startRecord, before OUTPUT_STARTED) and
         // showing a concurrent connect() cannot enter until the start completes.
         ObsHealth health = new ObsHealth();
-        ObsEvents events = new ObsEvents(health);
+        ObsEvents events = new ObsEvents(health, mock(CaptureBlackFrameGuard.class));
 
         CountDownLatch startInFlight = new CountDownLatch(1); // start has entered startRecord
         CountDownLatch releaseStart = new CountDownLatch(1); // let start confirm + return
@@ -416,7 +416,7 @@ class ObsControllerTest {
         SettingsStore settings = mock(SettingsStore.class);
         when(settings.get()).thenReturn(new SettingsStore.Settings());
         ObsController controller =
-                new ObsController(settings, health, new ObsEvents(health), sceneConfigurer()) {
+                new ObsController(settings, health, new ObsEvents(health, mock(CaptureBlackFrameGuard.class)), sceneConfigurer()) {
                     @Override
                     OBSRemoteController buildController(SettingsStore.Settings s, CountDownLatch latch) {
                         latch.countDown();
@@ -441,7 +441,7 @@ class ObsControllerTest {
         SettingsStore settings = mock(SettingsStore.class);
         when(settings.get()).thenReturn(new SettingsStore.Settings());
         ObsController controller =
-                new ObsController(settings, health, new ObsEvents(health), sceneConfigurer()) {
+                new ObsController(settings, health, new ObsEvents(health, mock(CaptureBlackFrameGuard.class)), sceneConfigurer()) {
                     @Override
                     OBSRemoteController buildController(SettingsStore.Settings s, CountDownLatch latch) {
                         latch.countDown();
@@ -465,7 +465,7 @@ class ObsControllerTest {
         SettingsStore settings = mock(SettingsStore.class);
         when(settings.get()).thenReturn(new SettingsStore.Settings());
         ObsController controller =
-                new ObsController(settings, health, new ObsEvents(health), sceneConfigurer()) {
+                new ObsController(settings, health, new ObsEvents(health, mock(CaptureBlackFrameGuard.class)), sceneConfigurer()) {
                     @Override
                     OBSRemoteController buildController(SettingsStore.Settings s, CountDownLatch latch) {
                         latch.countDown();
@@ -492,7 +492,7 @@ class ObsControllerTest {
         // Simulate a connect that FAILS: the latch is released as onClose/onError would, but the
         // onReady event -- the only thing that sets connectionReady -- never fires.
         ObsController controller =
-                new ObsController(settings, health, new ObsEvents(health), sceneConfigurer()) {
+                new ObsController(settings, health, new ObsEvents(health, mock(CaptureBlackFrameGuard.class)), sceneConfigurer()) {
                     @Override
                     OBSRemoteController buildController(SettingsStore.Settings s, CountDownLatch latch) {
                         latch.countDown();
@@ -518,7 +518,7 @@ class ObsControllerTest {
         // rejecting StartRecord ("output already active").
         ObsHealth health = new ObsHealth();
         ObsController controller =
-                new ObsController(null, health, new ObsEvents(health), sceneConfigurer());
+                new ObsController(null, health, new ObsEvents(health, mock(CaptureBlackFrameGuard.class)), sceneConfigurer());
         OBSRemoteController obs = mock(OBSRemoteController.class);
         GetRecordStatusResponse status = mock(GetRecordStatusResponse.class);
         when(status.isSuccessful()).thenReturn(true);
@@ -541,7 +541,7 @@ class ObsControllerTest {
         // not clobber the flag -- the corrective StopRecord guard remains the backstop.
         ObsHealth health = new ObsHealth();
         ObsController controller =
-                new ObsController(null, health, new ObsEvents(health), sceneConfigurer());
+                new ObsController(null, health, new ObsEvents(health, mock(CaptureBlackFrameGuard.class)), sceneConfigurer());
         OBSRemoteController obs = mock(OBSRemoteController.class);
         when(obs.getRecordStatus(anyLong())).thenReturn(null);
         ReflectionTestUtils.setField(controller, "controller", obs);
@@ -571,7 +571,7 @@ class ObsControllerTest {
         when(settings.get()).thenReturn(s);
 
         ObsController controller =
-                new ObsController(settings, health, new ObsEvents(health), sceneConfigurer());
+                new ObsController(settings, health, new ObsEvents(health, mock(CaptureBlackFrameGuard.class)), sceneConfigurer());
         OBSRemoteController obs = mock(OBSRemoteController.class);
         GetCurrentProgramSceneResponse scene = mock(GetCurrentProgramSceneResponse.class);
         when(scene.isSuccessful()).thenReturn(true);
@@ -616,7 +616,7 @@ class ObsControllerTest {
         when(settings.get()).thenReturn(s);
 
         ObsController controller =
-                new ObsController(settings, health, new ObsEvents(health), sceneConfigurer());
+                new ObsController(settings, health, new ObsEvents(health, mock(CaptureBlackFrameGuard.class)), sceneConfigurer());
         OBSRemoteController obs = mock(OBSRemoteController.class);
         GetCurrentProgramSceneResponse scene = mock(GetCurrentProgramSceneResponse.class);
         when(scene.isSuccessful()).thenReturn(true);
@@ -641,7 +641,7 @@ class ObsControllerTest {
         // (refreshRecordingActive re-syncs it on reconnect) while still clearing connected + sceneActive.
         ObsHealth health = new ObsHealth();
         ObsController controller =
-                new ObsController(null, health, new ObsEvents(health), sceneConfigurer());
+                new ObsController(null, health, new ObsEvents(health, mock(CaptureBlackFrameGuard.class)), sceneConfigurer());
 
         health.setConnected(true);
         health.setSceneActive(true);

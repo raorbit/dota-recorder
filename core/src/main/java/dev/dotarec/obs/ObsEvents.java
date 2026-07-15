@@ -6,6 +6,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 
 /**
@@ -37,6 +38,13 @@ public class ObsEvents {
 
     private final ObsHealth health;
 
+    /**
+     * Arms the black-frame check on each confirmed start. {@code @Lazy} breaks the construction cycle
+     * ObsEvents -> CaptureBlackFrameGuard -> ObsController -> ObsEvents; the guard is only dereferenced
+     * at runtime from the OBS event thread, so a lazy proxy is safe and keeps the graph acyclic.
+     */
+    private final CaptureBlackFrameGuard blackFrameGuard;
+
     /** Wall-clock instant of the most recent confirmed OUTPUT_STARTED; null until first start. */
     private final AtomicReference<Instant> recordConfirmedAt = new AtomicReference<>();
 
@@ -52,8 +60,9 @@ public class ObsEvents {
      */
     private volatile CountDownLatch confirmLatch;
 
-    public ObsEvents(ObsHealth health) {
+    public ObsEvents(ObsHealth health, @Lazy CaptureBlackFrameGuard blackFrameGuard) {
         this.health = health;
+        this.blackFrameGuard = blackFrameGuard;
     }
 
     /**
@@ -79,12 +88,18 @@ public class ObsEvents {
                     latch.countDown();
                 }
                 log.info("OBS recording confirmed started (OUTPUT_STARTED)");
+                // Schedule a delayed, off-thread check that the game capture isn't black. Non-blocking:
+                // armCheck() only clears the prior flag and schedules; the sample runs on the guard's
+                // own thread so this event callback stays fast.
+                blackFrameGuard.armCheck();
             }
             case OUTPUT_STOPPED -> {
                 if (outputPath != null && !outputPath.isBlank()) {
                     lastStoppedOutputPath.set(outputPath);
                 }
                 health.setRecording(false);
+                // Recording ended: any black-capture warning is moot now.
+                health.setCaptureBlack(false);
                 log.info("OBS recording stopped; event outputPath={}", outputPath);
             }
             default -> {

@@ -15,10 +15,11 @@ function mkStatus(recording: boolean, fsmState: string): Status {
     fsmState,
     matchId: null,
     recording,
+    captureBlack: false,
     gsiConnected: true,
     snapshot: {
       gsi: { connected: true, lastFrameAgoMs: 0 },
-      obs: { connected: true, sceneActive: true, recording },
+      obs: { connected: true, sceneActive: true, recording, captureBlack: false },
       fsm: { state: fsmState, activeMatchId: null },
     },
   };

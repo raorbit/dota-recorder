@@ -40,7 +40,10 @@ public class StatusService {
         StatusSnapshot.GsiStatus gsi = new StatusSnapshot.GsiStatus(gsiConnected, lastFrameAgoMs);
         StatusSnapshot.ObsStatus obs =
                 new StatusSnapshot.ObsStatus(
-                        obsHealth.isConnected(), obsHealth.isSceneActive(), obsHealth.isRecording());
+                        obsHealth.isConnected(),
+                        obsHealth.isSceneActive(),
+                        obsHealth.isRecording(),
+                        obsHealth.isCaptureBlack());
         // activeMatchId stays null until match persistence/lifecycle lands in a later PR.
         StatusSnapshot.FsmStatus fsm =
                 new StatusSnapshot.FsmStatus(matchFsm.getState().name(), null);
