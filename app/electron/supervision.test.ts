@@ -193,6 +193,64 @@ describe('SupervisionController — core crash', () => {
     expect(deps.startCore).not.toHaveBeenCalled();
   });
 
+  it('bails silently when a shutdown begins mid-restart (no notifyDown, no further startCore)', async () => {
+    // The entry guard samples isShuttingDown ONCE, but a quit can land at any await inside the restart
+    // loop. Here the restart is in flight when the quit begins and startCore then fails; the loop must
+    // re-check the flag after the await and bail — NOT pop a spurious "recorder stopped" tray balloon
+    // during a normal quit, and NOT loop to a second restart onto a JVM the shutdown is reaping.
+    let shuttingDown = false;
+    const started: Array<Deferred<void>> = [];
+    const deps = makeDeps({
+      startCore: vi.fn(() => {
+        const d = deferred<void>();
+        started.push(d);
+        return d.promise;
+      }),
+      isShuttingDown: vi.fn(() => shuttingDown),
+    });
+    const controller = new SupervisionController(deps, 2);
+
+    const crash = controller.handleCoreCrash(exit); // attempt 1: suspends on startCore #1
+    await flush();
+    expect(deps.startCore).toHaveBeenCalledTimes(1);
+
+    shuttingDown = true; // a real quit begins while the restart is suspended
+    started[0].reject(new Error('superseded by shutdown')); // then the restart fails
+    await crash;
+    await flush();
+
+    expect(deps.startCore).toHaveBeenCalledTimes(1); // did NOT loop to a second attempt
+    expect(deps.notifyDown).not.toHaveBeenCalled(); // no spurious balloon during a normal quit
+    expect(deps.startObs).not.toHaveBeenCalled();
+  });
+
+  it('does not relaunch OBS when a shutdown lands during the restart health wait', async () => {
+    // The success-path leg of the same guard: startCore RESOLVES (the core answered a probe) but a quit
+    // began during its health wait. The post-startCore shutdown check must bail before relaunching OBS
+    // or resetting the budgets onto a core the shutdown is tearing down.
+    let shuttingDown = false;
+    const started: Array<Deferred<void>> = [];
+    const deps = makeDeps({
+      startCore: vi.fn(() => {
+        const d = deferred<void>();
+        started.push(d);
+        return d.promise;
+      }),
+      isShuttingDown: vi.fn(() => shuttingDown),
+    });
+    const controller = new SupervisionController(deps, 2);
+
+    const crash = controller.handleCoreCrash(exit);
+    await flush();
+    shuttingDown = true;
+    started[0].resolve(); // core came up, but the app is now quitting
+    await crash;
+    await flush();
+
+    expect(deps.startObs).not.toHaveBeenCalled(); // no relaunch onto a core the quit is reaping
+    expect(deps.notifyDown).not.toHaveBeenCalled();
+  });
+
   it('still restarts the core when the orphaned-OBS teardown rejects', async () => {
     // OBS teardown is best-effort cleanup of an orphaned process; a flaky stopObs() rejection must
     // not propagate out of handleCoreCrash and abort the core restart (which would leave recording

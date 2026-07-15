@@ -149,6 +149,12 @@ export class SupervisionController {
       // rather than wasted on a single discarded attempt.
       do {
         this.corePendingRecrash = false;
+        // Re-check the shutdown flag at the TOP of every iteration and after each await below. The
+        // entry guard sampled it once, but a real quit can land at any await here (stopObs, startCore,
+        // the reaps). Once shutdown is underway, bail SILENTLY: no notifyDown (a "recorder stopped"
+        // tray balloon during a normal quit is spurious) and no startCore (respawning a JVM the quit
+        // is trying to reap). The finally clears the crash-episode flags on the way out.
+        if (this.deps.isShuttingDown()) return;
         if (this.coreRestartAttempts >= this.maxRestarts) {
           this.deps.notifyDown(
             'The recorder core stopped and could not be restarted. Restart the app to resume recording.',
@@ -161,6 +167,9 @@ export class SupervisionController {
         );
         try {
           await this.deps.startCore();
+          // A quit can begin during startCore()'s health wait; bail before relaunching OBS or reaping
+          // onto a core the shutdown is already tearing down.
+          if (this.deps.isShuttingDown()) return;
           if (this.corePendingRecrash) {
             // A crash landed while this restart's health wait was in flight, yet startCore() still
             // resolved — the just-restarted core answered a health probe and then died in the same
@@ -168,6 +177,7 @@ export class SupervisionController {
             // budget) would silently drop that death. Reap and re-loop to spend another attempt.
             this.deps.log('[core] restarted core died during its health wait; retrying');
             await this.deps.stopCore().catch(() => {});
+            if (this.deps.isShuttingDown()) return; // a quit landed during the reap
             continue;
           }
           this.deps.log('[core] restarted; relaunching OBS');
@@ -182,6 +192,9 @@ export class SupervisionController {
           // startCore() does NOT kill its child on a health-timeout, so a restarted-but-unhealthy JVM
           // would linger holding the loopback ports. Reap it before retrying or giving up.
           await this.deps.stopCore().catch(() => {});
+          // A quit landing during the failed-restart reap must not fall through to the notifyDown below
+          // (again, a spurious "recorder stopped" balloon during a normal quit).
+          if (this.deps.isShuttingDown()) return;
           // If a re-crash queued during this attempt AND budget remains, the while-condition re-loops to
           // spend it; otherwise fall through to the user-facing notice below.
         }
