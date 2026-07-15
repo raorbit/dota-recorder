@@ -27,7 +27,7 @@ class CaptureBlackFrameGuardTest {
         }
 
         @Override
-        Double sampleGameCaptureLuma() {
+        Double sampleProgramSceneLuma() {
             return cannedLuma;
         }
     }
