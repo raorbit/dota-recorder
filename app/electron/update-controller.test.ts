@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
-import { UpdateController, type Cancel, type UpdateControllerDeps } from './update-controller';
+import {
+  UpdateController,
+  type BusyReason,
+  type Cancel,
+  type UpdateControllerDeps,
+} from './update-controller';
 import type { UpdateState } from './bridge-contract';
 
 // A controllable scheduler: schedule() records a task and returns a cancel; the harness
@@ -13,6 +18,7 @@ interface Scheduled {
 
 function harness(opts?: {
   busy?: boolean;
+  reason?: BusyReason;
   enabled?: boolean;
 }): {
   controller: UpdateController;
@@ -28,12 +34,15 @@ function harness(opts?: {
   const states: UpdateState[] = [];
   const tasks: Scheduled[] = [];
   let busy = opts?.busy ?? false;
+  const reason: BusyReason = opts?.reason ?? 'recording';
   let enabled = opts?.enabled ?? true;
 
   const deps = {
     triggerCheck: vi.fn(),
     triggerDownload: vi.fn(),
-    isBusy: vi.fn(async () => busy),
+    // Mirror the real gate: a busy result carries a reason ('recording' by default; pass
+    // reason:'unreachable' to simulate a down core), an idle result carries none.
+    isBusy: vi.fn(async () => (busy ? { busy: true, reason } : { busy: false })),
     doInstall: vi.fn(),
     emit: vi.fn((s: UpdateState) => {
       states.push(s);
@@ -282,5 +291,43 @@ describe('UpdateController', () => {
     expect(h.deps.doInstall).not.toHaveBeenCalled();
     expect(h.controller.getState().status).toBe('downloaded');
     expect(h.controller.getState().recording).toBeUndefined();
+  });
+
+  it('installNow defers with unreachable (not recording) when the core is down', async () => {
+    // A down/hung core fails the gate to busy with reason 'unreachable'; the UI must not blame a match.
+    const h = harness({ busy: true, reason: 'unreachable' });
+    h.controller.onUpdateDownloaded('4.2.0');
+    await h.controller.installNow();
+    expect(h.deps.doInstall).not.toHaveBeenCalled();
+    expect(h.controller.getState()).toMatchObject({ status: 'downloaded', unreachable: true });
+    expect(h.controller.getState().recording).toBeUndefined();
+  });
+
+  it('onError keeps a downloaded update installable instead of hiding it', () => {
+    const h = harness();
+    h.controller.onUpdateDownloaded('5.1.0');
+    h.controller.onError('background failure after download');
+    // The staged installer is still on disk, so the state stays 'downloaded' (Restart stays visible).
+    expect(h.controller.getState().status).toBe('downloaded');
+  });
+
+  it('onError still surfaces errors from a non-downloaded state', () => {
+    const h = harness();
+    h.controller.check();
+    h.controller.onError('check failed');
+    expect(h.controller.getState()).toMatchObject({ status: 'error', error: 'check failed' });
+  });
+
+  it('onInstallAborted releases the latch and leaves the update installable', async () => {
+    // Simulates a quitAndInstall that did not quit: after doInstall the latch is set; onInstallAborted
+    // must clear it so a later click re-installs, and keep the state 'downloaded'.
+    const h = harness({ busy: false });
+    h.controller.onUpdateDownloaded('6.3.0');
+    await h.controller.installNow();
+    expect(h.deps.doInstall).toHaveBeenCalledTimes(1);
+    h.controller.onInstallAborted('installer did not run');
+    expect(h.controller.getState().status).toBe('downloaded');
+    await h.controller.installNow();
+    expect(h.deps.doInstall).toHaveBeenCalledTimes(2);
   });
 });

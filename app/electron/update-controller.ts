@@ -11,17 +11,29 @@ import type { UpdateState } from './bridge-contract';
 /** A cancel handle returned by {@link UpdateControllerDeps.schedule}. */
 export type Cancel = () => void;
 
+/** Why the recording gate reports busy: a live match, or a core that didn't answer. */
+export type BusyReason = 'recording' | 'unreachable';
+
+/** The recording-gate result returned by {@link UpdateControllerDeps.isBusy}. */
+export interface BusyResult {
+  /** Fail-safe to true on any error/timeout so an unreachable core never green-lights an install. */
+  readonly busy: boolean;
+  /** Present when busy: 'recording' (a match is live) vs 'unreachable' (core down/hung/non-200). */
+  readonly reason?: BusyReason;
+}
+
 export interface UpdateControllerDeps {
   /** Fire electron-updater's checkForUpdates. Results arrive via the on*() callbacks. */
   triggerCheck(): void;
   /** Fire electron-updater's downloadUpdate. Progress/finish arrive via on*() callbacks. */
   triggerDownload(): void;
   /**
-   * True when a match is recording (or arming/stopping) — the core's /status gate. MUST
-   * fail-safe to `true` (busy) on any error/timeout so an unreachable core never lets an
-   * install interrupt a recording.
+   * The core's /status recording gate. `busy` MUST fail-safe to `true` on any error/timeout so an
+   * unreachable core never lets an install interrupt a recording; `reason` distinguishes a live match
+   * ('recording') from a core that didn't answer ('unreachable') so the UI can explain the deferral
+   * truthfully rather than always blaming a recording.
    */
-  isBusy(): Promise<boolean>;
+  isBusy(): Promise<BusyResult>;
   /**
    * Tear down the supervisors and quitAndInstall. The process exits; this never returns
    * normally. Only ever called after an isBusy() === false check.
@@ -123,31 +135,55 @@ export class UpdateController {
     // Latch synchronously BEFORE the await so two near-simultaneous clicks can't both pass the
     // busy check and both call doInstall (concurrent teardowns / a duplicate NSIS installer).
     this.installing = true;
-    let busy: boolean;
+    let result: BusyResult;
     try {
-      busy = await this.deps.isBusy();
+      result = await this.deps.isBusy();
     } catch (err) {
-      // isBusy is contracted to fail-safe to true and never reject; if it somehow does, release the
+      // isBusy is contracted to fail-safe to busy and never reject; if it somehow does, release the
       // latch so "Restart to update" stays clickable instead of wedging dead for the whole session,
       // and fail safe by NOT installing (an unknown gate is treated as busy).
       this.installing = false;
       this.deps.log(`[updater] install gate check threw; not installing: ${String(err)}`);
       return;
     }
-    if (busy) {
-      // Not installing after all — release the latch so the user can retry once the match ends.
+    if (result.busy) {
+      // Not installing after all — release the latch so the user can retry once the gate clears.
       this.installing = false;
-      this.deps.log('[updater] install requested while recording; deferring');
-      this.set({ ...this.snapshot, recording: true });
-      // Poll the recording gate so the "can't restart now" flag clears once the match ends,
-      // rather than sticking forever. We do NOT auto-install (Option 2 is user-confirmed): the
-      // UI just returns to a plain "Restart to update" for the user to click again.
+      const unreachable = result.reason === 'unreachable';
+      this.deps.log(
+        unreachable
+          ? '[updater] install requested but the recorder is not responding; deferring'
+          : '[updater] install requested while recording; deferring',
+      );
+      // Flag WHY it's deferred so the UI shows truthful copy: a core that is down/hung must not be
+      // reported as "a match is recording". Fail-safe is unchanged — either way we do NOT install.
+      this.setDeferred(unreachable);
+      // Poll the gate so the flag clears once it does, rather than sticking forever. We do NOT
+      // auto-install (Option 2 is user-confirmed): the UI returns to a plain "Restart to update".
       this.clearRetry();
       this.cancelRetry = this.deps.schedule(() => void this.clearInstallDeferral(), this.busyRetryMs);
       return;
     }
     this.deps.log('[updater] installing downloaded update');
     this.deps.doInstall();
+  }
+
+  /**
+   * Called by main when a committed install did NOT quit the process (a quitAndInstall that returned
+   * without exiting — a missing/invalid staged installer). Releases the install latch so the user can
+   * retry, and re-emits the plain 'downloaded' snapshot: the installer is still staged, so the update
+   * stays installable rather than the app sitting as a torn-down zombie with the Restart button dead.
+   */
+  onInstallAborted(message: string): void {
+    this.installing = false;
+    this.deps.log(`[updater] install did not proceed, staying installable: ${message}`);
+    if (this.snapshot.status === 'downloaded') {
+      this.set({
+        status: 'downloaded',
+        ...(this.snapshot.version !== undefined ? { version: this.snapshot.version } : {}),
+        ...(this.snapshot.notesUrl !== undefined ? { notesUrl: this.snapshot.notesUrl } : {}),
+      });
+    }
   }
 
   /**
@@ -162,7 +198,7 @@ export class UpdateController {
     }
     if (this.snapshot.status === 'available') {
       this.clearRetry();
-      if (this.snapshot.recording) {
+      if (this.snapshot.recording || this.snapshot.unreachable) {
         this.set({
           status: 'available',
           ...(this.snapshot.version !== undefined ? { version: this.snapshot.version } : {}),
@@ -178,12 +214,12 @@ export class UpdateController {
    */
   private async clearInstallDeferral(): Promise<void> {
     if (this.snapshot.status !== 'downloaded') return;
-    if (await this.deps.isBusy()) {
+    if ((await this.deps.isBusy()).busy) {
       this.cancelRetry = this.deps.schedule(() => void this.clearInstallDeferral(), this.busyRetryMs);
       return;
     }
-    if (this.snapshot.recording) {
-      // Re-emit the plain downloaded snapshot (recording flag dropped).
+    if (this.snapshot.recording || this.snapshot.unreachable) {
+      // Re-emit the plain downloaded snapshot (recording/unreachable flag dropped).
       this.set({
         status: 'downloaded',
         ...(this.snapshot.version !== undefined ? { version: this.snapshot.version } : {}),
@@ -231,6 +267,11 @@ export class UpdateController {
   onError(message: string): void {
     this.downloading = false;
     this.deps.log(`[updater] error: ${message}`);
+    // A staged, installable update must survive a transient post-download error (e.g. a
+    // quitAndInstall failure surfaced as an 'error' event): clobbering 'downloaded' with 'error'
+    // would hide the "Restart to update" affordance and the sidebar dot even though the installer is
+    // still on disk. Keep the downloaded state; the error is logged and recoverable via a manual check.
+    if (this.snapshot.status === 'downloaded') return;
     this.set({ status: 'error', error: message });
   }
 
@@ -251,7 +292,7 @@ export class UpdateController {
     // fresh onUpdateAvailable) can't both pass the guard and each fire triggerDownload — the
     // second sees downloading===true and bails. Released again on every early-return below.
     this.downloading = true;
-    const busy = await this.deps.isBusy();
+    const { busy, reason } = await this.deps.isBusy();
     // The pref may have been flipped off during the isBusy() await; re-check before committing.
     if (!this.deps.isEnabled()) {
       this.downloading = false;
@@ -260,8 +301,13 @@ export class UpdateController {
     }
     if (busy) {
       this.downloading = false;
-      this.deps.log('[updater] update available but recording; deferring download');
-      this.set({ ...this.snapshot, recording: true });
+      const unreachable = reason === 'unreachable';
+      this.deps.log(
+        unreachable
+          ? '[updater] update available but the recorder is not responding; deferring download'
+          : '[updater] update available but recording; deferring download',
+      );
+      this.setDeferred(unreachable);
       this.clearRetry();
       this.cancelRetry = this.deps.schedule(() => void this.tryDownload(), this.busyRetryMs);
       return;
@@ -289,6 +335,20 @@ export class UpdateController {
   private clearRetry(): void {
     this.cancelRetry?.();
     this.cancelRetry = null;
+  }
+
+  /**
+   * Re-emit the current snapshot (status/version/notesUrl only) with exactly one defer flag set —
+   * the other is dropped, so a defer never carries both flags. Reconstructed from scratch rather than
+   * spreading (exactOptionalPropertyTypes forbids clearing a flag with `key: undefined`).
+   */
+  private setDeferred(unreachable: boolean): void {
+    const base: UpdateState = {
+      status: this.snapshot.status,
+      ...(this.snapshot.version !== undefined ? { version: this.snapshot.version } : {}),
+      ...(this.snapshot.notesUrl !== undefined ? { notesUrl: this.snapshot.notesUrl } : {}),
+    };
+    this.set(unreachable ? { ...base, unreachable: true } : { ...base, recording: true });
   }
 
   private set(next: UpdateState): void {
