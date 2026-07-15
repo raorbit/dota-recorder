@@ -11,8 +11,8 @@
 // Pinning (supply-chain): set FFMPEG_VERSION + FFMPEG_SHA256 below. On the FIRST run
 // with an empty FFMPEG_SHA256 the script prints the computed hash to paste in; once
 // pinned it verifies strictly and aborts on mismatch. Override either via env at build
-// time. The default build is the gyan.dev "release-essentials" zip, which is sufficient
-// for trimming/remux; swap FFMPEG_URL for a BtbN release if a full build is needed.
+// time. The default build is a version-tagged gyan.dev "essentials" release asset (immutable, so
+// the pin reproduces byte-for-byte); swap FFMPEG_URL for a BtbN release if a full build is needed.
 // The unpacked ffmpeg.exe + .ok marker are gitignored, so a fresh clone / CI has no
 // cache and re-downloads + re-verifies the zip against FFMPEG_SHA256 every time — the
 // supply-chain guarantee rides on that hash, not on the (untracked) cached binary.
@@ -34,14 +34,17 @@ import { pipeline } from 'node:stream/promises';
 import { execFileSync } from 'node:child_process';
 import * as path from 'node:path';
 
-const FFMPEG_VERSION = process.env.FFMPEG_VERSION ?? 'release-essentials';
-// gyan.dev release-essentials (ffmpeg 8.1.2, fetched 2026-06-28). This URL is a ROLLING build, so
-// when upstream rebuilds the zip the hash will change and the fetch aborts — re-run, then repaste the
-// printed sha here (or override via the FFMPEG_SHA256 env at build time).
+const FFMPEG_VERSION = process.env.FFMPEG_VERSION ?? '8.1.2';
+// Immutable, version-tagged gyan.dev build shipped as a GitHub release asset (GyanD/codexffmpeg).
+// Unlike the old rolling ffmpeg-release-essentials.zip — whose bytes (and therefore sha) drift every
+// time upstream rebuilds, which would abort a clean-checkout release on the pinned-hash check — a
+// tagged release asset is permanent, so this pin reproduces byte-for-byte across builds. (Verified:
+// this asset is byte-identical to the release-essentials.zip pinned before — same sha256 below.)
 const FFMPEG_SHA256 =
   process.env.FFMPEG_SHA256 ?? 'db580001caa24ac104c8cb856cd113a87b0a443f7bdf47d8c12b1d740584a2ec';
 const FFMPEG_URL =
-  process.env.FFMPEG_URL ?? 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip';
+  process.env.FFMPEG_URL ??
+  `https://github.com/GyanD/codexffmpeg/releases/download/${FFMPEG_VERSION}/ffmpeg-${FFMPEG_VERSION}-essentials_build.zip`;
 
 const repoRoot = path.resolve(import.meta.dirname, '..');
 const outDir = path.join(repoRoot, 'build-resources', 'ffmpeg');
