@@ -71,8 +71,10 @@ public class ClipService {
 
     /**
      * Carves a user-defined clip {@code [startS, endS]} out of a match's recording. Validates the
-     * parent match exists and still has a video on disk, clamps the range to {@code [0, durationS]},
-     * inserts a {@code pending} row, publishes {@code clip.created}, and dispatches async generation.
+     * parent match exists and still has a video on disk, normalizes the range (floors the lower bound at
+     * 0 and caps the length at {@code MAX_CLIP_SECONDS}, but deliberately does NOT clamp the upper bound
+     * to the match duration — see {@link #create}), inserts a {@code pending} row, publishes
+     * {@code clip.created}, and dispatches async generation.
      *
      * @return the new clip's id
      * @throws IllegalArgumentException if the match is missing, has no video, or the range is empty
