@@ -36,7 +36,7 @@ export interface UpdateControllerDeps {
   isBusy(): Promise<BusyResult>;
   /**
    * Tear down the supervisors and quitAndInstall. The process exits; this never returns
-   * normally. Only ever called after an isBusy() === false check.
+   * normally. Only ever called after the gate reports not busy (isBusy() resolves {busy: false}).
    */
   doInstall(): void;
   /** Push the latest state to the renderer and cache it for getState(). */

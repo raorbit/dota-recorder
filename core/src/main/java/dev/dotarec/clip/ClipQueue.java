@@ -35,9 +35,10 @@ public class ClipQueue {
      * worker died after the cut but before the status write (e.g. a back-to-back SQLITE_BUSY at
      * finalize), so the {@code @Async} method's exception escaped and the row never reached a terminal
      * state. Must strictly EXCEED a single {@code generateAsync} run's true worst case: THREE
-     * back-to-back {@code Clipper} process ceilings — the copy attempt, the re-encode retry, and the
-     * thumbnail grab, each capped at {@code Clipper.MAX_TIMEOUT_MS} (30 min), so up to 90 min — plus
-     * generous margin, or a legitimately slow render (a long manual clip whose re-encode fallback runs
+     * back-to-back {@code Clipper} process ceilings — the copy attempt and the re-encode retry, each
+     * capped at {@code Clipper.MAX_TIMEOUT_MS} (30 min), plus the thumbnail grab capped at {@code
+     * Clipper.MIN_TIMEOUT_MS} (10 min): a true worst case of ~70 min, bounded above by 3×MAX (90 min) —
+     * plus generous margin, or a legitimately slow render (a long manual clip whose re-encode fallback runs
      * for many minutes) would be re-pended while its original worker is still finalizing and the same
      * sweep would dispatch a SECOND concurrent cut to the identical {@code -y} output path. Because the
      * {@code Clipper} timeout now scales with clip length up to that ceiling, this cutoff is sized to
