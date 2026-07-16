@@ -37,12 +37,14 @@ public class SettingsStore {
          * FPS"). An integer OBS common value (UI offers 30/60). Applied on the next OBS launch, like
          * {@link #resolution}.
          */
-        public int fps = 60;
+        public int fps = 30;
         /**
          * OBS Simple-output {@code RecQuality} (case-sensitive). One of Stream/Small/HQ/Lossless; the
-         * UI picker offers Stream/HQ/Lossless. Applied on the next OBS launch.
+         * UI picker offers Stream/HQ/Lossless. Applied on the next OBS launch. Stream at 30fps keeps
+         * a full match around ~2 GB; HQ at 60fps produced ~40 GB VODs, which fills the disk cap after
+         * a handful of matches.
          */
-        public String quality = "HQ";
+        public String quality = "Stream";
         /**
          * OBS Simple-output {@code RecFormat2} (the recording container). The UI offers the crash-safe
          * subset hybrid_mp4/fragmented_mp4/mkv/mov. Applied on the next OBS launch.
@@ -278,10 +280,10 @@ public class SettingsStore {
         // A legacy settings.json predating fps/quality/format deserializes them to 0/null; backfill
         // the defaults so writeProfile() never substitutes "0"/null into the OBS profile.
         if (loaded.fps <= 0) {
-            loaded.fps = 60;
+            loaded.fps = 30;
         }
         if (loaded.quality == null || loaded.quality.isBlank()) {
-            loaded.quality = "HQ";
+            loaded.quality = "Stream";
         }
         if (loaded.format == null || loaded.format.isBlank()) {
             loaded.format = "hybrid_mp4";

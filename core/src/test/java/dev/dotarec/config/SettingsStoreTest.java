@@ -66,8 +66,8 @@ class SettingsStoreTest {
     @Test
     void freshStore_hasVideoControlDefaults(@TempDir Path dir) {
         SettingsStore store = new SettingsStore(paths(dir));
-        assertThat(store.get().fps).isEqualTo(60);
-        assertThat(store.get().quality).isEqualTo("HQ");
+        assertThat(store.get().fps).isEqualTo(30);
+        assertThat(store.get().quality).isEqualTo("Stream");
         assertThat(store.get().format).isEqualTo("hybrid_mp4");
     }
 
@@ -76,8 +76,8 @@ class SettingsStoreTest {
         SettingsStore store = new SettingsStore(paths(dir));
         store.update(
                 s -> {
-                    s.fps = 30;
-                    s.quality = "Stream";
+                    s.fps = 60;
+                    s.quality = "HQ";
                     s.format = "mkv";
                     return s;
                 });
@@ -88,14 +88,14 @@ class SettingsStoreTest {
                     s.resolution = "1280x720";
                     return s;
                 });
-        assertThat(store.get().fps).isEqualTo(30);
-        assertThat(store.get().quality).isEqualTo("Stream");
+        assertThat(store.get().fps).isEqualTo(60);
+        assertThat(store.get().quality).isEqualTo("HQ");
         assertThat(store.get().format).isEqualTo("mkv");
 
         // And they round-trip through settings.json.
         SettingsStore reloaded = new SettingsStore(paths(dir));
-        assertThat(reloaded.get().fps).isEqualTo(30);
-        assertThat(reloaded.get().quality).isEqualTo("Stream");
+        assertThat(reloaded.get().fps).isEqualTo(60);
+        assertThat(reloaded.get().quality).isEqualTo("HQ");
         assertThat(reloaded.get().format).isEqualTo("mkv");
     }
 
@@ -134,8 +134,8 @@ class SettingsStoreTest {
                 dir.resolve("settings.json"), "{\"resolution\":\"1920x1080\",\"fps\":0}");
 
         SettingsStore store = new SettingsStore(paths(dir));
-        assertThat(store.get().fps).isEqualTo(60);
-        assertThat(store.get().quality).isEqualTo("HQ");
+        assertThat(store.get().fps).isEqualTo(30);
+        assertThat(store.get().quality).isEqualTo("Stream");
         assertThat(store.get().format).isEqualTo("hybrid_mp4");
     }
 

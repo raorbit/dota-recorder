@@ -284,8 +284,8 @@ public class ObsConfigWriter {
         tokens.put("OUT_CY", Integer.toString(res[1]));
         // FPS/quality/format are user settings (defaults backfilled in SettingsStore.load).
         // Guard null/blank defensively in case a legacy settings.json bypassed the backfill.
-        tokens.put("FPS", Integer.toString(s.fps > 0 ? s.fps : 60));
-        tokens.put("REC_QUALITY", (s.quality == null || s.quality.isBlank()) ? "HQ" : s.quality);
+        tokens.put("FPS", Integer.toString(s.fps > 0 ? s.fps : 30));
+        tokens.put("REC_QUALITY", (s.quality == null || s.quality.isBlank()) ? "Stream" : s.quality);
         tokens.put("REC_FORMAT", (s.format == null || s.format.isBlank()) ? "hybrid_mp4" : s.format);
         String ini = substituteTokens(loadTemplate(PROFILE_TEMPLATE), tokens);
         writeAtomically(layout.profileIni(), ini);

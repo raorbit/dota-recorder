@@ -132,14 +132,14 @@ class SettingsControllerTest {
         SettingsView updated =
                 controller.putSettings(
                         new SettingsPatch(
-                                null, null, null, null, null, null, null, 30, "Stream", "mkv", null,
+                                null, null, null, null, null, null, null, 60, "HQ", "mkv", null,
                                 null, null, null));
 
-        assertThat(updated.fps()).isEqualTo(30);
-        assertThat(updated.quality()).isEqualTo("Stream");
+        assertThat(updated.fps()).isEqualTo(60);
+        assertThat(updated.quality()).isEqualTo("HQ");
         assertThat(updated.format()).isEqualTo("mkv");
-        assertThat(store.get().fps).isEqualTo(30);
-        assertThat(store.get().quality).isEqualTo("Stream");
+        assertThat(store.get().fps).isEqualTo(60);
+        assertThat(store.get().quality).isEqualTo("HQ");
         assertThat(store.get().format).isEqualTo("mkv");
     }
 
@@ -180,8 +180,8 @@ class SettingsControllerTest {
                         ResponseStatusException.class,
                         e -> assertThat(e.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST));
 
-        // The store is left untouched (default 60fps), not partially mutated.
-        assertThat(store.get().fps).isEqualTo(60);
+        // The store is left untouched (default 30fps), not partially mutated.
+        assertThat(store.get().fps).isEqualTo(30);
     }
 
     @Test
@@ -196,7 +196,7 @@ class SettingsControllerTest {
                         ResponseStatusException.class,
                         e -> assertThat(e.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST));
 
-        assertThat(store.get().quality).isEqualTo("HQ");
+        assertThat(store.get().quality).isEqualTo("Stream");
     }
 
     @Test
@@ -229,10 +229,10 @@ class SettingsControllerTest {
         SettingsView updated =
                 controller.putSettings(
                         new SettingsPatch(
-                                null, null, null, null, null, null, null, 30, null, null, null,
+                                null, null, null, null, null, null, null, 60, null, null, null,
                                 null, null, null));
 
-        assertThat(updated.fps()).isEqualTo(30);
+        assertThat(updated.fps()).isEqualTo(60);
         // The omitted fields are left exactly as they were.
         assertThat(store.get().quality).isEqualTo("Lossless");
         assertThat(store.get().format).isEqualTo("mov");
@@ -1106,12 +1106,12 @@ class SettingsControllerTest {
         SettingsView updated =
                 controller.putSettings(
                         new SettingsPatch(
-                                null, null, null, clips, null, null, null, 30, null, null,
+                                null, null, null, clips, null, null, null, 60, null, null,
                                 List.of(new StorageLocation("a", offlineArchive, 500)),
                                 null, null, null));
 
-        assertThat(updated.fps()).isEqualTo(30);
-        assertThat(store.get().fps).isEqualTo(30);
+        assertThat(updated.fps()).isEqualTo(60);
+        assertThat(store.get().fps).isEqualTo(60);
         assertThat(store.get().storageLocations).hasSize(1);
         assertThat(store.get().storageLocations.get(0).path()).isEqualTo(offlineArchive);
         // The stored path was NOT probed: nothing tried to create it.
@@ -1159,10 +1159,10 @@ class SettingsControllerTest {
         SettingsView updated =
                 controller.putSettings(
                         new SettingsPatch(
-                                null, null, null, offlineClips, null, null, null, 30, null, null,
+                                null, null, null, offlineClips, null, null, null, 60, null, null,
                                 null, null, null, null));
 
-        assertThat(updated.fps()).isEqualTo(30);
+        assertThat(updated.fps()).isEqualTo(60);
         assertThat(store.get().videoDir).isEqualTo(offlineClips);
         // Not a move: nothing lands in the historical list.
         assertThat(store.get().previousVideoDirs).isEmpty();
