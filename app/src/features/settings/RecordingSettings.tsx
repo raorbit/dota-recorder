@@ -74,8 +74,8 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
 
   // Video controls (mirror `resolution`: saved now, applied on the next OBS launch).
   // encoderChoice maps 'auto' <-> '' (blank sentinel re-arms the GPU probe at boot).
-  const [fps, setFps] = useState(60);
-  const [quality, setQuality] = useState('HQ');
+  const [fps, setFps] = useState(30);
+  const [quality, setQuality] = useState('Stream');
   const [recFormat, setRecFormat] = useState('hybrid_mp4');
   const [encoderChoice, setEncoderChoice] = useState('auto');
 
