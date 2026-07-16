@@ -20,9 +20,11 @@ function updateSummary(u: UpdateState | null, autoOn: boolean): { title: string;
         title: `Update available — v${u.version ?? ''}`,
         desc: u.recording
           ? "The download will start once you're not recording."
-          : autoOn
-            ? 'Starting download…'
-            : 'Turn on Automatic updates to download and install it.',
+          : u.unreachable
+            ? 'The download will start once the recorder is responding again.'
+            : autoOn
+              ? 'Starting download…'
+              : 'Turn on Automatic updates to download and install it.',
       };
     case 'downloading':
       return { title: `Downloading update… ${u.percent ?? 0}%`, desc: 'You can keep using the app.' };
