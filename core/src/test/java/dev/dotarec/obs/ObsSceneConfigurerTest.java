@@ -18,6 +18,7 @@ import io.obswebsocket.community.client.OBSRemoteController;
 import io.obswebsocket.community.client.message.response.inputs.GetInputListResponse;
 import io.obswebsocket.community.client.message.response.inputs.RemoveInputResponse;
 import io.obswebsocket.community.client.message.response.inputs.SetInputMuteResponse;
+import io.obswebsocket.community.client.message.response.sceneitems.GetSceneItemIdResponse;
 import io.obswebsocket.community.client.model.Input;
 import io.obswebsocket.community.client.model.Scene;
 import java.nio.file.Path;
@@ -93,6 +94,26 @@ class ObsSceneConfigurerTest {
     void inputExists_nullOrEmptyList_isFalse() {
         assertThat(ObsSceneConfigurer.inputExists(null, "anything")).isFalse();
         assertThat(ObsSceneConfigurer.inputExists(List.of(), "anything")).isFalse();
+    }
+
+    @Test
+    void classifySceneMembership_distinguishesTimeoutFromNotInScene() {
+        // Safety-critical distinction: a null response (getSceneItemId timeout) is UNKNOWN and must NOT
+        // be treated as an orphan, or a transient RPC hiccup would destroy a live, correctly-placed Game
+        // Capture mid-recording. Only a genuine unsuccessful reply (not a scene item) is NOT_IN_SCENE.
+        assertThat(ObsSceneConfigurer.classifySceneMembership(null))
+                .isEqualTo(ObsSceneConfigurer.SceneMembership.UNKNOWN);
+
+        GetSceneItemIdResponse notFound = mock(GetSceneItemIdResponse.class);
+        when(notFound.isSuccessful()).thenReturn(false);
+        assertThat(ObsSceneConfigurer.classifySceneMembership(notFound))
+                .isEqualTo(ObsSceneConfigurer.SceneMembership.NOT_IN_SCENE);
+
+        GetSceneItemIdResponse present = mock(GetSceneItemIdResponse.class);
+        when(present.isSuccessful()).thenReturn(true);
+        when(present.getSceneItemId()).thenReturn(7);
+        assertThat(ObsSceneConfigurer.classifySceneMembership(present))
+                .isEqualTo(ObsSceneConfigurer.SceneMembership.IN_SCENE);
     }
 
     @Test
