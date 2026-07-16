@@ -300,6 +300,23 @@ describe('JvmSupervisor', () => {
     expect(lines).toContain('before *** after');
   });
 
+  it('keeps stdout and stderr buffers separate so an interleaved line cannot splice a split secret', async () => {
+    // A secret split across two stdout 'data' events must survive a stderr line arriving BETWEEN them. A
+    // single shared buffer would splice the stderr line onto the stdout leftover, rejoining the wrong
+    // halves so neither matches and the secret leaks. Per-stream buffers keep the stdout halves adjacent.
+    const lines: string[] = [];
+    const sup = new JvmSupervisor({ bridgeToken: 'secrettoken', onLog: (line) => lines.push(line) });
+    await sup.start();
+
+    children[0].stdout.emit('data', Buffer.from('before secret')); // stdout first half, buffered
+    children[0].stderr.emit('data', Buffer.from('unrelated stderr line\n')); // must NOT consume the stdout buffer
+    children[0].stdout.emit('data', Buffer.from('token after\n')); // stdout second half completes the line
+
+    expect(lines).toContain('unrelated stderr line');
+    expect(lines).toContain('before *** after'); // the split secret was still rejoined + redacted
+    expect(lines.join('\n')).not.toContain('secrettoken'); // and neither half leaked
+  });
+
   it('flushes a buffered partial final line (no trailing newline) on exit, scrubbed', async () => {
     // A last log line the core wrote without a trailing newline before exiting must still reach the log
     // — and be scrubbed. It sits in the partial-line buffer until the 'exit' flush.

@@ -60,11 +60,14 @@ export class ObsSupervisor {
   private readonly scene: string;
   private readonly healthTimeoutMs: number;
   private readonly bridgeToken: string | undefined;
-  // Residual partial log line held back between stdout/stderr 'data' events. OBS output arrives in
-  // arbitrary slices, so a secret (e.g. the echoed --websocket_password) can straddle a chunk boundary;
-  // buffering the trailing incomplete segment and prepending it to the next chunk lets emitLines scrub
-  // whole lines only. Flushed on 'exit' so a final unterminated line still reaches the log.
-  private logLineBuffer = '';
+  // Residual partial log line held back between 'data' events, kept SEPARATE per stream. OBS output
+  // arrives in arbitrary slices, so a secret (e.g. the echoed --websocket_password) can straddle a
+  // chunk boundary; buffering the trailing incomplete segment and prepending it to the next chunk of
+  // the SAME stream lets emitLines scrub whole lines only. stdout and stderr must NOT share one buffer,
+  // or an interleaved partial line from one would be spliced onto the other — garbling the log and
+  // defeating the scrub. Both are flushed on 'exit' so a final unterminated line still reaches the log.
+  private stdoutLineBuffer = '';
+  private stderrLineBuffer = '';
   private readonly onLog: (line: string) => void;
   private readonly onUnexpectedExit: ((info: ObsExitInfo) => void) | undefined;
 
@@ -151,8 +154,8 @@ export class ObsSupervisor {
       assignJob.assign(child.pid);
     }
 
-    child.stdout?.on('data', (buf: Buffer) => this.emitLines(buf));
-    child.stderr?.on('data', (buf: Buffer) => this.emitLines(buf));
+    child.stdout?.on('data', (buf: Buffer) => this.emitLines(buf, 'stdout'));
+    child.stderr?.on('data', (buf: Buffer) => this.emitLines(buf, 'stderr'));
     child.on('exit', (code, signal) => {
       // Only clear the handle if THIS child is still current (a newer start() may have replaced it).
       if (this.child === child) {
@@ -315,25 +318,30 @@ export class ObsSupervisor {
     });
   }
 
-  private emitLines(buf: Buffer): void {
+  private emitLines(buf: Buffer, stream: 'stdout' | 'stderr'): void {
     // OBS echoes its --websocket_password arg on startup and can surface the bridge token if it ever
     // logs the core's env; scrub both before they reach electron.log. scrubChunk buffers a partial
-    // trailing line across chunks so a secret split over two 'data' events is still rejoined and redacted.
-    const { lines, leftover } = scrubChunk(this.logLineBuffer, buf.toString('utf8'), [
+    // trailing line across chunks (per stream) so a secret split over two 'data' events is still
+    // rejoined and redacted.
+    const prev = stream === 'stdout' ? this.stdoutLineBuffer : this.stderrLineBuffer;
+    const { lines, leftover } = scrubChunk(prev, buf.toString('utf8'), [
       this.password,
       this.bridgeToken,
     ]);
-    this.logLineBuffer = leftover;
+    if (stream === 'stdout') this.stdoutLineBuffer = leftover;
+    else this.stderrLineBuffer = leftover;
     for (const line of lines) this.onLog(line);
   }
 
-  // Flush a buffered partial final line (a last log line OBS wrote without a trailing newline before
+  // Flush both buffered partial final lines (a last line OBS wrote without a trailing newline before
   // exiting), scrubbed like any other so a trailing secret can't slip through unredacted.
   private flushLogBuffer(): void {
-    const line = this.logLineBuffer;
-    this.logLineBuffer = '';
-    if (line.length === 0) return;
-    this.onLog(scrubSecrets(line, [this.password, this.bridgeToken]));
+    const out = this.stdoutLineBuffer;
+    const err = this.stderrLineBuffer;
+    this.stdoutLineBuffer = '';
+    this.stderrLineBuffer = '';
+    if (out.length > 0) this.onLog(scrubSecrets(out, [this.password, this.bridgeToken]));
+    if (err.length > 0) this.onLog(scrubSecrets(err, [this.password, this.bridgeToken]));
   }
 
   private async waitForObs(child: ChildProcess): Promise<void> {
