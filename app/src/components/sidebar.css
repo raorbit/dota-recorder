@@ -71,8 +71,9 @@
   color: var(--accent);
 }
 
-/* Black-capture alert: shown under the recording status when the game capture samples black
-   (the "recording, but a black screen" failure the black-frame guard detects). */
+/* Black-capture alert: shown under the status card when the game capture sampled black
+   (the "recording, but a black screen" failure the black-frame guard detects). Stays up
+   after the recording ends, until the next recording arms. */
 .sb-status-warn {
   margin-top: 8px;
   padding: 6px 8px;

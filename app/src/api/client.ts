@@ -77,8 +77,9 @@ export interface StatusSnapshot {
     readonly connected: boolean;
     readonly sceneActive: boolean;
     readonly recording: boolean;
-    // True when a recording is live but the game capture was sampled as black (near-zero
-    // luminance) — a black-screen recording that `recording` alone can't reveal.
+    // True when the current or most recent recording sampled black (near-zero luminance) — a
+    // black-screen recording that `recording` alone can't reveal. Persists past the recording's
+    // end until the next recording arms.
     readonly captureBlack: boolean;
   };
   readonly fsm: {
@@ -93,7 +94,7 @@ export interface Status {
   readonly fsmState: string;
   readonly matchId: number | null;
   readonly recording: boolean;
-  // True when recording but the game capture sampled black — the UI warns so a black VOD is never silent.
+  // True when the current or last recording sampled black — the UI warns so a black VOD is never silent.
   readonly captureBlack: boolean;
   readonly gsiConnected: boolean;
   readonly snapshot: StatusSnapshot;

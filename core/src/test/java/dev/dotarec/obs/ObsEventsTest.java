@@ -70,13 +70,14 @@ class ObsEventsTest {
     }
 
     @Test
-    void stopped_clearsAnyBlackCaptureWarning() {
-        // A prior recording flagged black; once it stops the warning is moot and must clear.
+    void stopped_keepsTheBlackCaptureWarning() {
+        // The warning must OUTLIVE the recording: during a black match the user is in fullscreen
+        // Dota and only sees the app after the recording ends. It clears on the next armCheck.
         health.setCaptureBlack(true);
 
         events.onRecordStateChanged(ObsEvents.OUTPUT_STOPPED, "C:\\videos\\match.mkv");
 
-        assertThat(health.isCaptureBlack()).isFalse();
+        assertThat(health.isCaptureBlack()).isTrue();
     }
 
     @Test

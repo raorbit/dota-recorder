@@ -167,9 +167,14 @@ export function Sidebar({
         <div className="sb-status-text" data-state={card.state}>
           {card.text}
         </div>
-        {card.state === 'recording' && status?.captureBlack === true && (
+        {/* Persists after the recording ends (the core keeps the flag until the next recording
+            arms): during a black match the user is in fullscreen Dota and only sees the app
+            afterwards, so a warning gated on 'recording' would never be seen. */}
+        {status?.captureBlack === true && (
           <div className="sb-status-warn" role="alert">
-            ⚠ Capture looks black — the Dota window isn’t being recorded. Check OBS Game Capture.
+            {card.state === 'recording'
+              ? '⚠ Capture looks black — the Dota window isn’t being recorded. Check OBS Game Capture.'
+              : '⚠ The last recording looked black — the Dota window wasn’t captured. Check OBS Game Capture.'}
           </div>
         )}
         {card.state === 'recording' && (

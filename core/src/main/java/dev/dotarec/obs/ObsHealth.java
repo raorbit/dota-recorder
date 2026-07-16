@@ -30,8 +30,9 @@ public class ObsHealth {
      * Whether the last black-frame check found the game capture to be black (near-zero luminance)
      * while recording — the "OBS recording, but a black screen" failure that {@code isRecording}
      * alone can't distinguish. Set by {@link CaptureBlackFrameGuard} a few seconds into a recording
-     * and cleared when a new recording arms or the current one stops. Independent volatile like the
-     * others; the status layer reports it as-is.
+     * and cleared only when the NEXT recording arms — it deliberately survives the recording's end,
+     * since the user is in fullscreen Dota while it records black and only sees the app afterwards.
+     * Independent volatile like the others; the status layer reports it as-is.
      */
     private volatile boolean captureBlack;
 

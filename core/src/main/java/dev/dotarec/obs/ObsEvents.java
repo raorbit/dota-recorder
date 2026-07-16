@@ -98,8 +98,10 @@ public class ObsEvents {
                     lastStoppedOutputPath.set(outputPath);
                 }
                 health.setRecording(false);
-                // Recording ended: any black-capture warning is moot now.
-                health.setCaptureBlack(false);
+                // Deliberately does NOT clear captureBlack: during a black match the user is in
+                // fullscreen Dota and only sees the app AFTER the recording ends, so a warning
+                // that dies with the recording is never seen by the person it exists for. It
+                // persists until the next recording arms (armCheck clears it).
                 log.info("OBS recording stopped; event outputPath={}", outputPath);
             }
             default -> {
