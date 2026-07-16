@@ -221,17 +221,30 @@ class EnricherTest {
                 null, 0, 999, 5, 5, 5, 300, 400, 12000, 100, 60);
         OpenDotaMatch match = new OpenDotaMatch(917L, true, 1800, 1000L, 7, 22,
                 List.of(onNewHero, player(55555555L, 128)));
-        // A source that records whether it was hit: the forever-hold must cost zero API quota, so the
-        // enricher short-circuits to the hold BEFORE any OpenDota fetch for this unmappable-hero row.
-        TrackingSource source = new TrackingSource(FetchResult.ready(match));
-        new Enricher(source, repo, settings, events).enrich(id, 917L);
+        enricher(FetchResult.ready(match)).enrich(id, 917L);
 
         assertThat(repo.findById(id).orElseThrow().enrichmentState()).isEqualTo("pending");
         assertThat(repo.enrichAttempts(id)).isEqualTo(0);
         assertThat(events.types()).isEmpty();
-        assertThat(source.fetched)
-                .as("an unattributable newer-hero hold must not hit OpenDota")
-                .isFalse();
+    }
+
+    @Test
+    void recordedHeroNewerThanBundledMapStillEnrichesViaAccountIdWhenPublic() throws Exception {
+        // Regression guard: the newer-hero HOLD must apply only AFTER attribution fails, never as a
+        // pre-fetch short-circuit on hero mappability alone. A public-profile user (their OpenDota row
+        // carries our account id) on a hero the bundled map cannot name yet is still attributable BY
+        // ACCOUNT, so it must ENRICH -- holding it would wrongly withhold enrichment the account join
+        // delivers.
+        long id = insertPendingWithHero(918L, "npc_dota_hero_brand_new_hero");
+        OpenDotaMatch.Player meOnNewHero = new OpenDotaMatch.Player(
+                96828122L, 128, 999, 5, 5, 5, 500, 600, 20000, 200, 60);
+        OpenDotaMatch match = new OpenDotaMatch(918L, true, 1800, 1000L, 7, 22,
+                List.of(player(55555555L, 1), meOnNewHero));
+        enricher(FetchResult.ready(match)).enrich(id, 918L);
+
+        MatchSummary row = repo.findById(id).orElseThrow();
+        assertThat(row.enrichmentState()).isEqualTo("enriched");
+        assertThat(events.types()).containsExactly("match.enriched");
     }
 
     @Test
@@ -474,22 +487,6 @@ class EnricherTest {
         public FetchResult fetch(long dotaMatchId) {
             fetched = true;
             return FetchResult.Transient.INSTANCE;
-        }
-    }
-
-    /** MatchSource that records whether fetch ran and returns a canned result if it does. */
-    private static final class TrackingSource implements MatchSource {
-        private final FetchResult result;
-        boolean fetched = false;
-
-        TrackingSource(FetchResult result) {
-            this.result = result;
-        }
-
-        @Override
-        public FetchResult fetch(long dotaMatchId) {
-            fetched = true;
-            return result;
         }
     }
 
