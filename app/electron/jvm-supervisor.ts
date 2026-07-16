@@ -57,11 +57,15 @@ export class JvmSupervisor {
   // construction); the OBS websocket password is core-owned and only knowable after boot, so it's
   // appended later via addScrubSecret once main.ts fetches it from /obs/launch-args.
   private readonly logSecrets: Array<string | undefined>;
-  // Residual partial log line held back between stdout/stderr 'data' events. A child's output arrives
-  // in arbitrary slices, so a secret (or any line) can straddle a chunk boundary; buffering the
-  // trailing incomplete segment and prepending it to the next chunk lets emitLines scrub whole lines
-  // only. Flushed on 'exit' (see the exit handler) so a final unterminated line still reaches the log.
-  private logLineBuffer = '';
+  // Residual partial log line held back between 'data' events, kept SEPARATE per stream. A child's
+  // output arrives in arbitrary slices, so a secret (or any line) can straddle a chunk boundary;
+  // buffering the trailing incomplete segment and prepending it to the next chunk of the SAME stream
+  // lets emitLines scrub whole lines only. stdout and stderr must NOT share one buffer: an interleaved
+  // partial line from one stream would then be spliced onto the other's next chunk — garbling the log
+  // and defeating the scrub (a stderr line landing between a secret's two stdout halves would rejoin
+  // the wrong pieces and leak it). Both are flushed on 'exit' so a final unterminated line still logs.
+  private stdoutLineBuffer = '';
+  private stderrLineBuffer = '';
   private readonly onLog: (line: string) => void;
   private readonly onUnexpectedExit: ((info: ExitInfo) => void) | undefined;
 
@@ -141,8 +145,8 @@ export class JvmSupervisor {
       assignJob.assign(child.pid);
     }
 
-    child.stdout?.on('data', (buf: Buffer) => this.emitLines(buf));
-    child.stderr?.on('data', (buf: Buffer) => this.emitLines(buf));
+    child.stdout?.on('data', (buf: Buffer) => this.emitLines(buf, 'stdout'));
+    child.stderr?.on('data', (buf: Buffer) => this.emitLines(buf, 'stderr'));
     child.on('exit', (code, signal) => {
       // Only clear the handle if THIS child is still current — a newer start() (e.g. a crash-triggered
       // restart) may already have replaced it. Clearing it FIRST lets onUnexpectedExit restart cleanly.
@@ -240,23 +244,27 @@ export class JvmSupervisor {
     this.child = null;
   }
 
-  private emitLines(buf: Buffer): void {
+  private emitLines(buf: Buffer, stream: 'stdout' | 'stderr'): void {
     // The bridge token and the core-minted OBS websocket password both live in / flow through the
     // core; if it ever echoes them (a debug bean, a verbose stack trace, a settings dump) they would
     // otherwise land in electron.log in plaintext. scrubChunk buffers a partial trailing line across
-    // chunks so a secret split over two 'data' events is still rejoined and redacted.
-    const { lines, leftover } = scrubChunk(this.logLineBuffer, buf.toString('utf8'), this.logSecrets);
-    this.logLineBuffer = leftover;
+    // chunks (per stream) so a secret split over two 'data' events is still rejoined and redacted.
+    const prev = stream === 'stdout' ? this.stdoutLineBuffer : this.stderrLineBuffer;
+    const { lines, leftover } = scrubChunk(prev, buf.toString('utf8'), this.logSecrets);
+    if (stream === 'stdout') this.stdoutLineBuffer = leftover;
+    else this.stderrLineBuffer = leftover;
     for (const line of lines) this.onLog(line);
   }
 
-  // Flush a buffered partial final line (a last log line the core wrote without a trailing newline
+  // Flush both buffered partial final lines (a last line the core wrote without a trailing newline
   // before exiting), scrubbed like any other so a trailing secret can't slip through unredacted.
   private flushLogBuffer(): void {
-    const line = this.logLineBuffer;
-    this.logLineBuffer = '';
-    if (line.length === 0) return;
-    this.onLog(scrubSecrets(line, this.logSecrets));
+    const out = this.stdoutLineBuffer;
+    const err = this.stderrLineBuffer;
+    this.stdoutLineBuffer = '';
+    this.stderrLineBuffer = '';
+    if (out.length > 0) this.onLog(scrubSecrets(out, this.logSecrets));
+    if (err.length > 0) this.onLog(scrubSecrets(err, this.logSecrets));
   }
 
   private async waitForHealth(child: ChildProcess): Promise<void> {
