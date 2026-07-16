@@ -22,9 +22,10 @@ public record StatusSnapshot(GsiStatus gsi, ObsStatus obs, FsmStatus fsm) {
     public record GsiStatus(boolean connected, Long lastFrameAgoMs) {}
 
     /**
-     * OBS connection / scene / recording flags. {@code captureBlack} is true when a recording is live
-     * but the game capture was sampled as black (near-zero luminance) — a black-screen recording that
-     * {@code recording} alone can't reveal; the UI warns on it.
+     * OBS connection / scene / recording flags. {@code captureBlack} is true when the current or
+     * most recent recording sampled black (near-zero luminance) — a black-screen recording that
+     * {@code recording} alone can't reveal; the UI warns on it. Persists past the recording's end
+     * until the next recording arms.
      */
     public record ObsStatus(
             boolean connected, boolean sceneActive, boolean recording, boolean captureBlack) {}
