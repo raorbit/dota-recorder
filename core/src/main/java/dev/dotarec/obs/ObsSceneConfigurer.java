@@ -217,12 +217,28 @@ public class ObsSceneConfigurer {
             // Input names are GLOBAL in OBS v5, so an existing "Game Capture" may live only in some
             // OTHER scene (a user re-parented it, or a hand-edited/restored scene collection). Then the
             // recorded "Dota" program scene has no game-capture item and records pure BLACK — a failure
-            // neither the source-level checks nor the black-frame guard reliably catch. Verify it is
-            // actually a scene item of SCENE_NAME; if not, remove the orphan and fall through to
-            // recreate it in the Dota scene (createInput adds it as a scene item of SCENE_NAME).
-            if (isGameCaptureInScene(controller)) {
+            // neither the source-level checks nor the black-frame guard reliably catch. Verify it is a
+            // scene item of SCENE_NAME. CRUCIAL: distinguish a request TIMEOUT (null response, "unknown")
+            // from a genuine "not a scene item of this scene" (an unsuccessful reply). Only the latter
+            // drives the DESTRUCTIVE remove+recreate below; a null is SKIPPED (like fitGameCaptureToCanvas
+            // treats it), so a transient RPC timeout can never destroy a live, correctly-placed capture
+            // mid-recording.
+            GetSceneItemIdResponse sceneItem =
+                    controller.getSceneItemId(SCENE_NAME, GAME_CAPTURE_INPUT, 0, REQUEST_TIMEOUT_MS);
+            SceneMembership membership = classifySceneMembership(sceneItem);
+            if (membership == SceneMembership.IN_SCENE) {
+                return; // already a scene item of the Dota scene — nothing to repair
+            }
+            if (membership == SceneMembership.UNKNOWN) {
+                // A null response is a request TIMEOUT, not proof of an orphan: leave the (possibly live,
+                // correctly-placed) capture untouched so a transient hiccup can't destroy it.
+                log.warn(
+                        "Could not verify '{}' scene membership (no response); leaving it in place",
+                        GAME_CAPTURE_INPUT);
                 return;
             }
+            // NOT_IN_SCENE: the input exists globally but is NOT a scene item of the Dota scene —
+            // remove the orphan and fall through to recreate it in the scene.
             log.warn(
                     "'{}' exists but is not in scene '{}'; re-attaching so the recording is not black",
                     GAME_CAPTURE_INPUT,
@@ -253,16 +269,30 @@ public class ObsSceneConfigurer {
                 GAME_CAPTURE_INPUT);
     }
 
+    /** Result of the game-capture scene-membership probe (see {@link #ensureGameCaptureInput}). */
+    enum SceneMembership {
+        /** A successful id: the input is a scene item of the Dota scene. */
+        IN_SCENE,
+        /** An unsuccessful reply (OBS "not a scene item of this scene"): orphaned, needs re-attaching. */
+        NOT_IN_SCENE,
+        /** A null response (request timeout): unknown — must NOT drive the destructive remove/recreate. */
+        UNKNOWN
+    }
+
     /**
-     * True when {@link #GAME_CAPTURE_INPUT} is a scene item of {@link #SCENE_NAME}. Input names are
-     * global in OBS v5, so an existing input can be absent from the Dota scene (orphaned into another
-     * scene), and a Dota scene with no game-capture item records black. Uses the same {@code
-     * getSceneItemId} probe as {@link #fitGameCaptureToCanvas}: a successful id means it is in the scene.
+     * Classifies a {@code getSceneItemId} response for {@link #GAME_CAPTURE_INPUT}. Pure and
+     * package-visible so the critical {@code null} (timeout → {@link SceneMembership#UNKNOWN}) vs
+     * unsuccessful ({@link SceneMembership#NOT_IN_SCENE}) distinction is unit-tested without a live OBS:
+     * only NOT_IN_SCENE may drive the destructive remove/recreate, so a transient timeout can never
+     * destroy a live, correctly-placed capture.
      */
-    private boolean isGameCaptureInScene(OBSRemoteController controller) {
-        GetSceneItemIdResponse id =
-                controller.getSceneItemId(SCENE_NAME, GAME_CAPTURE_INPUT, 0, REQUEST_TIMEOUT_MS);
-        return id != null && id.isSuccessful() && id.getSceneItemId() != null;
+    static SceneMembership classifySceneMembership(GetSceneItemIdResponse id) {
+        if (id == null) {
+            return SceneMembership.UNKNOWN;
+        }
+        return (id.isSuccessful() && id.getSceneItemId() != null)
+                ? SceneMembership.IN_SCENE
+                : SceneMembership.NOT_IN_SCENE;
     }
 
     /**
