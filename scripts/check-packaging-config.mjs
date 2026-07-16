@@ -57,12 +57,19 @@ check(
   'electron-builder.yml: asarUnpack must include `**/node_modules/@koromix/**` (koffi 3.x ships koffi.node in the scoped @koromix package).',
 );
 
-// The installer artifact name must be space-free so the on-disk .exe, latest.yml url, and the
-// uploaded GitHub asset all match (a spaced name 404s the electron-updater feed).
+// The installer artifact name must EXPAND to a space-free name so the on-disk .exe, latest.yml url,
+// and the uploaded GitHub asset all match (a spaced name 404s the electron-updater feed). Two vectors:
+// literal whitespace typed into the template, and — the documented one (electron-builder.yml warns
+// about it) — ${productName}, which is space-free as a token but expands to "Dota 2 Recorder"; ${name}
+// likewise expands to the scoped "@dota-recorder/app". Reject both explicitly (stripping all ${...}
+// placeholders to 'x' before the whitespace test, as before, would let ${productName} slip through).
 const artifact = /artifactName:\s*(.+)/.exec(eb);
+const artifactName = artifact ? artifact[1].trim() : '';
+const expandsToSpaced = /\$\{(productName|name)\}/.test(artifactName);
+const hasLiteralWhitespace = /\s/.test(artifactName); // ${version}/${ext}/${arch} carry no whitespace
 check(
-  artifact != null && !/\s/.test(artifact[1].trim().replace(/\$\{[^}]+\}/g, 'x')),
-  'electron-builder.yml: nsis.artifactName must be space-free (a spaced name diverges from latest.yml and 404s the updater).',
+  artifact != null && !expandsToSpaced && !hasLiteralWhitespace,
+  'electron-builder.yml: nsis.artifactName must expand to a space-free name — avoid ${productName}/${name} (they expand to a spaced/scoped value) and literal whitespace, or the on-disk .exe diverges from latest.yml and 404s the updater.',
 );
 
 // --- version-source parity -----------------------------------------------------------------------
