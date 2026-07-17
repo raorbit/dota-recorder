@@ -17,7 +17,10 @@ Click a marker and the VOD jumps to just before that moment, so you watch the pl
 Modeled on [Warcraft Recorder](https://github.com/aza547/wow-recorder), adapted to Dota's
 data reality: there's no on-disk combat log, so live
 [Game State Integration](https://developer.valvesoftware.com/wiki/Counter-Strike:_Global_Offensive_Game_State_Integration)
-(GSI) — a live HTTP feed the game pushes — is what drives both recording and tagging.
+(GSI) — a local HTTP feed the game itself pushes once you add Valve's
+`-gamestateintegration` launch option — is what drives both recording and tagging. Nothing
+reads game memory and nothing injects into the game process; the app only listens to what
+Dota broadcasts, so there's no VAC/anti-cheat surface.
 
 ## How it works
 
@@ -93,21 +96,39 @@ app itself plus the Steam CDN, so even a bug can't exfiltrate to an arbitrary ho
 
 ## Install
 
-1. Download the latest `Dota 2 Recorder-Setup-*.exe` from the
+1. Download the latest `Dota-2-Recorder-Setup-*.exe` from the
    [Releases](https://github.com/raorbit/dota-recorder/releases) page and run it. The
    installer bundles everything it needs — OBS, ffmpeg, and a trimmed JRE — so there's
    no separate setup.
-2. Launch the app and point it at your Dota install when it asks.
-3. Add `-gamestateintegration` to Dota's Steam launch options. The app writes the GSI
-   config file for you and shows you the launch option to paste in.
 
-That's it. Start a match and it records.
+   > **Windows will warn you** ("Windows protected your PC / Unknown publisher"): the
+   > installer isn't code-signed, because signing certificates cost real money for a free
+   > hobby project. Click **More info → Run anyway**. If you'd rather not run an unsigned
+   > binary, the app is fully open source — audit the
+   > [network activity](#network-activity) above, or build the installer yourself.
+
+2. Launch the app, open **Settings → Game State Integration**, and click **Set up
+   automatically** — it finds your Dota install through Steam and writes the GSI config
+   file for you.
+3. Add `-gamestateintegration` to Dota's Steam launch options (the same panel shows you
+   the exact string to copy) and restart Dota.
+
+That's it. Start a match and it records. VODs land in `Videos\Dota2Rec` at roughly 2 GB
+per match on the default Stream/30 fps quality, and a 50 GB disk cap reclaims space from
+the oldest unstarred VODs first — a swept match keeps its metadata and markers. Folder,
+quality, and cap are all adjustable in Settings.
 
 ### Requirements
 
 - Windows 10/11
 - Dota 2 with `-gamestateintegration` in its Steam launch options
 - A GPU/CPU that can record (the app probes for a hardware encoder, falling back to x264)
+
+> **Streaming with your own OBS?** This app runs its own background OBS instance that
+> Game-Captures Dota. Ports and config never clash with your install (the managed OBS
+> lives in its own profile on a private websocket port), but two Game Capture hooks on
+> one game can conflict — if your stream's Dota capture flickers or goes black while the
+> app records, switch your streaming OBS to Display Capture for Dota.
 
 ## Building from source
 
@@ -135,6 +156,19 @@ cd core && ./gradlew test
 npm run dist
 ```
 
+## Bundled software
+
+The installer redistributes two unmodified open-source tools, each running as its own
+process:
+
+- [OBS Studio](https://github.com/obsproject/obs-studio) (GPLv2) does the capture; its
+  license text ships with the app under `obs/obs-portable/data/obs-studio/license/`.
+- [ffmpeg](https://ffmpeg.org) (GPL — the [gyan.dev](https://www.gyan.dev/ffmpeg/builds/)
+  essentials build, sources at
+  [GyanD/codexffmpeg](https://github.com/GyanD/codexffmpeg)) cuts clips; its license
+  ships next to the binary at `ffmpeg/LICENSE`.
+
 ## License
 
-[MIT](LICENSE)
+The app's own code is [MIT](LICENSE). The bundled OBS and ffmpeg keep their own licenses,
+listed above.
