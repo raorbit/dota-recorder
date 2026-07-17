@@ -41,7 +41,8 @@ short of it in three ways:
 Generic capture tools (instant-replay buffers, clip apps) fix the first two but not the
 third: you still get an untagged video. And the popular clip apps are ad-supported and
 want your clips in their cloud — this one has no ads, no account, and
-[nothing leaves your machine](#network-activity). Replays keep their own strengths —
+[your recordings never leave your machine](#network-activity). Replays keep their own
+strengths —
 free camera, every player's perspective — but for
 *die → wonder what happened → click → watch*, a marked-up local VOD wins.
 
@@ -57,8 +58,9 @@ Electron main  ── supervises ──►  JVM core (Spring Boot)
 ```
 
 Electron is the sole supervisor: it spawns and reaps both the JVM core and OBS, and the
-renderer talks to the core over loopback only. Nothing binds beyond `127.0.0.1`, and
-there's no server or account — your matches never leave your machine. The core parses GSI
+renderer talks to the core over loopback only. The core binds strictly to `127.0.0.1`,
+the bundled OBS's websocket is scoped to loopback by a firewall rule the installer adds,
+and there's no server or account — your recordings never leave your machine. The core parses GSI
 frames into match state, drives an OBS recording, diffs your kills and deaths into
 timeline markers, and stores VODs plus markers in SQLite.
 
@@ -92,8 +94,10 @@ No server, no account, no telemetry — your recordings, markers, match database
 all stay on your machine. The app does make a small, fully enumerable set of outbound calls, listed
 here in full. The only thing ever sent to a third party is public Dota **match IDs**.
 
-**On your machine only (loopback).** How the app's own processes talk to each other — all bound to
-`127.0.0.1`, which is also why installing doesn't trip a Windows firewall prompt:
+**On your machine only (loopback).** How the app's own processes talk to each other. The core binds
+strictly to `127.0.0.1`; the bundled OBS's websocket cannot bind loopback-only, so the installer
+adds an elevated Windows Firewall rule scoping its port to loopback — that's the one admin prompt
+in the install:
 
 | Channel | Address | Purpose |
 | --- | --- | --- |
@@ -126,8 +130,10 @@ app itself plus the Steam CDN, so even a bug can't exfiltrate to an arbitrary ho
 
    > **Windows will warn you** ("Windows protected your PC / Unknown publisher"): the
    > installer isn't code-signed, because signing certificates cost real money for a free
-   > hobby project. Click **More info → Run anyway**. If you'd rather not run an unsigned
-   > binary, the app is fully open source — audit the
+   > hobby project. Click **More info → Run anyway**. Some antivirus engines may flag an
+   > unsigned recorder too — to verify a download, each release's notes carry the
+   > installer's sha256 (and `latest.yml` its sha512). If you'd rather not run an
+   > unsigned binary at all, the app is fully open source — audit the
    > [network activity](#network-activity) above, or build the installer yourself.
 
 2. Launch the app, open **Settings → Game State Integration**, and click **Set up
@@ -141,11 +147,18 @@ per match on the default Stream/30 fps quality, and a 50 GB disk cap reclaims sp
 the oldest unstarred VODs first — a swept match keeps its metadata and markers. Folder,
 quality, and cap are all adjustable in Settings.
 
+Uninstalling removes the app but never your data: recordings stay in `Videos\Dota2Rec`
+and the match database stays in `%APPDATA%\dota-recorder`.
+
 ### Requirements
 
 - Windows 10/11
 - Dota 2 with `-gamestateintegration` in its Steam launch options
-- A GPU/CPU that can record (the app probes for a hardware encoder, falling back to x264)
+- A GPU/CPU that can record (the app probes for a hardware encoder, falling back to
+  x264 — CPU-only encoding costs real FPS on weaker machines)
+
+Footprint: the whole stack (UI, JVM core, bundled OBS) idles around 600 MB of RAM on the
+dev machine, and the installer is ~340 MB.
 
 > **Streaming with your own OBS?** This app runs its own background OBS instance that
 > Game-Captures Dota. Ports and config never clash with your install (the managed OBS
@@ -192,6 +205,9 @@ running as its own process:
   ships next to the binary at `ffmpeg/LICENSE`.
 - A trimmed [OpenJDK](https://openjdk.org) 21 runtime (GPLv2 with Classpath Exception)
   runs the core; its per-module legal notices ship under `jre/legal/`.
+
+The exact sources for the bundled builds are available at the links above; if a link
+ever goes stale, open an issue and I'll provide the corresponding source.
 
 ## License
 
