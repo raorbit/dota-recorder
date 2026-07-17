@@ -588,7 +588,7 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
                   value={accountId}
                   autoComplete="off"
                   spellCheck={false}
-                  placeholder="96828122"
+                  placeholder="auto-filled from your first match"
                   onChange={(e) => {
                     setAccountId(e.target.value.replace(/\D/g, ''));
                     setAccountTouched(true);
