@@ -1,0 +1,31 @@
+name: Bug report
+description: A recording is missing or black, a marker seeks wrong, or the app misbehaves
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: App version
+      description: The version in the installer filename, e.g. 0.1.13
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: Windows version + GPU
+      placeholder: Windows 11 24H2, RTX 3070
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you got instead.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: >-
+        Attach or paste the tail of the logs from `%APPDATA%\dota-recorder\log\`
+        (both the Electron and core logs live there). For black or missing recordings,
+        mention whether the sidebar showed a capture warning during the match.
