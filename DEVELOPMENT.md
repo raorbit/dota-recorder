@@ -58,11 +58,13 @@ The Game Capture source was created with `capture_mode=any_fullscreen` — "capt
 application" — which hooks whatever app happens to be fullscreen when the hook activates, not the
 game specifically. If anything else was fullscreen (a media player, a browser video), OBS latched
 onto it. The fix (`ObsSceneConfigurer.gameCaptureSettings`) switches to `capture_mode=window` with
-window `::dota2.exe` and exe priority, i.e. match by executable, so capture binds only to the Dota
-process — the same window-match encoding already used for Dota's process-audio capture in
-`SettingsStore`. Like the crop fix, it is re-asserted on *every* connect, so an already-installed
-source stuck on `any_fullscreen` is corrected in place on the next launch, not only on fresh
-installs.
+exe-priority matching, so capture binds only to the Dota process. The window string itself turned
+out to be a second trap: the obvious exe-only `::dota2.exe` (the encoding Dota's process-audio
+capture uses in `SettingsStore`) makes OBS's window matcher bail on the empty window class before
+the exe priority is ever consulted, and every recording comes out pure black — the shipped match is
+the full `Dota 2:SDL_app:dota2.exe` title:class:exe triple. Like the crop fix, it is re-asserted
+on *every* connect, so an already-installed source stuck on `any_fullscreen` is corrected in place
+on the next launch, not only on fresh installs.
 
 ## Validation timeline
 
