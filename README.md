@@ -18,9 +18,11 @@ Modeled on [Warcraft Recorder](https://github.com/aza547/wow-recorder), adapted 
 data reality: there's no on-disk combat log, so live
 [Game State Integration](https://developer.valvesoftware.com/wiki/Counter-Strike:_Global_Offensive_Game_State_Integration)
 (GSI) — a local HTTP feed the game itself pushes once you add Valve's
-`-gamestateintegration` launch option — is what drives both recording and tagging. Nothing
-reads game memory and nothing injects into the game process; the app only listens to what
-Dota broadcasts, so there's no VAC/anti-cheat surface.
+`-gamestateintegration` launch option — is what drives both recording and tagging. The app
+never reads game memory: match data comes only from what Dota chooses to broadcast, and
+video comes from stock OBS Game Capture — the same capture hook every Dota streamer
+already runs. Its VAC/anti-cheat exposure is exactly that of recording with OBS, which is
+to say none in practice.
 
 ## How it works
 
@@ -158,17 +160,19 @@ npm run dist
 
 ## Bundled software
 
-The installer redistributes two unmodified open-source tools, each running as its own
-process:
+Alongside its own code, the installer redistributes three open-source components, each
+running as its own process:
 
 - [OBS Studio](https://github.com/obsproject/obs-studio) (GPLv2) does the capture; its
   license text ships with the app under `obs/obs-portable/data/obs-studio/license/`.
-- [ffmpeg](https://ffmpeg.org) (GPL — the [gyan.dev](https://www.gyan.dev/ffmpeg/builds/)
+- [ffmpeg](https://ffmpeg.org) (GPLv3 — the [gyan.dev](https://www.gyan.dev/ffmpeg/builds/)
   essentials build, sources at
   [GyanD/codexffmpeg](https://github.com/GyanD/codexffmpeg)) cuts clips; its license
   ships next to the binary at `ffmpeg/LICENSE`.
+- A trimmed [OpenJDK](https://openjdk.org) 21 runtime (GPLv2 with Classpath Exception)
+  runs the core; its per-module legal notices ship under `jre/legal/`.
 
 ## License
 
-The app's own code is [MIT](LICENSE). The bundled OBS and ffmpeg keep their own licenses,
-listed above.
+The app's own code is [MIT](LICENSE). The bundled OBS, ffmpeg, and OpenJDK runtime keep
+their own licenses, listed above.
