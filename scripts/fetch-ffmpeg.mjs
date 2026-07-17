@@ -1,8 +1,9 @@
 // Build-time fetch of a pinned static ffmpeg.exe for bundling (zero-config encoding).
 //
 // Downloads a static Windows ffmpeg build, verifies its sha256, and extracts ONLY
-// bin/ffmpeg.exe to build-resources/ffmpeg/ffmpeg.exe. electron-builder ships that
-// file as <resourcesPath>/ffmpeg/ffmpeg.exe (see electron-builder.yml), and at
+// bin/ffmpeg.exe (plus the build's LICENSE — it's a GPL binary, so the license text
+// must ship next to it) to build-resources/ffmpeg/. electron-builder ships the
+// binary as <resourcesPath>/ffmpeg/ffmpeg.exe (see electron-builder.yml), and at
 // runtime the Electron supervisor passes its path to the core (app.ffmpeg.path /
 // DOTAREC_FFMPEG_PATH) so the core never depends on ffmpeg being on PATH.
 //
@@ -54,9 +55,11 @@ const zipPath = path.join(cacheDir, zipName);
 const extractDir = path.join(cacheDir, 'extract');
 const okMarker = path.join(repoRoot, 'build-resources', `.ffmpeg-${FFMPEG_VERSION}.ok`);
 const ffmpegExe = path.join(outDir, 'ffmpeg.exe');
+const licenseFile = path.join(outDir, 'LICENSE');
 
 async function main() {
-  if (existsSync(okMarker) && existsSync(ffmpegExe)) {
+  // The LICENSE check re-runs extraction on caches that predate license bundling.
+  if (existsSync(okMarker) && existsSync(ffmpegExe) && existsSync(licenseFile)) {
     console.log(`ffmpeg ${FFMPEG_VERSION} already bundled at ${ffmpegExe} — skipping.`);
     return;
   }
@@ -113,22 +116,46 @@ async function main() {
 
   // These static zips wrap everything in a versioned top-level dir (e.g.
   // ffmpeg-7.1-essentials_build/bin/ffmpeg.exe). Locate bin/ffmpeg.exe wherever it lands
-  // and copy ONLY that one binary out — we don't bundle the rest of the build.
+  // and copy ONLY that one binary out — plus the build's LICENSE, which ships next to
+  // the exe (GPL binary, so its license text must travel with the bundle).
   const found = findFfmpegExe(extractDir);
   if (!found) {
     throw new Error(
       `Extraction did not produce a bin/ffmpeg.exe under ${extractDir} — the ffmpeg zip layout may have changed.`,
     );
   }
+  const foundLicense = findLicense(extractDir);
+  if (!foundLicense) {
+    throw new Error(
+      `Extraction did not produce a LICENSE under ${extractDir} — the ffmpeg zip layout may have changed.`,
+    );
+  }
   rmSync(ffmpegExe, { force: true });
   renameSync(found, ffmpegExe);
+  rmSync(licenseFile, { force: true });
+  renameSync(foundLicense, licenseFile);
   rmSync(extractDir, { recursive: true, force: true });
-  if (!existsSync(ffmpegExe)) {
-    throw new Error(`Failed to place ${ffmpegExe}.`);
+  if (!existsSync(ffmpegExe) || !existsSync(licenseFile)) {
+    throw new Error(`Failed to place ${ffmpegExe} + ${licenseFile}.`);
   }
 
   writeFileSync(okMarker, FFMPEG_VERSION);
   console.log(`ffmpeg ${FFMPEG_VERSION} bundled at ${ffmpegExe}`);
+}
+
+// Recursively locate the build's LICENSE file (gyan.dev builds carry it at the top of the
+// versioned dir; accept a .txt suffix too in case the layout ever changes).
+function findLicense(dir) {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const p = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      const hit = findLicense(p);
+      if (hit) return hit;
+    } else if (/^licen[sc]e(\.txt)?$/i.test(entry.name)) {
+      return p;
+    }
+  }
+  return null;
 }
 
 // Recursively locate the first `bin/ffmpeg.exe` under `dir` (static zips nest it under a
