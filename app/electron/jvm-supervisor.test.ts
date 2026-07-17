@@ -80,6 +80,14 @@ describe('JvmSupervisor', () => {
     expect(args).toContain(`-Dapp.parent-pid=${process.pid}`);
   });
 
+  it('caps the JVM heap so ergonomics do not size it from host RAM', async () => {
+    const sup = new JvmSupervisor({ onLog: () => {} });
+    await sup.start();
+    const args = spawnMock.mock.calls[0][1] as string[];
+    expect(args).toContain('-Xms64m');
+    expect(args).toContain('-Xmx256m');
+  });
+
   it('threads the bundled ffmpeg path into the core (system property + env) when present', async () => {
     ffmpegPathMock.mockReturnValue('C:/ffmpeg/ffmpeg.exe');
     const sup = new JvmSupervisor({ onLog: () => {} });

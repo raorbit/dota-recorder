@@ -114,6 +114,11 @@ export class JvmSupervisor {
     // Omitted in dev when no bundled ffmpeg is present (the core falls back to "ffmpeg" on PATH).
     const ffmpeg = ffmpegPath();
     const jvmArgs = [
+      // Cap the heap: without this, JVM ergonomics size it from HOST RAM (max 1/4, initial 1/64 —
+      // 16 GB / 1 GB on a 64 GB machine), so the core commits ~1 GB of heap it never touches and
+      // shows an alarming Commit size in Task Manager. Real heap need is well under 100 MB.
+      '-Xms64m',
+      '-Xmx256m',
       `-Dapp.obs.dir=${obsDir()}`,
       ...(source ? [`-Dapp.obs.source-dir=${source}`] : []),
       `-Dapp.obs.version=${obsVersion()}`,
