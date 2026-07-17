@@ -8,7 +8,11 @@ moment in the recorded video. It bundles and auto-configures its own OBS instanc
 there's no manual OBS setup — point it at your Dota install once and it records in the
 background.
 
-<!-- TODO: screenshot of the browse UI + a seek-to-death GIF -->
+![Match library with kill/death markers on the VOD timeline](docs/media/browse-ui.png)
+
+Click a marker and the VOD jumps to just before that moment, so you watch the play unfold:
+
+![Clicking a death marker in fullscreen playback — the video jumps to just before the death](docs/media/seek-fullscreen.webp)
 
 Modeled on [Warcraft Recorder](https://github.com/aza547/wow-recorder), adapted to Dota's
 data reality: there's no on-disk combat log, so live
