@@ -39,9 +39,11 @@ short of it in three ways:
   timeline, one click away.
 
 Generic capture tools (instant-replay buffers, clip apps) fix the first two but not the
-third: you still get an untagged video. Replays keep their own strengths — free camera,
-every player's perspective — but for *die → wonder what happened → click → watch*,
-a marked-up local VOD wins.
+third: you still get an untagged video. And the popular clip apps are ad-supported and
+want your clips in their cloud — this one has no ads, no account, and
+[nothing leaves your machine](#network-activity). Replays keep their own strengths —
+free camera, every player's perspective — but for
+*die → wonder what happened → click → watch*, a marked-up local VOD wins.
 
 ## How it works
 
