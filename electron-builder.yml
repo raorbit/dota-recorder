@@ -65,6 +65,10 @@ extraResources:
   # that fetch-ffmpeg writes as a SIBLING of ffmpeg/ is shipped via the filter below.
   - from: build-resources/ffmpeg/ffmpeg.exe
     to: ffmpeg/ffmpeg.exe
+  # ffmpeg is a GPL binary — its LICENSE (extracted from the same zip by fetch-ffmpeg)
+  # must ship next to the exe.
+  - from: build-resources/ffmpeg/LICENSE
+    to: ffmpeg/LICENSE
   - from: build-resources
     to: .
     filter:
