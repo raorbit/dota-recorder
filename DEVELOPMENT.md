@@ -83,5 +83,7 @@ on the next launch, not only on fresh installs.
 - CI runs the core JUnit suite, both typechecks, lint, and the app vitest suite on every push/PR.
   It deliberately skips packaging; the packaged layout is guarded by
   `app/electron/packaged-layout.test.ts` instead.
-- Releases: bump the root `package.json` version (gradle and `/health` read it from there), tag
-  from the merged main commit, `npm run dist`, attach the installer to the GitHub Release.
+- Releases: bump both `package.json` versions (root + `app/` — CI asserts they stay in lockstep;
+  gradle and `/health` read the root one) and the lockfile version fields, tag from the merged
+  main commit, `npm run dist`, attach the installer + `.blockmap` + `latest.yml` to the GitHub
+  Release.
