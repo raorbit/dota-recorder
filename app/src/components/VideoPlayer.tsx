@@ -16,7 +16,7 @@ import {
 import { bucketLabelOf } from '../store/buckets';
 import { heroDisplayName } from '../data/heroes';
 import { clipLabel } from '../lib/clip-format';
-import { shouldShowVodOverlay } from '../lib/marker-overlay';
+import { markerSeekTarget, shouldShowVodOverlay } from '../lib/marker-overlay';
 import { shouldShowNoVideoPlaceholder, retentionAffectsMatch } from '../lib/video-availability';
 import { useLibraryStore } from '../store/library';
 import { PopupMenu } from './PopupMenu';
@@ -767,12 +767,12 @@ export function VideoPlayer({
                   tabIndex={0}
                   onClick={(e) => {
                     e.stopPropagation(); // don't also trigger scrub-by-click
-                    seekTo(offset);
+                    seekTo(markerSeekTarget(offset));
                   }}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' || e.key === ' ') {
                       e.preventDefault();
-                      seekTo(offset);
+                      seekTo(markerSeekTarget(offset));
                     }
                   }}
                 />

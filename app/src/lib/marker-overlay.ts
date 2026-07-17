@@ -17,3 +17,15 @@
 export function shouldShowVodOverlay(canPosition: boolean, activeClipId: number | null): boolean {
   return canPosition && activeClipId === null;
 }
+
+// Seconds of context to land BEFORE a marker's event on a marker-click seek. Jumping to the
+// exact offset shows only the aftermath (the death is already on the ground); landing a few
+// seconds early lets the play actually unfold. Markers stay positioned at the true offset —
+// only the seek target shifts.
+export const MARKER_LEAD_IN_S = 5;
+
+// Seek target for a marker click: the event offset minus the lead-in, floored at 0 so
+// markers inside the first seconds of the VOD still seek to the start.
+export function markerSeekTarget(videoOffsetS: number): number {
+  return Math.max(0, videoOffsetS - MARKER_LEAD_IN_S);
+}
