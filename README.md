@@ -24,6 +24,25 @@ video comes from stock OBS Game Capture — the same capture hook every Dota str
 already runs. Its VAC/anti-cheat exposure is exactly that of recording with OBS, which is
 to say none in practice.
 
+## Why not just watch the replay?
+
+Dota's built-in replays are what this app replaces for the review loop, and they fall
+short of it in three ways:
+
+- **Replays expire.** Valve keeps them on the servers for only a couple of weeks, then
+  the match is gone. A VOD on your disk stays until you delete it.
+- **Seeking in a replay is slow and glitchy.** Jumping forward or back has to re-simulate
+  the game — it takes long enough to break flow, and it usually lands with bugged
+  effects. Seeking a video with the arrow keys is near instant.
+- **Replays don't know where your deaths are.** There's no "jump to my death" — you
+  scrub the clock hunting for the fight. Here every kill and death is a marker on the
+  timeline, one click away.
+
+Generic capture tools (instant-replay buffers, clip apps) fix the first two but not the
+third: you still get an untagged video. Replays keep their own strengths — free camera,
+every player's perspective — but for *die → wonder what happened → click → watch*,
+a marked-up local VOD wins.
+
 ## How it works
 
 ```
