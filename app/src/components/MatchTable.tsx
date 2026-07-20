@@ -223,7 +223,14 @@ function ClipRow({
       data-selected={selected ? 'true' : 'false'}
       role="button"
       tabIndex={0}
-      onClick={() => onSelect(clip)}
+      onClick={(e) => {
+        onSelect(clip);
+        // Mouse path only — drop focus so a following Space reads as the player's play/pause
+        // hotkey. A focused row owns Space (its onKeyDown re-selects, a no-op for the clip that
+        // just auto-played), which would leave Space dead right after opening a clip from the
+        // Clips bucket. Keyboard selection (Enter/Space via onKeyDown) keeps focus.
+        e.currentTarget.blur();
+      }}
       onContextMenu={(e) => {
         e.preventDefault();
         onOpenMenu(clip, e.clientX, e.clientY);
@@ -425,7 +432,12 @@ function MatchRow({
       data-selected={selected ? 'true' : 'false'}
       role="button"
       tabIndex={0}
-      onClick={(e) => onSelect(match.id, { shift: e.shiftKey, toggle: e.ctrlKey || e.metaKey })}
+      onClick={(e) => {
+        onSelect(match.id, { shift: e.shiftKey, toggle: e.ctrlKey || e.metaKey });
+        // Same as ClipRow: mouse clicks drop focus so Space stays the player's play/pause hotkey
+        // instead of being swallowed by this row's own Space-select. Keyboard use keeps focus.
+        e.currentTarget.blur();
+      }}
       onContextMenu={(e) => {
         e.preventDefault();
         onOpenMenu(match, e.clientX, e.clientY);

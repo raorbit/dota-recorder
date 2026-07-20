@@ -17,6 +17,7 @@ import { bucketLabelOf } from '../store/buckets';
 import { heroDisplayName } from '../data/heroes';
 import { clipLabel } from '../lib/clip-format';
 import { markerSeekTarget, shouldShowVodOverlay } from '../lib/marker-overlay';
+import { SPACE_OWNING_TARGETS, shouldSpaceTogglePlayback } from '../lib/playback-hotkeys';
 import { shouldShowNoVideoPlaceholder, retentionAffectsMatch } from '../lib/video-availability';
 import { useLibraryStore } from '../store/library';
 import { PopupMenu } from './PopupMenu';
@@ -148,6 +149,12 @@ export function VideoPlayer({
   const [creatingClip, setCreatingClip] = useState(false);
   // Which handle is being dragged (pointer-move updates the range until release).
   const dragHandleRef = useRef<'in' | 'out' | null>(null);
+  // Whether playback has started at least once for the CURRENT selection — the Space hotkey's
+  // windowed engagement gate (see shouldSpaceTogglePlayback). Set by the <video>'s play event
+  // (every start path — play button, marker seek, scrub click, clip auto-play — goes through
+  // play()), reset per selection so browsing rows never arms Space; a clip↔VOD src swap within
+  // the same match keeps it armed (the user is clearly watching).
+  const everPlayedRef = useRef(false);
   // Tracks the clipPlayToken we've already auto-played, so auto-play fires once per library clip
   // selection — not again after the user clicks "Full VOD" (token unchanged → no re-snap on the next
   // clips refresh). A fresh selectClip (even of the same clip id) bumps the token and re-arms it.
@@ -189,6 +196,7 @@ export function VideoPlayer({
     setCreatingClip(false);
     setClipMenu(null);
     setClipMenuDeleteArmed(false);
+    everPlayedRef.current = false; // disarm the Space hotkey until playback starts here
 
     if (matchId === null) return;
 
@@ -363,34 +371,60 @@ export function VideoPlayer({
     void v.play?.().catch(() => {});
   }, [activeClipId]);
 
-  // Arrow keys seek ±10s (a familiar video shortcut). A window listener so it works without first
-  // clicking into the player; ignored while typing in a field, with a modifier held, or when no video
-  // is loaded, so it never hijacks text editing, the table's menus, or browser shortcuts.
+  // Playback hotkeys on one window listener, so they work without first clicking into the player:
+  // ←/→ seek ±10s, Space toggles play/pause. Both are ignored while typing in a field, with a
+  // modifier held, when a menu/dialog overlay owns focus, or when no video is loaded, so they
+  // never hijack text editing, the table's menus, or browser shortcuts. Space has extra standdowns
+  // on top (another control owning the press, key auto-repeat, and — windowed — an engagement gate
+  // so a stray press can't surprise-start a merely-selected match); that decision is the pure
+  // shouldSpaceTogglePlayback (lib/playback-hotkeys.ts), which unit-tests the full matrix.
   useEffect(() => {
     const STEP_S = 10;
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+      const isArrow = e.key === 'ArrowLeft' || e.key === 'ArrowRight';
+      if (!isArrow && e.key !== ' ') return;
       if (e.altKey || e.ctrlKey || e.metaKey) return;
       const t = e.target as HTMLElement | null;
-      if (
-        t &&
+      const typingTarget =
+        t !== null &&
         (t.tagName === 'INPUT' ||
           t.tagName === 'TEXTAREA' ||
           t.tagName === 'SELECT' ||
-          t.isContentEditable)
+          t.isContentEditable);
+      // A menu/dialog overlay owning focus (e.g. the table's row-actions PopupMenu, whose roving
+      // focus ignores horizontal arrows) must not scrub or pause the background video.
+      const menuOverlayTarget =
+        t?.closest?.('[role="menu"],[role="menuitem"],[role="dialog"],[role="alertdialog"]') !=
+        null;
+      const v = videoRef.current;
+      const videoLoaded = v !== null && v.currentSrc !== ''; // no video — let the key behave normally
+
+      if (isArrow) {
+        if (typingTarget || menuOverlayTarget || v === null || !videoLoaded) return;
+        e.preventDefault();
+        const d = usableDuration(v);
+        const target = Math.max(0, v.currentTime + (e.key === 'ArrowLeft' ? -STEP_S : STEP_S));
+        v.currentTime = d !== null ? Math.min(target, d) : target;
+        return;
+      }
+
+      if (
+        !shouldSpaceTogglePlayback({
+          shiftKey: e.shiftKey,
+          repeat: e.repeat,
+          defaultPrevented: e.defaultPrevented,
+          typingTarget,
+          interactiveTarget: t?.closest?.(SPACE_OWNING_TARGETS) != null,
+          menuOverlayTarget,
+          videoLoaded,
+          playbackEngaged: everPlayedRef.current,
+          inFullscreen: document.fullscreenElement !== null,
+        })
       ) {
         return;
       }
-      // Stand down while a menu/dialog overlay owns focus (e.g. the table's row-actions PopupMenu,
-      // whose roving focus ignores horizontal arrows) so it can't scrub the background video.
-      if (t?.closest?.('[role="menu"],[role="menuitem"],[role="dialog"],[role="alertdialog"]'))
-        return;
-      const v = videoRef.current;
-      if (!v || !v.currentSrc) return; // no video loaded — let the key behave normally
-      e.preventDefault();
-      const d = usableDuration(v);
-      const target = Math.max(0, v.currentTime + (e.key === 'ArrowLeft' ? -STEP_S : STEP_S));
-      v.currentTime = d !== null ? Math.min(target, d) : target;
+      e.preventDefault(); // Space must not also scroll whatever is behind the player
+      togglePlay();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -474,6 +508,18 @@ export function VideoPlayer({
         e.preventDefault();
         fn();
       }
+    };
+
+  // Mouse clicks on the player's glyph controls act, then drop focus, so a following Space reads
+  // as the global play/pause hotkey rather than re-activating the clicked glyph — critically,
+  // Space right after mouse-fullscreening must pause, not exit fullscreen (the focused ⛶ glyph's
+  // keyActivate would otherwise own the press). Spans only get onClick from the mouse, so keyboard
+  // use (Tab + Enter/Space via keyActivate) keeps focus and is untouched.
+  const clickThenBlur =
+    (fn: () => void) =>
+    (e: React.MouseEvent<HTMLElement>): void => {
+      fn();
+      e.currentTarget.blur();
     };
 
   // Click anywhere on the scrub track to seek by fraction. No-op without a finite
@@ -682,7 +728,10 @@ export function VideoPlayer({
         onTimeUpdate={handleTimeUpdate}
         onLoadedMetadata={handleDurationChange}
         onDurationChange={handleDurationChange}
-        onPlay={() => setPlaying(true)}
+        onPlay={() => {
+          everPlayedRef.current = true; // arm the Space hotkey for this selection
+          setPlaying(true);
+        }}
         onPause={() => setPlaying(false)}
         onVolumeChange={(e) => setMuted(e.currentTarget.muted)}
         playsInline
@@ -768,6 +817,7 @@ export function VideoPlayer({
                   onClick={(e) => {
                     e.stopPropagation(); // don't also trigger scrub-by-click
                     seekTo(markerSeekTarget(offset));
+                    e.currentTarget.blur(); // mouse path only — Space after a marker click = pause
                   }}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' || e.key === ' ') {
@@ -828,7 +878,7 @@ export function VideoPlayer({
             role="button"
             tabIndex={0}
             aria-label={playing ? 'Pause' : 'Play'}
-            onClick={togglePlay}
+            onClick={clickThenBlur(togglePlay)}
             onKeyDown={keyActivate(togglePlay)}
           >
             {playing ? '⏸' : '▶'}
@@ -838,7 +888,7 @@ export function VideoPlayer({
             role="button"
             tabIndex={0}
             aria-label={muted ? 'Unmute' : 'Mute'}
-            onClick={toggleMute}
+            onClick={clickThenBlur(toggleMute)}
             onKeyDown={keyActivate(toggleMute)}
           >
             {muted ? '🔇' : '🔊'}
@@ -865,7 +915,7 @@ export function VideoPlayer({
                     : 'Clip a moment'
               }
               data-disabled={!canClip}
-              onClick={() => canClip && enterClipMode()}
+              onClick={clickThenBlur(() => canClip && enterClipMode())}
               onKeyDown={keyActivate(() => canClip && enterClipMode())}
             >
               ✂
@@ -896,7 +946,7 @@ export function VideoPlayer({
             role="button"
             tabIndex={0}
             aria-label="Fullscreen"
-            onClick={toggleFullscreen}
+            onClick={clickThenBlur(toggleFullscreen)}
             onKeyDown={keyActivate(toggleFullscreen)}
           >
             ⛶
@@ -917,7 +967,7 @@ export function VideoPlayer({
               role="button"
               tabIndex={0}
               title="Back to full recording"
-              onClick={playFullVod}
+              onClick={clickThenBlur(playFullVod)}
               onKeyDown={keyActivate(playFullVod)}
             >
               ← Full VOD
@@ -969,7 +1019,7 @@ export function VideoPlayer({
                   tabIndex={clip.status === 'ready' ? 0 : -1}
                   aria-label={`Play clip ${clipLabel(clip)}`}
                   aria-disabled={clip.status !== 'ready'}
-                  onClick={() => playClip(clip)}
+                  onClick={clickThenBlur(() => playClip(clip))}
                   onKeyDown={keyActivate(() => playClip(clip))}
                 >
                   ▶
@@ -996,7 +1046,7 @@ export function VideoPlayer({
                       : 'Star to keep from auto-delete'
                   }
                   data-on={clip.starred ? 'true' : 'false'}
-                  onClick={() => void onToggleClipStar(clip)}
+                  onClick={clickThenBlur(() => void onToggleClipStar(clip))}
                   onKeyDown={keyActivate(() => void onToggleClipStar(clip))}
                 >
                   {clip.starred ? '★' : '☆'}
