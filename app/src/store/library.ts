@@ -43,6 +43,7 @@ import {
   applyMatchVideosDeleted,
   applyRecordingsDeleted,
   applyClipDeleted,
+  applyClipsDeleted,
   type DeleteSlice,
 } from '../lib/library-delete';
 export type { Bucket } from './buckets';
@@ -115,6 +116,9 @@ export interface LibraryState {
   readonly deleteMatches: (ids: readonly number[]) => Promise<void>;
   // Permanently delete one clip (the Clips bucket's right-click delete).
   readonly deleteClip: (id: number) => Promise<void>;
+  // Bulk-delete several clips at once (the Clips bucket's multi-select), mirroring deleteMatches:
+  // each deletes server-side, then one state update + one counts refresh for all of them.
+  readonly deleteClips: (ids: readonly number[]) => Promise<void>;
   readonly setDiskWarning: (warning: DiskWarning | null) => void;
   readonly setUpdate: (update: UpdateState | null) => void;
   // A `silent` reload (reconnect reconciliation) refreshes in the background without flipping the
@@ -277,6 +281,30 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
       await apiDeleteClip(id);
       invalidatePendingLoad();
       set((s) => applyClipDeleted(s, id));
+      try {
+        set({ counts: await fetchBucketCounts() });
+      } catch {
+        /* leave the stale badge; the next load() reconciles */
+      }
+    },
+
+    // Bulk clip delete (the Clips bucket's multi-select). Mirrors deleteMatches: each delete runs
+    // server-side first — sequentially, bounded by the small selection size — then all removals land
+    // in ONE state update with a single counts refresh. A failed delete is skipped so the rest still
+    // go; the next load() reconciles any straggler.
+    deleteClips: async (ids) => {
+      const removed = new Set<number>();
+      for (const id of ids) {
+        try {
+          await apiDeleteClip(id);
+          removed.add(id);
+        } catch {
+          /* skip this one; the rest still delete and the next load() reconciles */
+        }
+      }
+      if (removed.size === 0) return;
+      invalidatePendingLoad();
+      set((s) => applyClipsDeleted(s, removed));
       try {
         set({ counts: await fetchBucketCounts() });
       } catch {
