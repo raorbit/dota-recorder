@@ -23,7 +23,7 @@ import {
   type SortState,
 } from '../lib/match-columns';
 import { clipLabel } from '../lib/clip-format';
-import { deleteMenuLabel, deleteBlockedLabel } from '../lib/delete-labels';
+import { deleteMenuLabel, deleteBlockedLabel, clipDeleteMenuLabel } from '../lib/delete-labels';
 import './match-table.css';
 
 function matchesResultFilter(match: MatchSummary, filter: ResultFilter): boolean {
@@ -205,7 +205,10 @@ function ClipThumb({ clip }: { readonly clip: Clip }): React.JSX.Element {
 interface ClipRowProps {
   readonly clip: Clip;
   readonly selected: boolean;
-  readonly onSelect: (clip: Clip) => void;
+  readonly onSelect: (
+    clip: Clip,
+    opts?: { readonly shift?: boolean; readonly toggle?: boolean },
+  ) => void;
   readonly onToggleStar: (id: number, starred: boolean) => void;
   readonly onOpenMenu: (clip: Clip, x: number, y: number) => void;
 }
@@ -224,7 +227,7 @@ function ClipRow({
       role="button"
       tabIndex={0}
       onClick={(e) => {
-        onSelect(clip);
+        onSelect(clip, { shift: e.shiftKey, toggle: e.ctrlKey || e.metaKey });
         // Mouse path only — drop focus so a following Space reads as the player's play/pause
         // hotkey. A focused row owns Space (its onKeyDown re-selects, a no-op for the clip that
         // just auto-played), which would leave Space dead right after opening a clip from the
@@ -289,6 +292,14 @@ function ClipTable(): React.JSX.Element {
   const selectClip = useLibraryStore((s) => s.selectClip);
   const toggleClipStar = useLibraryStore((s) => s.toggleClipStar);
   const deleteClip = useLibraryStore((s) => s.deleteClip);
+  const deleteClips = useLibraryStore((s) => s.deleteClips);
+
+  // Multi-selection for bulk row actions, mirroring the match table: shift-click = range from the
+  // anchor, Ctrl/Cmd-click = toggle one. LOCAL to this table (the player only cares about the single
+  // selectedClipId); leaving the Clips bucket unmounts this component, which clears it. A plain click
+  // resets to the clicked row AND opens it in the player; shift/Ctrl build the set without opening.
+  const [selectedIds, setSelectedIds] = useState<ReadonlySet<number>>(() => new Set<number>());
+  const anchorRef = useRef<number | null>(null);
 
   // The row context menu (null = closed) + its two-step delete arm.
   const [rowMenu, setRowMenu] = useState<{ clip: Clip; x: number; y: number } | null>(null);
@@ -296,6 +307,9 @@ function ClipTable(): React.JSX.Element {
 
   const openRowMenu = (clip: Clip, x: number, y: number): void => {
     setMenuDeleteArmed(false);
+    // Same rule as the match table: right-clicking outside the multi-selection collapses it to the
+    // clicked row; right-clicking inside it keeps the set so the menu acts on all of it.
+    setSelectedIds((prev) => (prev.has(clip.id) ? prev : new Set([clip.id])));
     setRowMenu({ clip, x, y });
   };
 
@@ -305,6 +319,49 @@ function ClipTable(): React.JSX.Element {
   };
 
   const visible = useMemo(() => clips.filter((c) => clipMatchesSearch(c, search)), [clips, search]);
+
+  // Row selection, mirroring the match table's onRowSelect: shift = range from the anchor over the
+  // CURRENT visible order; Ctrl/Cmd = toggle one; plain = single-select AND open in the player.
+  const onRowSelect = (clip: Clip, opts?: { shift?: boolean; toggle?: boolean }): void => {
+    if (opts?.shift && anchorRef.current !== null) {
+      const ids = visible.map((c) => c.id);
+      const a = ids.indexOf(anchorRef.current);
+      const b = ids.indexOf(clip.id);
+      if (a === -1 || b === -1) {
+        setSelectedIds(new Set([clip.id]));
+        anchorRef.current = clip.id;
+      } else {
+        const [lo, hi] = a <= b ? [a, b] : [b, a];
+        setSelectedIds(new Set(ids.slice(lo, hi + 1))); // anchor stays so the range keeps its origin
+      }
+      return;
+    }
+    if (opts?.toggle) {
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        if (next.has(clip.id)) next.delete(clip.id);
+        else next.add(clip.id);
+        return next;
+      });
+      anchorRef.current = clip.id;
+      return;
+    }
+    setSelectedIds(new Set([clip.id]));
+    anchorRef.current = clip.id;
+    selectClip(clip);
+  };
+
+  // Highlight rows in the multi-selection; with none active, fall back to the player's single
+  // selectedClipId so the playing clip stays highlighted exactly as before.
+  const isRowSelected = (id: number): boolean =>
+    selectedIds.size > 0 ? selectedIds.has(id) : id === selectedClipId;
+
+  // Reveal is only available inside Electron and only when the clip has a rendered file. The main
+  // process re-verifies the path + existence before revealing (see the shell:revealPath handler).
+  const canReveal = (clip: Clip): boolean =>
+    typeof window.dotarec?.revealPath === 'function' &&
+    clip.videoPath !== null &&
+    clip.videoPath.trim() !== '';
 
   return (
     <div className="mt-root">
@@ -340,63 +397,148 @@ function ClipTable(): React.JSX.Element {
             <ClipRow
               key={c.id}
               clip={c}
-              selected={c.id === selectedClipId}
-              onSelect={selectClip}
+              selected={isRowSelected(c.id)}
+              onSelect={onRowSelect}
               onToggleStar={(id, starred) => void toggleClipStar(id, starred)}
               onOpenMenu={openRowMenu}
             />
           ))}
       </div>
 
-      {rowMenu && (
-        <PopupMenu
-          x={rowMenu.x}
-          y={rowMenu.y}
-          onClose={closeRowMenu}
-          ariaLabel={`Actions for clip ${clipLabel(rowMenu.clip)}`}
-        >
-          <button
-            type="button"
-            className="ctx-item"
-            role="menuitem"
-            onClick={() => {
-              selectClip(rowMenu.clip);
-              closeRowMenu();
-            }}
-          >
-            Open in player
-          </button>
-          <button
-            type="button"
-            className="ctx-item"
-            role="menuitem"
-            onClick={() => {
-              void toggleClipStar(rowMenu.clip.id, !rowMenu.clip.starred);
-              closeRowMenu();
-            }}
-          >
-            {rowMenu.clip.starred ? 'Unstar' : 'Star (keep from auto-delete)'}
-          </button>
-          <div className="ctx-sep" role="separator" />
-          <button
-            type="button"
-            className="ctx-item ctx-item-danger"
-            role="menuitem"
-            onClick={() => {
-              if (menuDeleteArmed) {
-                // deleteClip rethrows on a failed API call; swallow it here (a stale row is
-                // reconciled by the next load) so it can't surface as an unhandled rejection.
-                void deleteClip(rowMenu.clip.id).catch(() => {});
+      {rowMenu &&
+        (() => {
+          // The menu acts on the whole multi-selection when the right-clicked row is part of it;
+          // otherwise just that row (openRowMenu already collapsed the selection to it).
+          const ids =
+            selectedIds.size > 0 && selectedIds.has(rowMenu.clip.id)
+              ? [...selectedIds]
+              : [rowMenu.clip.id];
+          const count = ids.length;
+          const idSet = new Set(ids);
+          const targets = clips.filter((c) => idSet.has(c.id));
+          const revealable = targets.filter((c) => canReveal(c));
+          const deleteLabel = clipDeleteMenuLabel(count);
+          // Mirror the match table's bulk menu: offer Star only when something is unstarred, Unstar
+          // only when something is starred (mixed selections get both).
+          const anyStarred = targets.some((c) => c.starred);
+          const anyUnstarred = targets.some((c) => !c.starred);
+          const bulkStar = (starred: boolean): void => {
+            targets.forEach((c) => void toggleClipStar(c.id, starred));
+            closeRowMenu();
+          };
+          const revealAll = (): void => {
+            // Best-effort: a failed reveal (file vanished between render and click) is a no-op,
+            // never an unhandled rejection.
+            revealable.forEach(
+              (c) => void window.dotarec?.revealPath(c.videoPath as string).catch(() => {}),
+            );
+            closeRowMenu();
+          };
+          const deleteItem = (
+            <button
+              type="button"
+              className="ctx-item ctx-item-danger"
+              role="menuitem"
+              onClick={() => {
+                if (!menuDeleteArmed) {
+                  setMenuDeleteArmed(true);
+                  return;
+                }
+                if (count === 1) {
+                  // deleteClip rethrows on a failed API call; swallow it here (a stale row is
+                  // reconciled by the next load) so it can't surface as an unhandled rejection.
+                  void deleteClip(rowMenu.clip.id).catch(() => {});
+                } else {
+                  // deleteClips skips any failed delete; the next load() reconciles a straggler.
+                  void deleteClips(ids).catch(() => {});
+                  setSelectedIds(new Set<number>());
+                }
                 closeRowMenu();
-              } else {
-                setMenuDeleteArmed(true);
+              }}
+            >
+              {menuDeleteArmed ? deleteLabel.armedLabel : deleteLabel.label}
+            </button>
+          );
+          return (
+            <PopupMenu
+              x={rowMenu.x}
+              y={rowMenu.y}
+              onClose={closeRowMenu}
+              ariaLabel={
+                count > 1
+                  ? `Actions for ${count} clips`
+                  : `Actions for clip ${clipLabel(rowMenu.clip)}`
               }
-            }}
-          >
-            {menuDeleteArmed ? 'Click to confirm delete' : 'Delete clip'}
-          </button>
-        </PopupMenu>
-      )}
+            >
+              {count === 1 ? (
+                <>
+                  <button
+                    type="button"
+                    className="ctx-item"
+                    role="menuitem"
+                    onClick={() => {
+                      selectClip(rowMenu.clip);
+                      closeRowMenu();
+                    }}
+                  >
+                    Open in player
+                  </button>
+                  <button
+                    type="button"
+                    className="ctx-item"
+                    role="menuitem"
+                    onClick={() => {
+                      void toggleClipStar(rowMenu.clip.id, !rowMenu.clip.starred);
+                      closeRowMenu();
+                    }}
+                  >
+                    {rowMenu.clip.starred ? 'Unstar' : 'Star (keep from auto-delete)'}
+                  </button>
+                  {canReveal(rowMenu.clip) && (
+                    <button type="button" className="ctx-item" role="menuitem" onClick={revealAll}>
+                      Reveal in folder
+                    </button>
+                  )}
+                  <div className="ctx-sep" role="separator" />
+                  {deleteItem}
+                </>
+              ) : (
+                <>
+                  <div className="ctx-menu-head" aria-hidden="true">
+                    {count} SELECTED
+                  </div>
+                  {anyUnstarred && (
+                    <button
+                      type="button"
+                      className="ctx-item"
+                      role="menuitem"
+                      onClick={() => bulkStar(true)}
+                    >
+                      Star {count} (keep from auto-delete)
+                    </button>
+                  )}
+                  {anyStarred && (
+                    <button
+                      type="button"
+                      className="ctx-item"
+                      role="menuitem"
+                      onClick={() => bulkStar(false)}
+                    >
+                      Unstar {count}
+                    </button>
+                  )}
+                  {revealable.length > 0 && (
+                    <button type="button" className="ctx-item" role="menuitem" onClick={revealAll}>
+                      Reveal {revealable.length} in folder
+                    </button>
+                  )}
+                  <div className="ctx-sep" role="separator" />
+                  {deleteItem}
+                </>
+              )}
+            </PopupMenu>
+          );
+        })()}
     </div>
   );
 }

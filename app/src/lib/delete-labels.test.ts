@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { deleteMenuLabel, deleteBlockedLabel } from './delete-labels';
+import { deleteMenuLabel, deleteBlockedLabel, clipDeleteMenuLabel } from './delete-labels';
 
 describe('deleteMenuLabel', () => {
   it('a clipless recording gets a plain delete label', () => {
@@ -31,6 +31,22 @@ describe('deleteMenuLabel', () => {
     expect(deleteMenuLabel(2, 5)).toEqual({
       label: 'Delete 2 recordings (keeps 5 clips)',
       armedLabel: 'Click to confirm delete (2)',
+    });
+  });
+});
+
+describe('clipDeleteMenuLabel', () => {
+  it('a single clip gets a plain delete label', () => {
+    expect(clipDeleteMenuLabel(1)).toEqual({
+      label: 'Delete clip',
+      armedLabel: 'Click to confirm delete',
+    });
+  });
+
+  it('a bulk selection carries the count in both labels', () => {
+    expect(clipDeleteMenuLabel(3)).toEqual({
+      label: 'Delete 3 clips',
+      armedLabel: 'Click to confirm delete (3)',
     });
   });
 });

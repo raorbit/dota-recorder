@@ -26,6 +26,17 @@ export function deleteMenuLabel(matchCount: number, clipCount: number): DeleteMe
 }
 
 /**
+ * The delete item for a right-click on `clipCount` selected clips (the Clips bucket). A clip delete
+ * only ever removes clips — no parent-recording caveats — so the label just carries the count.
+ */
+export function clipDeleteMenuLabel(clipCount: number): DeleteMenuLabel {
+  return {
+    label: clipCount === 1 ? 'Delete clip' : `Delete ${clipCount} clips`,
+    armedLabel: clipCount === 1 ? 'Click to confirm delete' : `Click to confirm delete (${clipCount})`,
+  };
+}
+
+/**
  * The label shown INSTEAD of the delete item when every targeted recording is already videoless AND
  * still has clips — a delete would change nothing server-side (the row only remains because its
  * clips need it), so an armed confirm there would be a silent, feedback-free no-op. Point at the
