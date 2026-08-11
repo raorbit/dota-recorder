@@ -1,7 +1,7 @@
 plugins {
     java
-    id("org.springframework.boot") version "3.3.13"
-    id("io.spring.dependency-management") version "1.1.6"
+    id("org.springframework.boot") version "3.5.16"
+    id("io.spring.dependency-management") version "1.1.7"
 }
 
 group = "dev.dotarec"
@@ -65,7 +65,7 @@ dependencies {
 
     // SQLite access via plain JDBC. JOOQ codegen is a documented TODO below
     // and is intentionally NOT wired for the v0.1 foundation.
-    implementation("org.xerial:sqlite-jdbc:3.53.2.0")
+    implementation("org.xerial:sqlite-jdbc:3.53.2.1")
 
     // Connection pool for the SQLite DataSource. The GSI feed drives ~10Hz journal writes during a
     // recording; an unpooled SQLiteDataSource opens/closes a physical file handle (re-running the
