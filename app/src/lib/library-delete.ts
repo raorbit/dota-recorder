@@ -69,10 +69,17 @@ export function applyRecordingsDeleted(s: DeleteSlice, deleted: ReadonlySet<numb
 // Clip delete: drop the clip row; clear a clip auto-play selection that pointed at it (the parent
 // match selection survives — only the clip is gone).
 export function applyClipDeleted(s: DeleteSlice, clipId: number): DeleteSlice {
+  return applyClipsDeleted(s, new Set([clipId]));
+}
+
+// Bulk clip delete (the Clips bucket's multi-select): same rule as the single delete, applied to
+// every id in one state update.
+export function applyClipsDeleted(s: DeleteSlice, deleted: ReadonlySet<number>): DeleteSlice {
   return {
     matches: s.matches,
-    clips: s.clips.filter((c) => c.id !== clipId),
+    clips: s.clips.filter((c) => !deleted.has(c.id)),
     selectedMatchId: s.selectedMatchId,
-    selectedClipId: s.selectedClipId === clipId ? null : s.selectedClipId,
+    selectedClipId:
+      s.selectedClipId !== null && deleted.has(s.selectedClipId) ? null : s.selectedClipId,
   };
 }

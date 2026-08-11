@@ -5,6 +5,7 @@ import {
   applyMatchVideosDeleted,
   applyRecordingsDeleted,
   applyClipDeleted,
+  applyClipsDeleted,
   type DeleteSlice,
 } from './library-delete';
 
@@ -174,5 +175,24 @@ describe('applyClipDeleted', () => {
   it('keeps a selection pointing at another clip', () => {
     const next = applyClipDeleted(slice({ selectedMatchId: 1, selectedClipId: 11 }), 10);
     expect(next.selectedClipId).toBe(11);
+  });
+});
+
+describe('applyClipsDeleted', () => {
+  it('drops every clip in the set, leaving matches alone', () => {
+    const next = applyClipsDeleted(slice(), new Set([10, 12]));
+    expect(next.clips.map((c) => c.id)).toEqual([11]);
+    expect(next.matches).toHaveLength(3);
+  });
+
+  it('clears a clip auto-play selection inside the set, keeping the parent match open', () => {
+    const next = applyClipsDeleted(slice({ selectedMatchId: 1, selectedClipId: 11 }), new Set([10, 11]));
+    expect(next.selectedMatchId).toBe(1);
+    expect(next.selectedClipId).toBeNull();
+  });
+
+  it('keeps a selection pointing at a clip outside the set', () => {
+    const next = applyClipsDeleted(slice({ selectedMatchId: 1, selectedClipId: 12 }), new Set([10, 11]));
+    expect(next.selectedClipId).toBe(12);
   });
 });
