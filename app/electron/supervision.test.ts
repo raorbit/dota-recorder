@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
-import { SupervisionController, type ChildExit, type SupervisionDeps } from './supervision';
+import {
+  OBS_STABLE_MS,
+  SupervisionController,
+  type ChildExit,
+  type SupervisionDeps,
+} from './supervision';
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -306,6 +311,30 @@ describe('SupervisionController — OBS crash & launch', () => {
 
     expect(deps.startObs).toHaveBeenCalledTimes(2);
     expect(deps.log).toHaveBeenCalledWith(expect.stringContaining('exceeded restart attempts'));
+  });
+
+  it('gives the relaunch budget back once OBS has run stably', async () => {
+    // A days-long tray session: the core restarts a wedged OBS (GPU driver update) now and then. Each
+    // relaunch that then runs fine must not count toward the crash-loop budget.
+    let clock = 1_000_000;
+    const deps = makeDeps();
+    const controller = new SupervisionController(deps, 2, () => clock);
+
+    for (let i = 0; i < 4; i++) {
+      controller.handleObsCrash(exit);
+      await flush();
+      clock += OBS_STABLE_MS;
+    }
+    expect(deps.startObs).toHaveBeenCalledTimes(4);
+
+    // A crash loop (dying right after each relaunch) is still capped.
+    controller.handleObsCrash(exit);
+    await flush();
+    controller.handleObsCrash(exit);
+    await flush();
+    controller.handleObsCrash(exit);
+    await flush();
+    expect(deps.startObs).toHaveBeenCalledTimes(6);
   });
 
   it('serializes launches: a second launch while one is in flight is skipped', async () => {
