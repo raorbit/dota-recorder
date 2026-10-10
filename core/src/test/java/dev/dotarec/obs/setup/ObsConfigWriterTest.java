@@ -66,6 +66,33 @@ class ObsConfigWriterTest {
     }
 
     @Test
+    void freshInstall_marksFirstRunDone_soTheAutoConfigWizardNeverOpens(@TempDir Path dir) throws Exception {
+        // Regression: a fresh OBS opened its Auto-Configuration Wizard, which disables outputs while
+        // open; tray-hidden, it silently swallowed every StartRecord of the first live match.
+        AppPaths paths = paths(dir);
+        writer(paths, new SettingsStore(paths), "", "0").configure();
+
+        Path userIni = new ObsLayout(paths.obsDir()).userIni();
+        assertThat(Files.readString(userIni)).isEqualTo("[General]\nFirstRun=true\n");
+    }
+
+    @Test
+    void firstRunDone_mergesIntoOBSsOwnUserIni() {
+        // The shape OBS itself writes: UTF-8 BOM, LF endings, [General] first, no FirstRun yet.
+        String obs = "\uFEFF[General]\nPre19Defaults=false\nConfirmOnExit=true\n\n[BasicWindow]\nPreviewEnabled=true\n";
+        String merged = ObsConfigWriter.withFirstRunDone(obs);
+        assertThat(merged).isEqualTo(
+                "\uFEFF[General]\nFirstRun=true\nPre19Defaults=false\nConfirmOnExit=true\n\n[BasicWindow]\nPreviewEnabled=true\n");
+        // Idempotent, and a false flag is flipped in place.
+        assertThat(ObsConfigWriter.withFirstRunDone(merged)).isEqualTo(merged);
+        assertThat(ObsConfigWriter.withFirstRunDone("[General]\r\nFirstRun=false\r\nX=1\r\n"))
+                .isEqualTo("[General]\r\nFirstRun=true\r\nX=1\r\n");
+        // A FirstRun key in another section is not the frontend's flag.
+        assertThat(ObsConfigWriter.withFirstRunDone("[Other]\nFirstRun=false\n"))
+                .isEqualTo("[General]\nFirstRun=true\n\n[Other]\nFirstRun=false\n");
+    }
+
+    @Test
     void writesSimpleOutputProfileWithProbedEncoder(@TempDir Path dir) throws Exception {
         AppPaths paths = paths(dir);
         SettingsStore settings = new SettingsStore(paths);

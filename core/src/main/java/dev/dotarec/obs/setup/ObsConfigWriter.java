@@ -13,9 +13,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.security.SecureRandom;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -87,6 +89,7 @@ public class ObsConfigWriter {
         ensureSettings();
         firstRunCopy(layout);
         writeWebsocketConfig(layout);
+        markFirstRunDone(layout);
         writeProfile(layout);
         log.info("OBS auto-config ready at {}", layout.root());
     }
@@ -253,6 +256,59 @@ public class ObsConfigWriter {
         }
     }
 
+    /**
+     * Sets {@code [General] FirstRun=true} in OBS's {@code user.ini} so a fresh install never opens the
+     * Auto-Configuration Wizard. OBS disables every output while that wizard is open, and our OBS
+     * lives in the tray, so an unnoticed wizard silently swallowed every StartRecord: OBS accepted the
+     * request, logged nothing, and never emitted OUTPUT_STARTED.
+     *
+     * <p>Merges rather than overwrites: OBS keeps its own frontend state in the same file.
+     */
+    private static void markFirstRunDone(ObsLayout layout) {
+        Path file = layout.userIni();
+        try {
+            String current = Files.exists(file) ? Files.readString(file, StandardCharsets.UTF_8) : "";
+            String updated = withFirstRunDone(current);
+            if (!updated.equals(current)) {
+                writeAtomically(file, updated);
+            }
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to update OBS user config: " + file, e);
+        }
+    }
+
+    /**
+     * Returns {@code ini} with {@code FirstRun=true} in its {@code [General]} section: an existing
+     * {@code FirstRun} line is replaced, otherwise one is added under the header, and a missing
+     * section is prepended. Keeps OBS's UTF-8 byte-order mark and line endings. Package-visible for
+     * tests.
+     */
+    static String withFirstRunDone(String ini) {
+        String bom = ini.startsWith("\uFEFF") ? "\uFEFF" : "";
+        String body = ini.substring(bom.length());
+        String eol = body.contains("\r\n") ? "\r\n" : "\n";
+        List<String> lines = new ArrayList<>(List.of(body.split("\r?\n", -1)));
+        int general = -1;
+        for (int i = 0; i < lines.size(); i++) {
+            if (lines.get(i).trim().equalsIgnoreCase("[General]")) {
+                general = i;
+                break;
+            }
+        }
+        if (general < 0) {
+            String rest = body.isEmpty() ? "" : eol + body;
+            return bom + "[General]" + eol + "FirstRun=true" + eol + rest;
+        }
+        for (int i = general + 1; i < lines.size() && !lines.get(i).trim().startsWith("["); i++) {
+            if (lines.get(i).trim().startsWith("FirstRun=")) {
+                lines.set(i, "FirstRun=true");
+                return bom + String.join(eol, lines);
+            }
+        }
+        lines.add(general + 1, "FirstRun=true");
+        return bom + String.join(eol, lines);
+    }
+
     private void writeProfile(ObsLayout layout) {
         SettingsStore.Settings s = settings.get();
         int[] res = parseResolution(s.resolution);
@@ -333,7 +389,7 @@ public class ObsConfigWriter {
                 Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING);
             }
         } catch (IOException e) {
-            throw new UncheckedIOException("Failed to write OBS profile: " + file, e);
+            throw new UncheckedIOException("Failed to write OBS config: " + file, e);
         }
     }
 
