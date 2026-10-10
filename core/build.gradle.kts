@@ -110,6 +110,12 @@ tasks.named<org.springframework.boot.gradle.tasks.bundling.BootJar>("bootJar") {
 
 tasks.named<Test>("test") {
     useJUnitPlatform()
+    // application.yml logs to %APPDATA%\dota-recorder\log\core.log; without this, every Spring
+    // Boot test appends to the installed app's real log.
+    systemProperty(
+        "logging.file.name",
+        layout.buildDirectory.file("test-logs/core.log").get().asFile.absolutePath,
+    )
 }
 
 // Trimmed JRE image bundled with the installer so users need no Java installed.
