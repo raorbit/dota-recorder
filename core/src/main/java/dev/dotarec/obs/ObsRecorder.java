@@ -57,6 +57,16 @@ public interface ObsRecorder {
     boolean isRecording();
 
     /**
+     * Whether OBS is connected yet refuses to render a frame of its program scene: the signature of
+     * a lost graphics device, after which every recording comes out empty. False whenever that
+     * can't be established (not connected, no scene), so only a positive failure ever triggers a
+     * restart.
+     */
+    default boolean isRenderBroken() {
+        return false;
+    }
+
+    /**
      * Sends StartRecord and BLOCKS until OBS confirms the recording is really rolling (the
      * OUTPUT_STARTED event), returning that confirmed instant as an ISO-8601 string. On return
      * {@link #recordConfirmedAt()} is non-null and fresh for THIS recording, so the caller can anchor

@@ -24,6 +24,9 @@ import org.springframework.stereotype.Component;
  * timestamp (not the raw heartbeat) so malformed/unauthenticated POSTs to the token-exempt /gsi
  * endpoint cannot keep a runaway recording alive past a real GSI silence.
  *
+ * <p>Each tick also drives {@link MatchFsm#superviseRecording()}, which restarts an OBS that has
+ * stopped writing the recording.
+ *
  * <p>Threading: this runs on the Spring scheduler thread while {@link MatchFsm#onFrame} runs on the
  * GSI request thread. Both {@code onFrame} and {@code forceFinalize} are {@code synchronized} on the
  * same {@link MatchFsm} instance and flip RECORDING-&gt;STOPPING before any side effect, so the race
@@ -61,6 +64,8 @@ public class ForceStopWatchdog {
 
     @Scheduled(fixedDelay = 5_000)
     public void tick() {
+        // First, so a recording OBS stopped writing is healed before the silence check looks at it.
+        fsm.superviseRecording();
         if (fsm.getState() != MatchState.RECORDING) {
             return;
         }

@@ -25,6 +25,8 @@ import dev.dotarec.data.TestDb;
 import dev.dotarec.gsi.GsiFrame;
 import dev.dotarec.obs.ObsException;
 import dev.dotarec.obs.ObsRecorder;
+import dev.dotarec.obs.ObsRestarter;
+import dev.dotarec.obs.ObsStartNotConfirmedException;
 import dev.dotarec.obs.ThumbnailCapturer;
 import dev.dotarec.tagger.EventTagger;
 import java.nio.file.Files;
@@ -68,10 +70,15 @@ class MatchFsmTest {
         boolean startThrows;
         /** When true, startRecording() throws a non-ObsException RuntimeException (a raw library fault). */
         boolean startThrowsRuntime;
+        /** When true, OBS refuses to render (a lost graphics device). */
+        boolean renderBroken;
+        /** When true, OBS accepts StartRecord but never confirms it. */
+        boolean startNotConfirmed;
 
         @Override public void connect() { }
         @Override public boolean ensureConnected() { return connected; }
         @Override public boolean isReady() { return connected && ready; }
+        @Override public boolean isRenderBroken() { return connected && renderBroken; }
 
         @Override public String startRecording() {
             if (!connected) {
@@ -83,6 +90,9 @@ class MatchFsmTest {
             }
             if (startThrows) {
                 throw new ObsException("StartRecord rejected by OBS");
+            }
+            if (startNotConfirmed) {
+                throw new ObsStartNotConfirmedException("OBS did not confirm recording started");
             }
             if (startThrowsRuntime) {
                 throw new IllegalStateException("obs-websocket library failure");
@@ -165,7 +175,7 @@ class MatchFsmTest {
         // relative to ANCHOR_NANOS (the wall path is exercised separately via FakeObs.confirmedAt).
         fsm = new MatchFsm(obs, obs, thumbs, new EventTagger(), matches, markers, pauses, journal, events,
                 ds, clipService, settings, new ObjectMapper(),
-                new TimeSource(() -> ANCHOR_NANOS, System::currentTimeMillis));
+                new TimeSource(() -> ANCHOR_NANOS, System::currentTimeMillis), ObsRestarter.NONE);
     }
 
     @Test
@@ -683,7 +693,7 @@ class MatchFsmTest {
                 () -> nanoReads.getAndIncrement() == 0 ? ANCHOR_NANOS : ANCHOR_NANOS + 8_000_000_000L;
         MatchFsm localFsm = new MatchFsm(obs, obs, thumbs, new EventTagger(), matches, markers, pauses,
                 journal, events, ds, clipService, settings, new ObjectMapper(),
-                new TimeSource(steppingNano, System::currentTimeMillis));
+                new TimeSource(steppingNano, System::currentTimeMillis), ObsRestarter.NONE);
 
         localFsm.onFrame(frame().wall(confirmedMs - 20_000L)
                 .mono(ANCHOR_NANOS)
@@ -742,7 +752,7 @@ class MatchFsmTest {
 
         MatchFsm monoFsm = new MatchFsm(obs, obs, thumbs, new EventTagger(), matches, markers, pauses,
                 journal, events, ds, clipService, settings, new ObjectMapper(),
-                new TimeSource(steppingNano, backwardWallClock));
+                new TimeSource(steppingNano, backwardWallClock), ObsRestarter.NONE);
 
         // Start (consumes the anchor nano read).
         monoFsm.onFrame(frame().mono(anchorNanos)
@@ -784,7 +794,7 @@ class MatchFsmTest {
                 () -> nanoReads.getAndIncrement() == 0 ? anchorNanos : finalizeNanos;
         MatchFsm partialFsm = new MatchFsm(obs, obs, thumbs, new EventTagger(), matches, markers, pauses,
                 journal, events, ds, clipService, settings, new ObjectMapper(),
-                new TimeSource(steppingNano, System::currentTimeMillis));
+                new TimeSource(steppingNano, System::currentTimeMillis), ObsRestarter.NONE);
 
         partialFsm.onFrame(frame().mono(anchorNanos)
                 .state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing")
@@ -826,7 +836,8 @@ class MatchFsmTest {
     void thumbnailFailure_doesNotLoseTheRecording() {
         ThumbnailCapturer failing = id -> { throw new ObsException("no scene"); };
         fsm = new MatchFsm(obs, obs, failing, new EventTagger(), matches, markers, pauses, journal, events,
-                ds, clipService, settings, new ObjectMapper(), TimeSource.system());
+                ds, clipService, settings, new ObjectMapper(), TimeSource.system(),
+                ObsRestarter.NONE);
 
         fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
         fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_POST_GAME").noHero().build());
@@ -882,7 +893,8 @@ class MatchFsmTest {
         when(throwing.insert(any(java.sql.Connection.class), any(MatchRepository.NewMatch.class)))
                 .thenThrow(new IllegalStateException("disk full"));
         fsm = new MatchFsm(obs, obs, thumbs, new EventTagger(), throwing, markers, pauses, journal, events,
-                ds, clipService, settings, new ObjectMapper(), TimeSource.system());
+                ds, clipService, settings, new ObjectMapper(), TimeSource.system(),
+                ObsRestarter.NONE);
 
         fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
         assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
@@ -904,7 +916,8 @@ class MatchFsmTest {
         when(throwing.insert(any(java.sql.Connection.class), any(MatchRepository.NewMatch.class)))
                 .thenThrow(new IllegalStateException("disk full"));
         fsm = new MatchFsm(obs, obs, thumbs, new EventTagger(), throwing, markers, pauses, journal, events,
-                ds, clipService, settings, new ObjectMapper(), TimeSource.system());
+                ds, clipService, settings, new ObjectMapper(), TimeSource.system(),
+                ObsRestarter.NONE);
 
         fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
         String sessionId = fsm.currentSession().getSurrogateId();
@@ -1033,7 +1046,7 @@ class MatchFsmTest {
                 };
         MatchFsm labelFsm = new MatchFsm(obs, obs, thumbs, labelTagger, matches, markers, pauses, journal,
                 events, ds, clipService, settings, new ObjectMapper(),
-                new TimeSource(() -> ANCHOR_NANOS, System::currentTimeMillis));
+                new TimeSource(() -> ANCHOR_NANOS, System::currentTimeMillis), ObsRestarter.NONE);
 
         // Start, then a second GAME_IN_PROGRESS tick so the tagger's prev->curr diff runs and journals
         // the marker. No POST_GAME: the session stays unfinished so recovery has a journal to replay.

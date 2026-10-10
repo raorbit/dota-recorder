@@ -11,7 +11,11 @@ import io.obswebsocket.community.client.message.response.inputs.GetInputMuteResp
 import io.obswebsocket.community.client.message.response.record.GetRecordStatusResponse;
 import io.obswebsocket.community.client.message.response.record.StopRecordResponse;
 import io.obswebsocket.community.client.message.response.scenes.GetCurrentProgramSceneResponse;
+import io.obswebsocket.community.client.message.response.sources.SaveSourceScreenshotResponse;
 import io.obswebsocket.community.client.model.Input;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Instant;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -75,6 +79,12 @@ public class ObsController implements ObsRecorder, MatchFsm.RecordStatusProbe {
      * frame) is far better than wedging the FSM — so they use a ~1s budget instead of 5s.
      */
     private static final long READINESS_TIMEOUT_MS = 1_000L;
+
+    /** Render probe ({@link #isRenderBroken()}): a tiny scene screenshot proves OBS can draw. */
+    private static final long RENDER_PROBE_TIMEOUT_MS = 2_000L;
+
+    private static final int RENDER_PROBE_WIDTH = 64;
+    private static final int RENDER_PROBE_HEIGHT = 36;
 
     /** How long to wait for the websocket to become identified/ready after connect(). */
     private static final int CONNECT_TIMEOUT_SECONDS = 3;
@@ -357,6 +367,56 @@ public class ObsController implements ObsRecorder, MatchFsm.RecordStatusProbe {
         return health.isRecording();
     }
 
+    /**
+     * Screenshots the program scene at a thumbnail-free size. A healthy OBS always renders its
+     * scene (black when the game isn't hooked), so a refused screenshot means OBS's renderer is
+     * gone.
+     */
+    @Override
+    public boolean isRenderBroken() {
+        OBSRemoteController c = connectedController();
+        if (c == null) {
+            return false;
+        }
+        Path tmp = null;
+        try {
+            GetCurrentProgramSceneResponse scene =
+                    c.getCurrentProgramScene(RENDER_PROBE_TIMEOUT_MS);
+            if (scene == null
+                    || !scene.isSuccessful()
+                    || scene.getCurrentProgramSceneName() == null
+                    || scene.getCurrentProgramSceneName().isBlank()) {
+                return false;
+            }
+            tmp = Files.createTempFile("dlrec-render-probe-", ".png");
+            SaveSourceScreenshotResponse resp =
+                    c.saveSourceScreenshot(
+                            scene.getCurrentProgramSceneName(),
+                            "png",
+                            tmp.toString(),
+                            RENDER_PROBE_WIDTH,
+                            RENDER_PROBE_HEIGHT,
+                            -1,
+                            RENDER_PROBE_TIMEOUT_MS);
+            boolean rendered = resp != null && resp.isSuccessful() && Files.size(tmp) > 0;
+            if (!rendered) {
+                log.warn("OBS refused to render its scene (graphics device lost?)");
+            }
+            return !rendered;
+        } catch (Exception e) {
+            log.debug("OBS render probe failed: {}", e.toString());
+            return false;
+        } finally {
+            if (tmp != null) {
+                try {
+                    Files.deleteIfExists(tmp);
+                } catch (IOException ignored) {
+                    // Temp file cleanup is best-effort.
+                }
+            }
+        }
+    }
+
     @Override
     public synchronized String startRecording() {
         // Clear the previous recording's confirmed-start anchor BEFORE issuing StartRecord. The FSM
@@ -420,7 +480,7 @@ public class ObsController implements ObsRecorder, MatchFsm.RecordStatusProbe {
                     "OBS accepted StartRecord but did not confirm OUTPUT_STARTED within {}ms; stopping",
                     START_CONFIRM_TIMEOUT_MS);
             stopQuietly();
-            throw new ObsException(
+            throw new ObsStartNotConfirmedException(
                     "OBS did not confirm recording started (OUTPUT_STARTED) within "
                             + START_CONFIRM_TIMEOUT_MS
                             + "ms");
@@ -566,8 +626,11 @@ public class ObsController implements ObsRecorder, MatchFsm.RecordStatusProbe {
                 return null;
             }
             Number duration = status.getOutputDuration();
+            Number bytes = status.getOutputBytes();
             return new MatchFsm.RecordOutputStatus(
-                    status.getOutputActive(), duration == null ? null : duration.longValue());
+                    status.getOutputActive(),
+                    duration == null ? null : duration.longValue(),
+                    bytes == null ? null : bytes.longValue());
         } catch (Exception e) {
             log.debug("OBS record-status probe failed: {}", e.toString());
             return null;

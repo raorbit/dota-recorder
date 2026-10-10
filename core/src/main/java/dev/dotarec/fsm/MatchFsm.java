@@ -20,6 +20,8 @@ import dev.dotarec.fsm.RecordingSession.PauseSpanBuffer;
 import dev.dotarec.gsi.GsiFrame;
 import dev.dotarec.obs.ObsException;
 import dev.dotarec.obs.ObsRecorder;
+import dev.dotarec.obs.ObsRestarter;
+import dev.dotarec.obs.ObsStartNotConfirmedException;
 import dev.dotarec.obs.ThumbnailCapturer;
 import dev.dotarec.tagger.EventTagger;
 import dev.dotarec.tagger.PendingMarker;
@@ -139,6 +141,23 @@ public class MatchFsm {
     /** Latches the once-per-demo-session "not recording" log so the ~10Hz feed can't spam it. */
     private boolean demoSkipLogged;
 
+    /** How old a recording must be before its output is judged (encoder warm-up). */
+    static final long OUTPUT_FIRST_CHECK_MS = 10_000L;
+
+    /** How long OBS's byte count may stand still before the recording is judged stalled. */
+    static final long OUTPUT_STALL_MS = 15_000L;
+
+    /**
+     * How often a start attempt may probe whether OBS can render. Starts are retried on every
+     * frame (~10Hz) while a match waits to record, and a screenshot per frame is pointless.
+     */
+    static final long RENDER_PROBE_INTERVAL_MS = 5_000L;
+
+    private final ObsRestarter obsRestarter;
+
+    private long lastRenderProbeNanos = Long.MIN_VALUE;
+    private boolean lastRenderBroken;
+
     // Single constructor: Spring auto-selects it with no @Autowired needed, and the clocks arrive as one
     // injected TimeSource bean (ClockConfig) instead of per-clock test-seam ctor overloads. Those
     // overloads previously forced an @Autowired on the production ctor whose absence only broke boot
@@ -158,7 +177,9 @@ public class MatchFsm {
             ClipService clipService,
             SettingsStore settings,
             ObjectMapper mapper,
-            TimeSource time) {
+            TimeSource time,
+            ObsRestarter obsRestarter) {
+        this.obsRestarter = obsRestarter;
         this.obs = obs;
         this.statusProbe = statusProbe;
         this.thumbnails = thumbnails;
@@ -241,6 +262,101 @@ public class MatchFsm {
             log.info("Force-finalizing in-flight recording (watchdog)");
             finalizeRecording();
         }
+    }
+
+    /**
+     * Watchdog tick: heals a recording OBS has stopped writing.
+     *
+     * <p>A recording counts as broken when OBS's written-bytes count stands still (zero
+     * {@link #OUTPUT_FIRST_CHECK_MS} in, or flat for {@link #OUTPUT_STALL_MS}) AND OBS refuses to
+     * render its scene: the signature of a lost graphics device. A flat count alone never acts. An
+     * empty recording is discarded and a partial one kept; either way OBS is restarted, and the
+     * next in-match frame starts recording the rest of the match.
+     */
+    public synchronized void superviseRecording() {
+        RecordingSession s = this.session;
+        if (state != MatchState.RECORDING || s == null) {
+            return;
+        }
+        long now = time.nanoTime();
+        long ageMs = (now - s.getRecordConfirmedNanos()) / 1_000_000L;
+        if (ageMs < OUTPUT_FIRST_CHECK_MS) {
+            return;
+        }
+        RecordOutputStatus status = statusProbe.probeRecordStatus();
+        if (status == null || !status.active() || status.outputBytes() == null) {
+            return;
+        }
+        long bytes = status.outputBytes();
+        long stalledMs = s.observeOutputBytes(bytes, now);
+        if ((bytes > 0L && stalledMs < OUTPUT_STALL_MS) || !obs.isRenderBroken()) {
+            return;
+        }
+        if (bytes == 0L) {
+            log.warn("OBS has written nothing {}s into the recording and can't render; discarding"
+                    + " it and restarting OBS", ageMs / 1000);
+            discardRecording();
+        } else {
+            log.warn("OBS stopped writing the recording and can't render; keeping the {} bytes it"
+                    + " recorded and restarting OBS", bytes);
+            finalizeRecording();
+        }
+        obsRestarter.restartObs("it stopped writing the recording");
+    }
+
+    /**
+     * Drops the in-flight recording without a match row: OBS wrote nothing, so there is no video to
+     * keep. The stop is best-effort, so OBS releases the file; then the empty file and the journal
+     * go.
+     */
+    private void discardRecording() {
+        RecordingSession s = this.session;
+        this.state = MatchState.STOPPING;
+        try {
+            String path = null;
+            try {
+                path = obs.stopRecording();
+            } catch (RuntimeException e) {
+                log.warn("StopRecord of the empty recording failed: {}", e.toString());
+            }
+            deleteIfEmpty(path);
+            try {
+                journal.delete(s.getSurrogateId());
+            } catch (RuntimeException e) {
+                log.warn("Could not drop the journal of discarded recording {}: {}",
+                        s.getSurrogateId(), e.toString());
+            }
+        } finally {
+            this.session = null;
+            this.state = MatchState.IDLE;
+        }
+    }
+
+    private static void deleteIfEmpty(String path) {
+        if (path == null || path.isBlank()) {
+            return;
+        }
+        try {
+            Path file = Path.of(path);
+            if (Files.exists(file) && Files.size(file) == 0L) {
+                Files.delete(file);
+            }
+        } catch (Exception e) {
+            log.debug("Could not delete empty recording {}: {}", path, e.toString());
+        }
+    }
+
+    /**
+     * {@link ObsRecorder#isRenderBroken()}, probed at most every {@link #RENDER_PROBE_INTERVAL_MS}
+     * of frame time (the frame's own monotonic stamp, so the start path reads no extra clock).
+     */
+    private boolean renderBroken(long now) {
+        if (lastRenderProbeNanos == Long.MIN_VALUE
+                || now - lastRenderProbeNanos >= RENDER_PROBE_INTERVAL_MS * 1_000_000L) {
+            lastRenderProbeNanos = now;
+            lastRenderBroken = obs.isRenderBroken();
+        }
+        return lastRenderBroken;
     }
 
     /**
@@ -362,6 +478,13 @@ public class MatchFsm {
                             + " staying IDLE, will retry on next frame");
             return;
         }
+        // A lost graphics device leaves OBS "ready" by every check above, yet every frame fails and
+        // StartRecord writes an empty file. Restart OBS instead; the next frames retry the start.
+        if (renderBroken(frame.monotonicNanos())) {
+            log.warn("OBS can't render a frame; restarting it before recording");
+            obsRestarter.restartObs("it can't render a frame");
+            return;
+        }
         if (orphanedStop != null) {
             // A new match is arming: it owns the output path now. obs.startRecording()'s corrective
             // StopRecord (fired while health.recording is still true) supersedes the bounded orphan
@@ -388,6 +511,13 @@ public class MatchFsm {
             // GsiController stamps each frame's monotonicNanos with, so the per-marker delta is
             // immune to an OS/NTP wall-clock step (the wall anchor below is for storage/display only).
             confirmedNanos = time.nanoTime();
+        } catch (ObsStartNotConfirmedException e) {
+            // OBS took the request and did nothing: its outputs are disabled (a dialog left open)
+            // or its renderer is gone. Either way a fresh OBS records.
+            this.state = MatchState.IDLE;
+            log.warn("Recording not confirmed by OBS: {}; restarting OBS", e.getMessage());
+            obsRestarter.restartObs("it accepted StartRecord but never started recording");
+            return;
         } catch (ObsException e) {
             this.state = MatchState.IDLE;
             log.warn("Recording not confirmed by OBS: {}; staying IDLE", e.getMessage());
@@ -970,10 +1100,15 @@ public class MatchFsm {
     }
 
     /**
-     * A live record-output snapshot: whether OBS reports the output active, and its reported
-     * duration in milliseconds ({@code null} when OBS omitted it -- also unattributable).
+     * A live record-output snapshot: whether OBS reports the output active, its reported duration
+     * in milliseconds ({@code null} when OBS omitted it -- also unattributable), and the bytes it
+     * has written so far ({@code null} when omitted).
      */
-    public record RecordOutputStatus(boolean active, Long durationMs) {
+    public record RecordOutputStatus(boolean active, Long durationMs, Long outputBytes) {
+
+        public RecordOutputStatus(boolean active, Long durationMs) {
+            this(active, durationMs, null);
+        }
     }
 
     private void openJournal(RecordingSession s, GsiFrame frame) {
