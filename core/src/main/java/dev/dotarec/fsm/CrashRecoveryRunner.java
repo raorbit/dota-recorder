@@ -157,22 +157,11 @@ public class CrashRecoveryRunner implements ApplicationRunner {
         try (Connection conn = dataSource.getConnection()) {
             conn.setAutoCommit(false);
             try {
-                // A later successful re-record of the same Dota match may already own the (UNIQUE)
-                // dota_match_id. Re-inserting would hit the constraint, roll back, and strand this
-                // journal row to replay on every boot. Treat the match as already recovered and just
-                // drop the stale journal row.
-                if (session.dotaMatchId() != null
-                        && matches.existsByDotaMatchId(conn, session.dotaMatchId())) {
-                    journal.delete(conn, session.sessionId());
-                    conn.commit();
-                    log.warn(
-                            "Recording session {} maps to already-finalized match {}; dropping stale"
-                                + " journal row",
-                            session.sessionId(),
-                            session.dotaMatchId());
-                    return;
-                }
-
+                // Recovered as its own linked row even when the Dota match already has one (another
+                // part of a split match, recorded after this one stranded): dota_match_id is not
+                // UNIQUE since V7. A stranded journal is never a duplicate of a finalized recording,
+                // because MatchFsm.persistFinalized deletes the journal in the same transaction as
+                // its insert -- so this always recovers footage no other row holds.
                 long matchId =
                         matches.insert(
                                 conn,

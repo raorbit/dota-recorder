@@ -256,8 +256,9 @@ class MatchFsmHealingTest {
 
         List<MatchSummary> rows = matches.findAll();
         assertThat(rows).hasSize(2);
-        assertThat(rows).filteredOn(r -> r.dotaMatchId() != null)
-                .as("the first part keeps the match link").hasSize(1);
+        assertThat(rows).extracting(MatchSummary::dotaMatchId)
+                .as("both parts keep the match link, so both are enriched")
+                .containsOnly(MATCH);
     }
 
     @Test
@@ -278,7 +279,8 @@ class MatchFsmHealingTest {
         assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
         advanceSeconds(600);
         fsm.onFrame(frame().state(POST_GAME).matchId(MATCH).mono(nanos.get()).build());
-        assertThat(matches.findAll()).hasSize(2);
+        assertThat(matches.findAll()).hasSize(2)
+                .extracting(MatchSummary::dotaMatchId).containsOnly(MATCH);
     }
 
     @Test

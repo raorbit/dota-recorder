@@ -769,18 +769,11 @@ public class MatchFsm {
         try (Connection conn = dataSource.getConnection()) {
             conn.setAutoCommit(false);
             try {
+                // Every recording keeps its Dota match id, even when the match already has a row: a
+                // match split by an OBS heal, an abandon+rejoin, or a manual/watchdog stop of a
+                // re-entered match yields one row per part, each linked and enriched on its own
+                // (dota_match_id is not UNIQUE since V7).
                 Long dotaMatchId = s.getMatchId() != 0L ? s.getMatchId() : null;
-                // dota_match_id is UNIQUE. If this match id was already persisted -- a re-record after
-                // a mid-match roll, an abandon+rejoin, or a manual/watchdog stop of a re-entered match
-                // -- inserting it again throws SQLITE_CONSTRAINT_UNIQUE and rolls back the WHOLE
-                // finalize, so the row + buffered markers are lost and the .mp4 is orphaned with no
-                // library entry. Preserve the recording instead by saving it WITHOUT the match-id link
-                // (a standalone, un-enrichable row under Unsorted): a duplicate entry beats silent loss.
-                if (dotaMatchId != null && matches.existsByDotaMatchId(conn, dotaMatchId)) {
-                    log.warn("Match {} already recorded; saving this recording without the "
-                            + "dota_match_id link to avoid losing it", dotaMatchId);
-                    dotaMatchId = null;
-                }
                 NewMatch row =
                         newMatchRow(s, dotaMatchId, videoPath, thumbPath, fileSizeBytes, durationS, now);
                 long matchRowId = matches.insert(conn, row);

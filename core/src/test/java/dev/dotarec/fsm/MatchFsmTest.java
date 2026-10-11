@@ -589,11 +589,10 @@ class MatchFsmTest {
     }
 
     @Test
-    void postGame_whenDotaMatchIdAlreadyRecorded_savesWithoutTheLink_notLosingTheRecording() {
-        // A row for this Dota match id already exists (it was recorded once, then re-recorded after a
-        // mid-match roll / abandon+rejoin). dota_match_id is UNIQUE, so a naive insert throws and rolls
-        // back the WHOLE finalize -- losing this recording's row + markers and orphaning its .mp4. The
-        // finalize must instead persist the recording WITHOUT the colliding match-id link.
+    void postGame_whenDotaMatchIdAlreadyRecorded_keepsTheLinkOnBothRecordings() {
+        // A row for this Dota match id already exists (the match was split: an OBS heal, a mid-match
+        // roll, an abandon+rejoin). Every part keeps its link to the Dota match so each one is
+        // enriched -- dota_match_id is not UNIQUE since V7, so the second insert just succeeds.
         long existingId = matches.insert(new MatchRepository.NewMatch(
                 8873844218L,             // dotaMatchId
                 "match",                 // recordKind
@@ -625,8 +624,10 @@ class MatchFsmTest {
         assertThat(rows).hasSize(2);
         MatchSummary fresh =
                 rows.stream().filter(r -> r.id() != existingId).findFirst().orElseThrow();
-        assertThat(fresh.dotaMatchId())
-                .as("re-record saved without the colliding match-id link").isNull();
+        assertThat(rows).extracting(MatchSummary::dotaMatchId)
+                .as("both recordings stay linked to the Dota match")
+                .containsExactly(8873844218L, 8873844218L);
+        assertThat(fresh.enrichmentState()).as("queued for enrichment like any part").isEqualTo("pending");
         assertThat(fresh.videoPath()).isEqualTo("C:\\videos\\match.mkv");
         assertThat(fresh.hero()).isEqualTo("npc_dota_hero_spectre");
         verify(events).publish(eq("match.recorded"), any());
