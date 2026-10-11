@@ -2,6 +2,7 @@ package dev.dotarec.bridge;
 
 import com.google.gson.JsonObject;
 import dev.dotarec.obs.ObsController;
+import dev.dotarec.obs.ObsDemand;
 import dev.dotarec.obs.ObsSceneConfigurer;
 import io.obswebsocket.community.client.OBSRemoteController;
 import io.obswebsocket.community.client.message.response.inputs.CreateInputResponse;
@@ -29,6 +30,9 @@ import org.springframework.web.server.ResponseStatusException;
  * property, then removes it in a {@code finally}. When OBS is not connected or enumeration fails it
  * degrades to an empty list with HTTP 200 (never 500), so the settings UI stays usable while OBS is
  * down. {@link BridgeAuthFilter} already covers this path; no filter change.
+ *
+ * <p>OBS runs on demand, so each request also asks for it ({@link ObsDemand#touch()}); the settings UI
+ * re-primes its pickers once OBS connects.
  */
 @RestController
 public class AudioController {
@@ -48,9 +52,11 @@ public class AudioController {
     private static final long REQUEST_TIMEOUT_MS = 5_000L;
 
     private final ObsController obsController;
+    private final ObsDemand obsDemand;
 
-    public AudioController(ObsController obsController) {
+    public AudioController(ObsController obsController, ObsDemand obsDemand) {
         this.obsController = obsController;
+        this.obsDemand = obsDemand;
     }
 
     @GetMapping("/audio/inputs")
@@ -62,6 +68,7 @@ public class AudioController {
                     HttpStatus.BAD_REQUEST,
                     "kind must be one of application|output|input, got: " + kind);
         }
+        obsDemand.touch();
         // OBS down / unreachable: degrade gracefully so the picker just shows no options.
         if (!obsController.ensureConnected()) {
             return List.of();

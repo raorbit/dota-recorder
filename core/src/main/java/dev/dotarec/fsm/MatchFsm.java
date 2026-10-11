@@ -134,9 +134,10 @@ public class MatchFsm {
      * failure while OBS still reports the output active, cleared when the output is stopped / goes
      * inactive / can no longer be attributed to us, or when a new match arms. Guarded by the FSM
      * monitor like {@link #session}. In-memory only: an app quit loses it, and the next boot's orphan
-     * scan adopts the file instead.
+     * scan adopts the file instead. Volatile only so {@link #hasPendingOrphanedStop()} can read it
+     * without the monitor; every write still happens under it.
      */
-    private OrphanedStop orphanedStop;
+    private volatile OrphanedStop orphanedStop;
 
     /** Latches the once-per-demo-session "not recording" log so the ~10Hz feed can't spam it. */
     private boolean demoSkipLogged;
@@ -199,6 +200,14 @@ public class MatchFsm {
 
     public MatchState getState() {
         return state;
+    }
+
+    /**
+     * Whether a stop-failed output is still being retried, so OBS must stay up for it. Lock-free, for
+     * the OBS demand check that a status poll runs.
+     */
+    public boolean hasPendingOrphanedStop() {
+        return orphanedStop != null;
     }
 
     /**

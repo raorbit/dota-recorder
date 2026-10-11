@@ -25,10 +25,16 @@ public record StatusSnapshot(GsiStatus gsi, ObsStatus obs, FsmStatus fsm) {
      * OBS connection / scene / recording flags. {@code captureBlack} is true when the current or
      * most recent recording sampled black (near-zero luminance) — a black-screen recording that
      * {@code recording} alone can't reveal; the UI warns on it. Persists past the recording's end
-     * until the next recording arms.
+     * until the next recording arms. {@code wanted} says whether OBS should be running now (see
+     * {@code ObsDemand}): Electron starts and stops OBS on it, and a disconnected OBS that isn't
+     * wanted is on standby, not an error.
      */
     public record ObsStatus(
-            boolean connected, boolean sceneActive, boolean recording, boolean captureBlack) {}
+            boolean connected,
+            boolean sceneActive,
+            boolean recording,
+            boolean captureBlack,
+            boolean wanted) {}
 
     /** FSM state name and the active match id (null when no match is in flight). */
     public record FsmStatus(String state, Long activeMatchId) {}

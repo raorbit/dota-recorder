@@ -13,12 +13,17 @@ import org.junit.jupiter.api.Test;
 
 class ObsConnectionSchedulerTest {
 
+    private final ObsController obs = mock(ObsController.class);
+    private final ObsHealth health = new ObsHealth();
+    private final ObsDemand demand = mock(ObsDemand.class);
+    private final EventPublisher publisher = mock(EventPublisher.class);
+    private final ObsConnectionScheduler scheduler =
+            new ObsConnectionScheduler(obs, health, demand, publisher);
+
     @Test
     void configuresSceneOnConnectEdgeNotEveryTick() throws Exception {
-        ObsController obs = mock(ObsController.class);
-        OBSRemoteController ctrl = mock(OBSRemoteController.class);
-        when(obs.controller()).thenReturn(ctrl);
-        ObsConnectionScheduler scheduler = new ObsConnectionScheduler(obs, mock(EventPublisher.class));
+        when(demand.isWanted()).thenReturn(true);
+        when(obs.controller()).thenReturn(mock(OBSRemoteController.class));
 
         // Not connected yet: no scene setup.
         when(obs.ensureConnected()).thenReturn(false);
@@ -44,17 +49,37 @@ class ObsConnectionSchedulerTest {
 
     @Test
     void retriesSceneSetupAfterAFailure() throws Exception {
-        ObsController obs = mock(ObsController.class);
-        OBSRemoteController ctrl = mock(OBSRemoteController.class);
-        when(obs.controller()).thenReturn(ctrl);
+        when(demand.isWanted()).thenReturn(true);
+        when(obs.controller()).thenReturn(mock(OBSRemoteController.class));
         when(obs.ensureConnected()).thenReturn(true);
         // First attempt throws; the second must retry (the edge flag was reset on failure).
         doThrow(new ObsException("boom")).doNothing().when(obs).configureScene();
 
-        ObsConnectionScheduler scheduler = new ObsConnectionScheduler(obs, mock(EventPublisher.class));
         scheduler.tryConnectAndConfigure(); // throws internally, caught, edge reset
         scheduler.tryConnectAndConfigure(); // retries and succeeds
 
         verify(obs, times(2)).configureScene();
+    }
+
+    @Test
+    void doesNotTryToConnectToAnOnDemandObsThatIsNotWanted() {
+        when(demand.isWanted()).thenReturn(false);
+
+        scheduler.tryConnectAndConfigure();
+
+        verify(obs, never()).ensureConnected();
+        verify(publisher).publishStatus(); // the status heartbeat still goes out
+    }
+
+    @Test
+    void keepsAConnectedObsConnectedWhileItIsNoLongerWanted() {
+        // Electron stops an unwanted OBS after a grace period; until then the link stays healthy.
+        when(demand.isWanted()).thenReturn(false);
+        health.setConnected(true);
+        when(obs.ensureConnected()).thenReturn(true);
+
+        scheduler.tryConnectAndConfigure();
+
+        verify(obs).ensureConnected();
     }
 }

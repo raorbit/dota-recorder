@@ -2,6 +2,7 @@ package dev.dotarec.bridge;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 import dev.dotarec.obs.ObsController;
+import dev.dotarec.obs.ObsDemand;
 import dev.dotarec.obs.ObsSceneConfigurer;
 import io.obswebsocket.community.client.OBSRemoteController;
 import io.obswebsocket.community.client.message.response.sources.GetSourceScreenshotResponse;
@@ -25,6 +26,9 @@ import org.springframework.web.bind.annotation.RestController;
  * Dota isn't live is still a valid (non-null) data URI and is rendered as-is — null means a
  * connection/request failure, not an idle scene. {@link BridgeAuthFilter} already covers this path;
  * no filter change.
+ *
+ * <p>Each request keeps OBS wanted ({@link ObsDemand#touch()}), so opening the preview starts an
+ * on-demand OBS and polling it keeps OBS up; until OBS connects the frame is null.
  */
 @RestController
 public class PreviewController {
@@ -42,13 +46,16 @@ public class PreviewController {
     private static final long REQUEST_TIMEOUT_MS = 5_000L;
 
     private final ObsController obsController;
+    private final ObsDemand obsDemand;
 
-    public PreviewController(ObsController obsController) {
+    public PreviewController(ObsController obsController, ObsDemand obsDemand) {
         this.obsController = obsController;
+        this.obsDemand = obsDemand;
     }
 
     @GetMapping("/obs/preview")
     public ScenePreview preview() {
+        obsDemand.touch();
         // OBS down / unreachable: degrade to a null frame so the UI shows its placeholder.
         if (!obsController.ensureConnected()) {
             return new ScenePreview(null);
