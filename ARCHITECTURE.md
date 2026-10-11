@@ -45,9 +45,30 @@ The same defense-in-depth shape recurs at finalize time: `ForceStopWatchdog` for
 recording after 30s of GSI silence (a demo or abandon never sends `POST_GAME`), keyed to the last
 *authenticated* frame so spoofed posts can't keep a runaway recording alive.
 
+## On-demand OBS
+
+OBS runs only while something needs it, not for the app's whole lifetime. Even idle, OBS renders
+its scene every frame and keeps its audio captures open on the output device; two always-on
+recorders (this one and deadlock-recorder) were enough to make browser video stutter.
+
+- **When it runs.** The core's `ObsDemand` reports `obs.wanted` on `GET /status`: true while
+  `dota2.exe` is running or sent a GSI frame in the last 30s, while a match arms or records, while
+  OBS still has an active output, and for 30s after each settings-preview or audio-picker request.
+  Electron (`obs-demand.ts`) polls it every 3s, launches OBS when it is wanted, and stops it once it
+  has been unwanted for 90s. A busy recorder is never stopped, and an unreachable core leaves OBS as
+  it is. Dota's own startup and hero pick leave plenty of time for the cold start.
+- **Audio only while recording.** The `dotarec:` audio captures are added to OBS when a match arms
+  (`ObsRecorder.attachAudio`, before the readiness gate that checks for them) and removed 30s after
+  the last start attempt once nothing records (`MatchFsm.releaseIdleAudio`, every watchdog tick).
+  Removing, not muting, is what releases the device. Desktop audio also runs with
+  `use_device_timing` off, which kept it drifting into OBS's "audio is lagging" restarts.
+
+A deliberate stop is not a crash, so it never spends the relaunch budget. When a need ends, the
+next one starts with a fresh budget.
+
 ## Self-healing OBS
 
-The managed OBS runs for days in the tray, and some failures leave it alive but useless. A GPU
+The managed OBS can run for hours alongside Dota, and some failures leave it alive but useless. A GPU
 driver update (or reset) while it runs takes away its graphics device; OBS never recovers, yet
 StartRecord still succeeds and writes an empty file. Its first-run wizard, left open, disables
 every output the same way. Neither shows up as a crash, so the reaping layers above never fire.
