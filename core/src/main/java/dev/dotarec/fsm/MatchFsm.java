@@ -272,6 +272,14 @@ public class MatchFsm {
      * render its scene: the signature of a lost graphics device. A flat count alone never acts. An
      * empty recording is discarded and a partial one kept; either way OBS is restarted, and the
      * next in-match frame starts recording the rest of the match.
+     *
+     * <p>A record output OBS ended on its own counts as broken too, under the same two-signal rule:
+     * with a hardware encoder (NVENC/AMF, the default) a mid-match GPU reset makes OBS stop the
+     * output with an encode error rather than leave it flat. Without this the FSM would sit in
+     * RECORDING against a dead output for the rest of the match, never restarting OBS. An output
+     * that stopped while OBS still renders (the user stopped it in the OBS window, the disk filled)
+     * is left for POST_GAME as before: a restart can't fix those, and re-arming against them would
+     * only loop junk rows.
      */
     public synchronized void superviseRecording() {
         RecordingSession s = this.session;
@@ -284,7 +292,22 @@ public class MatchFsm {
             return;
         }
         RecordOutputStatus status = statusProbe.probeRecordStatus();
-        if (status == null || !status.active() || status.outputBytes() == null) {
+        if (status == null) {
+            return;
+        }
+        if (!status.active()) {
+            if (!obs.isRenderBroken()) {
+                return;
+            }
+            // Keep what OBS wrote before it gave up: finalize's StopRecord fails against the
+            // already-stopped output and falls back to the path OBS reported when it stopped.
+            log.warn("OBS stopped the recording on its own and can't render; keeping what it"
+                    + " recorded and restarting OBS");
+            finalizeRecording();
+            obsRestarter.restartObs("it stopped the recording on its own");
+            return;
+        }
+        if (status.outputBytes() == null) {
             return;
         }
         long bytes = status.outputBytes();
@@ -307,7 +330,8 @@ public class MatchFsm {
     /**
      * Drops the in-flight recording without a match row: OBS wrote nothing, so there is no video to
      * keep. The stop is best-effort, so OBS releases the file; then the empty file and the journal
-     * go.
+     * go. A failed stop (OBS ended the output itself in the meantime) falls back to the path OBS
+     * reported when it stopped; either way only an exactly empty file is ever deleted.
      */
     private void discardRecording() {
         RecordingSession s = this.session;
@@ -317,7 +341,9 @@ public class MatchFsm {
             try {
                 path = obs.stopRecording();
             } catch (RuntimeException e) {
-                log.warn("StopRecord of the empty recording failed: {}", e.toString());
+                path = obs.lastStoppedOutputPath();
+                log.warn("StopRecord of the empty recording failed: {}; cleaning up {}",
+                        e.toString(), path);
             }
             deleteIfEmpty(path);
             try {
@@ -863,8 +889,19 @@ public class MatchFsm {
         }
 
         if (!obs.isRecording()) {
-            log.warn("OBS no longer reports recording after failed StopRecord; persisting without video path");
-            return null;
+            // OBS ended the output before our stop reached it (an encode error after a GPU reset,
+            // or the user stopping it in the OBS window). The file it closed is still this
+            // recording's, so attach the path it reported on stopping rather than detach the
+            // video from its markers.
+            String stoppedPath = obs.lastStoppedOutputPath();
+            if (stoppedPath == null || stoppedPath.isBlank()) {
+                log.warn("OBS no longer reports recording after failed StopRecord and reported no"
+                        + " output path; persisting without video path");
+                return null;
+            }
+            log.warn("OBS no longer reports recording after failed StopRecord; keeping the file it"
+                    + " stopped on its own: {}", stoppedPath);
+            return stoppedPath;
         }
 
         try {

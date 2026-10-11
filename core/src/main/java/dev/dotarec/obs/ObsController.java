@@ -539,6 +539,11 @@ public class ObsController implements ObsRecorder, MatchFsm.RecordStatusProbe {
     }
 
     @Override
+    public String lastStoppedOutputPath() {
+        return events.lastStoppedOutputPath();
+    }
+
+    @Override
     public Instant recordConfirmedAt() {
         return events.recordConfirmedAt();
     }

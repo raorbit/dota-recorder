@@ -21,6 +21,7 @@ import dev.dotarec.fsm.MatchFsmTest.FakeThumbs;
 import dev.dotarec.gsi.GsiFrame;
 import dev.dotarec.obs.ObsRestarter;
 import dev.dotarec.tagger.EventTagger;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -57,9 +58,11 @@ class MatchFsmHealingTest {
     private RecordingSessionRepository journal;
     private final AtomicLong nanos = new AtomicLong(5_000_000_000_000L);
     private MatchFsm fsm;
+    private Path dir;
 
     @BeforeEach
     void setUp(@TempDir Path dir) throws Exception {
+        this.dir = dir;
         var ds = TestDb.migrated(dir);
         matches = new MatchRepository(ds);
         journal = new RecordingSessionRepository(ds);
@@ -81,6 +84,18 @@ class MatchFsmHealingTest {
 
     private void advanceSeconds(long s) {
         nanos.addAndGet(s * 1_000_000_000L);
+    }
+
+    /**
+     * OBS ends the record output itself (an encode error after a GPU reset, or the user stopping
+     * it): it reports the output inactive, remembers the file it closed, and rejects a StopRecord
+     * for an output that is no longer running.
+     */
+    private void obsStoppedTheOutput(String path) {
+        obs.recording = false;
+        obs.lastStoppedPath = path;
+        obs.recordStatus = new MatchFsm.RecordOutputStatus(false, null, null);
+        obs.stopFailuresRemaining = 1;
     }
 
     /** OBS comes back healthy after its restart. */
@@ -186,6 +201,75 @@ class MatchFsmHealingTest {
         assertThat(rows).hasSize(2);
         assertThat(rows).filteredOn(r -> r.dotaMatchId() != null)
                 .as("the first part keeps the match link").hasSize(1);
+    }
+
+    @Test
+    void outputObsStoppedOnItsOwn_withABrokenRenderer_keepsTheFile_andRecordsTheRest() {
+        fsm.onFrame(playing());
+        advanceSeconds(300);
+        obsStoppedTheOutput("C:\\videos\\part-1.mkv");
+        obs.renderBroken = true;
+        fsm.superviseRecording();
+
+        assertThat(fsm.getState()).isEqualTo(MatchState.IDLE);
+        assertThat(restarter.reasons).hasSize(1);
+        assertThat(matches.findAll()).as("the part OBS recorded stays attached").singleElement()
+                .satisfies(r -> assertThat(r.videoPath()).isEqualTo("C:\\videos\\part-1.mkv"));
+
+        obsRestarted();
+        fsm.onFrame(playing());
+        assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
+        advanceSeconds(600);
+        fsm.onFrame(frame().state(POST_GAME).matchId(MATCH).mono(nanos.get()).build());
+        assertThat(matches.findAll()).hasSize(2);
+    }
+
+    @Test
+    void outputStoppedWhileObsStillRenders_isLeftForPostGame() {
+        // The user stopped it in the OBS window, or the disk filled: a restart can't fix either,
+        // and re-arming against them would only loop junk rows.
+        fsm.onFrame(playing());
+        advanceSeconds(300);
+        obsStoppedTheOutput("C:\\videos\\stopped-by-user.mkv");
+        fsm.superviseRecording();
+
+        assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
+        assertThat(restarter.reasons).isEmpty();
+
+        fsm.onFrame(frame().state(POST_GAME).matchId(MATCH).mono(nanos.get()).build());
+        assertThat(matches.findAll()).singleElement()
+                .satisfies(r -> assertThat(r.videoPath()).isEqualTo("C:\\videos\\stopped-by-user.mkv"));
+    }
+
+    @Test
+    void emptyRecording_thatObsStoppedFirst_isStillCleanedUp() throws Exception {
+        Path empty = Files.createFile(dir.resolve("empty.mkv"));
+        fsm.onFrame(playing());
+        advanceSeconds(12);
+        obs.recordStatus = new MatchFsm.RecordOutputStatus(true, 12_000L, 0L);
+        obs.renderBroken = true;
+        // OBS ends the output between the status probe and the discard's StopRecord.
+        obs.stopFailuresRemaining = 1;
+        obs.lastStoppedPath = empty.toString();
+        fsm.superviseRecording();
+
+        assertThat(fsm.getState()).isEqualTo(MatchState.IDLE);
+        assertThat(matches.findAll()).isEmpty();
+        assertThat(empty).doesNotExist();
+    }
+
+    @Test
+    void discard_neverDeletesAFileWithBytesInIt() throws Exception {
+        Path written = Files.writeString(dir.resolve("written.mkv"), "frames");
+        fsm.onFrame(playing());
+        advanceSeconds(12);
+        obs.recordStatus = new MatchFsm.RecordOutputStatus(true, 12_000L, 0L);
+        obs.renderBroken = true;
+        obs.stopFailuresRemaining = 1;
+        obs.lastStoppedPath = written.toString();
+        fsm.superviseRecording();
+
+        assertThat(written).exists().hasContent("frames");
     }
 
     @Test

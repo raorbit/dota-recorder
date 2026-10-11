@@ -88,6 +88,16 @@ public interface ObsRecorder {
     String stopRecording();
 
     /**
+     * The file path of the current recording's output if OBS has already stopped it on its own, or
+     * {@code null}. Only a STOPPED seen since this recording's OUTPUT_STARTED counts, so a path here
+     * never belongs to an earlier recording. Lets a finalize whose StopRecord fails (OBS ended the
+     * output first, e.g. on an encode error after a GPU reset) still attach the file OBS closed.
+     */
+    default String lastStoppedOutputPath() {
+        return null;
+    }
+
+    /**
      * The wall-clock instant OBS confirmed OUTPUT_STARTED for the current/most-recent recording, or
      * {@code null} if recording has never been confirmed. This is the anchor every
      * {@code markers.video_offset_s} is computed against.

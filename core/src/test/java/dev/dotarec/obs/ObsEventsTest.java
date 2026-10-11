@@ -62,6 +62,23 @@ class ObsEventsTest {
     }
 
     @Test
+    void started_dropsTheStoppedPathOfTheRecordingBeforeIt() {
+        // ObsController.startRecording resets BEFORE its corrective StopRecord of the previous
+        // recording, so that stop's STOPPED lands after the reset. OBS stops the old output before
+        // it starts the new one, and the new STARTED must disown the old file's path.
+        events.onRecordStateChanged(ObsEvents.OUTPUT_STARTED, null);
+        events.reset();
+        events.onRecordStateChanged(ObsEvents.OUTPUT_STOPPED, "C:\\videos\\previous.mkv");
+        events.onRecordStateChanged(ObsEvents.OUTPUT_STARTED, null);
+
+        assertThat(events.lastStoppedOutputPath()).isNull();
+
+        // A STOPPED after this recording's STARTED is this recording's own file.
+        events.onRecordStateChanged(ObsEvents.OUTPUT_STOPPED, "C:\\videos\\current.mkv");
+        assertThat(events.lastStoppedOutputPath()).isEqualTo("C:\\videos\\current.mkv");
+    }
+
+    @Test
     void started_armsTheBlackFrameCheck() {
         // Every confirmed start schedules the black-capture check, so a black recording can't stay silent.
         events.onRecordStateChanged(ObsEvents.OUTPUT_STARTED, null);

@@ -74,6 +74,9 @@ class MatchFsmTest {
         boolean renderBroken;
         /** When true, OBS accepts StartRecord but never confirms it. */
         boolean startNotConfirmed;
+        /** The path OBS reported when it stopped the output on its own; cleared on a new start,
+         *  as ObsEvents clears it on OUTPUT_STARTED. */
+        String lastStoppedPath;
 
         @Override public void connect() { }
         @Override public boolean ensureConnected() { return connected; }
@@ -99,6 +102,7 @@ class MatchFsmTest {
             }
             confirmedAt = nextConfirmedAt != null ? nextConfirmedAt : Instant.now();
             recording = true;
+            lastStoppedPath = null;
             return confirmedAt.toString();
         }
 
@@ -121,6 +125,8 @@ class MatchFsmTest {
         }
 
         @Override public boolean isRecording() { return recording; }
+
+        @Override public String lastStoppedOutputPath() { return lastStoppedPath; }
 
         @Override public Instant recordConfirmedAt() { return confirmedAt; }
 
@@ -978,6 +984,26 @@ class MatchFsmTest {
         List<MatchSummary> rows = matches.findAll();
         assertThat(rows).hasSize(1);
         assertThat(rows.get(0).videoPath()).isNull();
+    }
+
+    @Test
+    void stopRecordFailure_afterObsStoppedTheOutputItself_keepsTheFileItReported() {
+        // OBS ended the output before POST_GAME (an encode error after a GPU reset, or the user
+        // stopping it in the OBS window): StopRecord fails against the stopped output, but the file
+        // OBS closed is still this recording's, so it stays attached instead of video_path NULL.
+        obs.stopFailuresRemaining = 1;
+
+        fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
+        obs.recording = false;
+        obs.lastStoppedPath = "C:\\videos\\stopped-by-obs.mkv";
+        fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_POST_GAME").noHero().build());
+
+        assertThat(fsm.getState()).isEqualTo(MatchState.IDLE);
+        assertThat(obs.stopCalls).as("no retry against an output OBS already stopped").isEqualTo(1);
+        List<MatchSummary> rows = matches.findAll();
+        assertThat(rows).hasSize(1);
+        assertThat(rows.get(0).videoPath()).isEqualTo("C:\\videos\\stopped-by-obs.mkv");
+        assertThat(fsm.hasOrphanedStopRetry()).isFalse();
     }
 
     @Test
