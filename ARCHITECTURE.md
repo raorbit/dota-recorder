@@ -59,14 +59,17 @@ The core watches for it instead:
   start OBS accepts but never confirms counts as broken too.
 - **While recording** (`MatchFsm.superviseRecording`, every watchdog tick), OBS's written-bytes
   count must grow. If it sits at zero 10s in, or stays flat for 15s, *and* OBS refuses to render,
-  the recording is broken. A flat count alone never acts.
+  the recording is broken. A flat count alone never acts. An output OBS stopped on its own (a
+  hardware encoder erroring out after a GPU reset) counts too, again only while OBS refuses to
+  render; one the user stopped, or a full disk, is left for `POST_GAME`.
 
 A broken OBS is ended by `ObsHealer`, which only ever touches the process running this app's own
 OBS executable, at most every 3 minutes and 3 times an hour. Electron relaunches it like any exit;
 its relaunch budget refills once OBS has run stably for 2 minutes, so healing keeps working in a
 long session while a real crash loop stays capped. The bundled OBS runs with `--multi`, which skips
 OBS's unclean-shutdown prompt, so the relaunch needs no click. An empty recording is discarded and
-a partial one kept; the next in-match GSI frame starts recording the rest of the match.
+a partial one kept; the next in-match GSI frame starts recording the rest of the match. Each part
+keeps the Dota match id, so every recording of a split match is enriched.
 
 ## The recording brain and its anchor
 
