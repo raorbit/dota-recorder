@@ -552,7 +552,9 @@ public class ObsSceneConfigurer {
     /**
      * Builds the OBS settings JSON for a source's kind. output/input -> {@code {device_id}} (literal
      * {@code "default"} when target is null/blank — an EMPTY settings object was the root cause of the
-     * old failing add); application -> {@code {window, priority:2}} (priority 2 = WINDOW_PRIORITY_EXE,
+     * old failing add), and output also turns off {@code use_device_timing}: OBS defaults it on for
+     * desktop audio, and timestamping by the device clock is what kept the desktop capture drifting
+     * into "audio is lagging ... Restarting source audio" and re-opening the device; application -> {@code {window, priority:2}} (priority 2 = WINDOW_PRIORITY_EXE,
      * match by executable; an empty window for a null/blank target matches nothing but still creates
      * the input).
      */
@@ -566,6 +568,9 @@ public class ObsSceneConfigurer {
             String deviceId =
                     (s.target() == null || s.target().isBlank()) ? "default" : s.target();
             json.addProperty("device_id", deviceId);
+            if ("output".equals(s.kind())) {
+                json.addProperty("use_device_timing", false);
+            }
         }
         return json;
     }

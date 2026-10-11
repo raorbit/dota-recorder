@@ -173,6 +173,15 @@ class ObsSceneConfigurerTest {
     }
 
     @Test
+    void buildSettings_output_turnsOffDeviceTiming_inputLeavesTheDefault() {
+        JsonObject out = ObsSceneConfigurer.buildSettings(source("1", "output", "default"));
+        assertThat(out.get("use_device_timing").getAsBoolean()).isFalse();
+
+        JsonObject in = ObsSceneConfigurer.buildSettings(source("2", "input", "default"));
+        assertThat(in.has("use_device_timing")).isFalse();
+    }
+
+    @Test
     void buildSettings_nullOrBlankTarget_defaultsDeviceIdToLiteralDefault() {
         // An EMPTY settings object was the root cause of the old failing add; we must write "default".
         assertThat(
