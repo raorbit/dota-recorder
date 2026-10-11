@@ -200,6 +200,11 @@ export class ObsSupervisor {
     }
   }
 
+  /** An OBS process is alive and hasn't been asked to stop. */
+  isRunning(): boolean {
+    return this.child !== null && !this.stopping;
+  }
+
   /** Graceful-then-forceful shutdown of the OBS tree. */
   async stop(): Promise<void> {
     this.stopping = true;

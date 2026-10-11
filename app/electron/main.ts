@@ -11,6 +11,7 @@ import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { JvmSupervisor } from './jvm-supervisor';
 import { isAllowedNavigation, type AllowedNavigation } from './navigation-guard';
+import { ObsDemandController, OBS_DEMAND_POLL_MS, type ObsDemandReading } from './obs-demand';
 import { ObsSupervisor } from './obs-supervisor';
 import { SupervisionController } from './supervision';
 import { pathIsAccessible, revealablePath } from './reveal-path-guard';
@@ -95,6 +96,21 @@ const supervision = new SupervisionController({
   isShuttingDown: () => shuttingDown || isQuitting,
 });
 
+// OBS runs only while the core wants it (Dota running, a match recording, the preview open), so an
+// idle OBS isn't rendering and holding audio devices all day. Polled from bootstrap on.
+const obsDemand = new ObsDemandController({
+  readStatus: readObsDemand,
+  isObsRunning: () => obsSupervisor?.isRunning() === true,
+  isObsLaunching: () => supervision.isObsLaunching(),
+  canLaunch: () => !supervision.hasObsGivenUp(),
+  launchObs: () => void supervision.launchObs(),
+  stopObs: stopObsSupervisor,
+  resetBudget: () => supervision.resetObsBudget(),
+  isShuttingDown: () => shuttingDown || isQuitting,
+  log: logLine,
+  now: () => performance.now(),
+});
+
 const supervisor = new JvmSupervisor({
   bridgeToken,
   onLog: (line) => logLine(`[core] ${line}`),
@@ -149,9 +165,10 @@ async function bootstrap(): Promise<void> {
   createWindow();
   createTray();
   if (startHidden) logLine('started hidden in tray (launched at login)');
-  // Launch OBS in the background so a slow or failed OBS never blocks the UI; the
-  // status card reflects OBS connectivity from /status as the core connects to it.
-  void supervision.launchObs();
+  // OBS launches in the background whenever the core wants it, so a slow or failed OBS never
+  // blocks the UI; the status card reflects OBS connectivity from /status.
+  void obsDemand.tick();
+  setInterval(() => void obsDemand.tick(), OBS_DEMAND_POLL_MS);
   // electron-updater only works in a packaged build (needs app-update.yml); in dev the
   // whole update stack stays dormant and the renderer's update UI degrades to "unavailable".
   if (!isDev) initAutoUpdate();
@@ -579,6 +596,32 @@ async function isRecordingBusy(): Promise<BusyResult> {
 }
 
 /**
+ * One reading for the OBS demand poll from GET /status. `wanted` missing (a core predating on-demand
+ * OBS) reads as wanted, so a mismatched core keeps the old always-on behavior; any failure is null,
+ * which leaves OBS as it is.
+ */
+async function readObsDemand(): Promise<ObsDemandReading | null> {
+  try {
+    const res = await fetch(`${BRIDGE_BASE}/status`, {
+      signal: AbortSignal.timeout(1_500),
+      headers: { [BRIDGE_TOKEN_HEADER]: bridgeToken },
+    });
+    if (!res.ok) return null;
+    const body = (await res.json()) as {
+      obs?: { wanted?: boolean; recording?: boolean };
+      fsm?: { state?: string };
+    };
+    if (typeof body.fsm?.state !== 'string') return null;
+    return {
+      wanted: body.obs?.wanted !== false,
+      busy: body.obs?.recording === true || body.fsm.state !== 'IDLE',
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Install a downloaded update: tear the supervisors down ourselves, then quitAndInstall. The
  * recording gate was already checked by {@link UpdateController.installNow}. supervisorsStopped is
  * set AFTER teardown, immediately before quitAndInstall (see the inline note below for why not
@@ -619,8 +662,7 @@ async function recoverFromFailedInstall(): Promise<void> {
   shuttingDown = false;
   isQuitting = false;
   try {
-    await supervisor.start();
-    void supervision.launchObs();
+    await supervisor.start(); // the OBS demand poll relaunches OBS if it is wanted
   } catch (err) {
     logLine(`[updater] failed to restart core after an aborted install: ${String(err)}`);
   }

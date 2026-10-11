@@ -81,6 +81,9 @@ export interface StatusSnapshot {
     // black-screen recording that `recording` alone can't reveal. Persists past the recording's
     // end until the next recording arms.
     readonly captureBlack: boolean;
+    // Whether OBS should be running now. OBS runs on demand, so a disconnected OBS that isn't
+    // wanted is on standby, not an error.
+    readonly wanted: boolean;
   };
   readonly fsm: {
     readonly state: string;
@@ -768,6 +771,8 @@ function parseStatusSnapshot(payload: unknown): StatusSnapshot | null {
   // captureBlack is optional on the wire: a boolean when present, defaulted to false when a core
   // predating the black-frame guard omits it — its absence must not reject the whole status frame.
   const captureBlack = typeof obs.captureBlack === 'boolean' ? obs.captureBlack : false;
+  // wanted likewise: a core predating on-demand OBS ran it always, so its absence reads as wanted.
+  const wanted = typeof obs.wanted === 'boolean' ? obs.wanted : true;
   return {
     gsi: { connected: gsi.connected, lastFrameAgoMs: gsi.lastFrameAgoMs ?? null },
     obs: {
@@ -775,6 +780,7 @@ function parseStatusSnapshot(payload: unknown): StatusSnapshot | null {
       sceneActive: obs.sceneActive,
       recording: obs.recording,
       captureBlack,
+      wanted,
     },
     fsm: { state: fsm.state, activeMatchId: fsm.activeMatchId ?? null },
   };

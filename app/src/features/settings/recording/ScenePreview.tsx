@@ -1,11 +1,7 @@
 import type { ScenePreview as ScenePreviewFrame } from '../../../api/client';
-
 // Recorder status as recorderStatusLabel produces it: a display string plus a data-state
 // token that drives the badge tint.
-interface RecorderStatus {
-  readonly text: string;
-  readonly state: 'unknown' | 'error' | 'recording' | 'ready' | 'preparing';
-}
+import type { RecorderStatus } from '../../../lib/recorder-status';
 
 interface ScenePreviewProps {
   // Latest polled OBS scene-preview frame (null / dataUri null → placeholder).

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   fetchSettings,
   updateSettings,
@@ -9,6 +9,7 @@ import {
 } from '../../api/client';
 import type { StatusSnapshot } from '../../api/client';
 import { buildAccountPatch } from '../../lib/account-patch';
+import { obsJustConnected, recorderStatusLabel } from '../../lib/recorder-status';
 import {
   PADDING_MAX_S,
   PADDING_MIN_S,
@@ -35,21 +36,6 @@ interface RecordingSettingsProps {
   // frame (or while the core is unreachable) so we can render an "unknown" state
   // rather than a misleading error.
   readonly obs: StatusSnapshot['obs'] | null;
-}
-
-// Single self-describing "Recorder" indicator. The recorder is app-managed now,
-// so we deliberately avoid any OBS jargon; the prefix makes the chip readable on
-// its own. Evaluated top-down, first match wins — connected is gated before the
-// recording check so a dropped backend reads as an error, not a stale "recording".
-function recorderStatusLabel(obs: StatusSnapshot['obs'] | null): {
-  readonly text: string;
-  readonly state: 'unknown' | 'error' | 'recording' | 'ready' | 'preparing';
-} {
-  if (obs === null) return { text: 'Recorder: connecting…', state: 'unknown' };
-  if (!obs.connected) return { text: 'Recorder: error', state: 'error' };
-  if (obs.recording) return { text: 'Recorder: recording', state: 'recording' };
-  if (obs.sceneActive) return { text: 'Recorder: ready', state: 'ready' };
-  return { text: 'Recorder: preparing', state: 'preparing' };
 }
 
 export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.Element {
@@ -96,6 +82,15 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
   const preview = useScenePreview();
   const { usage, refreshUsage } = useStorageUsage();
   const { inputsByKind, refreshInputs, primeAll } = useAudioInputs();
+
+  // OBS starts on demand (opening this panel's preview asks for it), usually after the pickers
+  // first primed against a stopped OBS and got nothing, so prime them again once it connects.
+  const prevObs = useRef(obs);
+  useEffect(() => {
+    if (loadState === 'ready' && obsJustConnected(prevObs.current, obs)) primeAll();
+    prevObs.current = obs;
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- primeAll is recreated every render
+  }, [obs, loadState]);
 
   const [saveState, setSaveState] = useState<SaveState>('idle');
   const [error, setError] = useState<string | null>(null);
