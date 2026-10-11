@@ -72,13 +72,16 @@ public class ObsController implements ObsRecorder, MatchFsm.RecordStatusProbe {
      * (getCurrentProgramScene, getInputList, one getInputMute) for the full {@link #REQUEST_TIMEOUT_MS}
      * (5s each, 10-25s total) with that lock held, stalling both the GSI thread and the watchdog. These
      * are optional pre-arm existence checks — degrading fast to "not ready" (and retrying on the next
-     * frame) is far better than wedging the FSM — so they use a ~1s budget instead of 5s.
+     * frame) is far better than wedging the FSM — so they use a ~1s budget instead of 5s. The other
+     * probes the FSM makes under that monitor, {@link #probeRecordStatus()} and
+     * {@link #isRenderBroken()}, follow the same rule.
      */
     private static final long READINESS_TIMEOUT_MS = 1_000L;
 
-    /** Render probe ({@link #isRenderBroken()}): a tiny scene screenshot proves OBS can draw. */
-    private static final long RENDER_PROBE_TIMEOUT_MS = 2_000L;
-
+    /**
+     * Render probe ({@link #isRenderBroken()}): a token-size scene screenshot proves OBS can draw.
+     * It runs within {@link #READINESS_TIMEOUT_MS}, not a budget of its own; see that method.
+     */
     private static final int RENDER_PROBE_WIDTH = 64;
     private static final int RENDER_PROBE_HEIGHT = 36;
     private static final String RENDER_PROBE_TEMP_PREFIX = "dotarec-render-probe-";
@@ -368,6 +371,20 @@ public class ObsController implements ObsRecorder, MatchFsm.RecordStatusProbe {
      * Screenshots the program scene at a thumbnail-free size. A healthy OBS always renders its
      * scene (black when the game isn't hooked), so a refused screenshot means OBS's renderer is
      * gone.
+     *
+     * <p>Both obs-websocket calls (the scene lookup and the screenshot) use the short
+     * {@link #READINESS_TIMEOUT_MS}, by the same rule as {@link #isReady()}: the FSM probes this while
+     * holding the {@code MatchFsm} monitor -- on the GSI thread before a start, and on the scheduler in
+     * {@code superviseRecording} -- and that monitor also gates arm/finalize and the
+     * {@code ForceStopWatchdog}. A wedged OBS may hold it for ~2s here, not the ~4s two full render
+     * budgets used to allow. 1s is still many frames for a renderer that works (a 64x36 shot costs it
+     * a frame or two); a screenshot that misses it reads as refused, since the library answers null on
+     * timeout. That is a safe miss: a recording is healed only when its output also stalled or
+     * stopped, and a start probes only after {@code isReady()} just got a prompt answer from the same
+     * OBS. An unanswered scene lookup reads as no scene, never as broken.
+     *
+     * <p>Not connected, no active scene, or a probe that throws all report "not broken", so only a
+     * positive refusal can ever lead to a restart.
      */
     @Override
     public boolean isRenderBroken() {
@@ -384,7 +401,7 @@ public class ObsController implements ObsRecorder, MatchFsm.RecordStatusProbe {
                                     "png",
                                     RENDER_PROBE_WIDTH,
                                     RENDER_PROBE_HEIGHT,
-                                    RENDER_PROBE_TIMEOUT_MS)
+                                    READINESS_TIMEOUT_MS)
                             == ProgramScene.Outcome.REFUSED;
             if (refused) {
                 // Debug only: callers probe repeatedly and log the decision they take on it.

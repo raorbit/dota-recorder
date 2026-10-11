@@ -750,6 +750,31 @@ class ObsControllerTest {
     }
 
     @Test
+    void isRenderBroken_probesWithinTheShortReadinessTimeout() {
+        // The render probe runs under the MatchFsm monitor (GSI thread before a start, scheduler in
+        // superviseRecording), the same monitor that gates the ForceStopWatchdog. Like isReady(), both
+        // of its calls must use the ~1s READINESS_TIMEOUT_MS so a wedged OBS cannot hold that lock for
+        // a longer budget. Asserting the per-call timeout is the robust check (a wall-clock bound
+        // would only measure the mock).
+        OBSRemoteController obs = obsWithScene("Dota");
+        answerScreenshot(obs, true, new byte[] {1});
+
+        connectedTo(obs).isRenderBroken();
+
+        long readinessTimeoutMs =
+                (long) ReflectionTestUtils.getField(ObsController.class, "READINESS_TIMEOUT_MS");
+        verify(obs).getCurrentProgramScene(readinessTimeoutMs);
+        verify(obs).getCurrentProgramScene(anyLong()); // exactly once, at the readiness timeout
+        verify(obs)
+                .saveSourceScreenshot(
+                        eq("Dota"), eq("png"), anyString(), any(), any(), any(),
+                        eq(readinessTimeoutMs));
+        verify(obs) // exactly once, at the readiness timeout
+                .saveSourceScreenshot(
+                        anyString(), anyString(), anyString(), any(), any(), any(), anyLong());
+    }
+
+    @Test
     void isRenderBroken_whenNotConnected_isNotBroken() {
         OBSRemoteController obs = obsWithScene("Dota");
         ObsController controller = connectedTo(obs);
