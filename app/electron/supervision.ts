@@ -37,6 +37,10 @@ export interface SupervisionDeps {
  * starts over. Without this the budget never refilled: two OBS restarts in a days-long tray session
  * (the core restarts a wedged OBS on purpose, at most every few minutes) left OBS down for good.
  *
+ * The core's heal spacing (ObsHealer.MIN_INTERVAL_MS, Java) must stay longer than this, or each heal's
+ * kill lands inside the window, reads as a crash loop and spends this budget. supervision.test.ts parses
+ * that Java constant and fails unless it outlasts this window by 30s of headroom.
+ *
  * Measured on a monotonic clock (the controller's default `now` is `performance.now()`), never wall
  * time: an NTP correction or manual clock change in a days-long session would otherwise either make a
  * fast crash loop look stable (a forward step: unbounded relaunches) or push the elapsed time negative

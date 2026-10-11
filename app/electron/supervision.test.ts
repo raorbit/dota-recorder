@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import * as path from 'node:path';
 import {
   OBS_STABLE_MS,
   SupervisionController,
@@ -667,5 +669,45 @@ describe('SupervisionController — OBS crash & launch', () => {
     expect(deps.startObs).toHaveBeenCalledTimes(3); // initial + 2 bounded relaunches
     expect(deps.log).toHaveBeenCalledWith(expect.stringContaining('exceeded restart attempts'));
     expect(deps.notifyDown).not.toHaveBeenCalled(); // OBS-down is surfaced via /status, not a modal
+  });
+});
+
+describe('OBS heal spacing (core) vs the OBS stable window (Electron)', () => {
+  // The core's ObsHealer restarts a wedged OBS on purpose by killing it, and this controller sees each
+  // kill as an OBS crash. Only spacing heals further apart than OBS_STABLE_MS makes each one read as a
+  // healthy OBS exiting (budget refilled) rather than a crash loop: closer heals would spend the relaunch
+  // budget and, once it ran out, leave OBS down for the rest of the session. The two constants live in
+  // different languages and processes, so this reads the Java source and holds them apart.
+  //
+  // Headroom: the core stamps a heal BEFORE its kill, which waits up to 5s for OBS to exit, while this
+  // controller stamps the relaunch only once it sees that exit. Lag on one heal but not the next shrinks
+  // the gap Electron measures below the core's spacing; 30s covers that with plenty to spare.
+  const HEAL_SPACING_HEADROOM_MS = 30_000;
+  const OBS_HEALER_JAVA = path.resolve(
+    __dirname,
+    '..',
+    '..',
+    'core/src/main/java/dev/dotarec/obs/ObsHealer.java',
+  );
+
+  /** MIN_INTERVAL_MS as a plain long literal (`180_000L`); throws rather than passing vacuously. */
+  function healerMinIntervalMs(): number {
+    const source = readFileSync(OBS_HEALER_JAVA, 'utf8');
+    const match = /\bstatic\s+final\s+long\s+MIN_INTERVAL_MS\s*=\s*([\d_]+)[lL]?\s*;/.exec(source);
+    if (!match) {
+      throw new Error(
+        `MIN_INTERVAL_MS not found as a plain long literal in ${OBS_HEALER_JAVA}; ` +
+          'keep it a literal (e.g. 180_000L) or update this parser',
+      );
+    }
+    const ms = Number(match[1].replace(/_/g, ''));
+    if (!Number.isFinite(ms) || ms <= 0) {
+      throw new Error(`MIN_INTERVAL_MS parsed to ${ms} from "${match[1]}"`);
+    }
+    return ms;
+  }
+
+  it('keeps the core heal spacing longer than OBS_STABLE_MS, with headroom', () => {
+    expect(healerMinIntervalMs()).toBeGreaterThanOrEqual(OBS_STABLE_MS + HEAL_SPACING_HEADROOM_MS);
   });
 });

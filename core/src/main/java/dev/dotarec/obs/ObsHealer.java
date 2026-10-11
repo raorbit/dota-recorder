@@ -35,7 +35,9 @@ public class ObsHealer implements ObsRestarter {
     /**
      * Minimum spacing between restarts: long enough for a relaunch to come up and be judged, and
      * longer than Electron's OBS_STABLE_MS (2 min), so each restart counts as a healthy OBS exiting
-     * rather than a crash loop and never runs out Electron's relaunch budget.
+     * rather than a crash loop and never runs out Electron's relaunch budget. Enforced by
+     * app/electron/supervision.test.ts, which parses this value (keep it a plain long literal) and
+     * fails unless it exceeds OBS_STABLE_MS by at least 30s.
      */
     static final long MIN_INTERVAL_MS = 180_000L;
 
