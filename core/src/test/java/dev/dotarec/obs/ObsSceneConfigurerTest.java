@@ -15,6 +15,7 @@ import dev.dotarec.config.AppPaths;
 import dev.dotarec.config.SettingsStore;
 import dev.dotarec.config.SettingsStore.AudioSource;
 import io.obswebsocket.community.client.OBSRemoteController;
+import io.obswebsocket.community.client.message.response.inputs.CreateInputResponse;
 import io.obswebsocket.community.client.message.response.inputs.GetInputListResponse;
 import io.obswebsocket.community.client.message.response.inputs.RemoveInputResponse;
 import io.obswebsocket.community.client.message.response.inputs.SetInputMuteResponse;
@@ -336,5 +337,69 @@ class ObsSceneConfigurerTest {
         // The probe is swept, never muted; the global is muted, never removed.
         verify(controller, never()).setInputMute(eq(staleProbe), any(), anyLong());
         verify(controller, never()).removeInput(eq("Desktop Audio"), anyLong());
+    }
+
+    @Test
+    void reconcileAudioInputs_detached_removesOwnedInputsAndCreatesNone(@TempDir Path dir) {
+        ObsSceneConfigurer configurer = configurerWithOneOutputSource(dir);
+        OBSRemoteController controller =
+                obsListing(
+                        input("dotarec:game", "wasapi_output_capture"),
+                        input("Desktop Audio", "wasapi_output_capture"));
+
+        configurer.reconcileAudioInputs(controller, false);
+
+        verify(controller).removeInput(eq("dotarec:game"), anyLong());
+        verify(controller, never()).createInput(any(), any(), any(), any(), any(), anyLong());
+        // The OBS globals stay muted either way.
+        verify(controller).setInputMute(eq("Desktop Audio"), eq(Boolean.TRUE), anyLong());
+    }
+
+    @Test
+    void reconcileAudioInputs_attached_createsTheConfiguredInputs(@TempDir Path dir) {
+        ObsSceneConfigurer configurer = configurerWithOneOutputSource(dir);
+        OBSRemoteController controller = obsListing();
+        CreateInputResponse created = mock(CreateInputResponse.class);
+        when(created.isSuccessful()).thenReturn(true);
+        when(controller.createInput(any(), any(), any(), any(), any(), anyLong())).thenReturn(created);
+
+        configurer.reconcileAudioInputs(controller, true);
+
+        verify(controller)
+                .createInput(
+                        eq(ObsSceneConfigurer.SCENE_NAME),
+                        eq("dotarec:game"),
+                        eq(ObsSceneConfigurer.KIND_OUTPUT),
+                        any(),
+                        any(),
+                        anyLong());
+        verify(controller, never()).removeInput(any(), anyLong());
+    }
+
+    private static ObsSceneConfigurer configurerWithOneOutputSource(Path dir) {
+        AppPaths paths = new AppPaths(dir.toString(), dir.resolve("obs").toString());
+        SettingsStore store = new SettingsStore(paths);
+        store.update(
+                s -> {
+                    s.audioSources = new ArrayList<>(List.of(source("game", "output", "default")));
+                    return s;
+                });
+        return new ObsSceneConfigurer(store);
+    }
+
+    /** An OBS listing {@code inputs} that accepts any remove/mute/volume request. */
+    private static OBSRemoteController obsListing(Input... inputs) {
+        GetInputListResponse listResponse = mock(GetInputListResponse.class);
+        when(listResponse.isSuccessful()).thenReturn(true);
+        when(listResponse.getInputs()).thenReturn(List.of(inputs));
+        OBSRemoteController controller = mock(OBSRemoteController.class);
+        when(controller.getInputList(any(), anyLong())).thenReturn(listResponse);
+        RemoveInputResponse removeOk = mock(RemoveInputResponse.class);
+        lenient().when(removeOk.isSuccessful()).thenReturn(true);
+        lenient().when(controller.removeInput(any(), anyLong())).thenReturn(removeOk);
+        SetInputMuteResponse muteOk = mock(SetInputMuteResponse.class);
+        lenient().when(muteOk.isSuccessful()).thenReturn(true);
+        lenient().when(controller.setInputMute(any(), any(), anyLong())).thenReturn(muteOk);
+        return controller;
     }
 }

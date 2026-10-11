@@ -201,6 +201,17 @@ public class MatchFsm {
         return state;
     }
 
+    /**
+     * Watchdog tick: lets OBS drop the audio captures it only holds for recording once no match is
+     * arming or recording. Under the monitor so it can't detach between a start's attach and its
+     * StartRecord.
+     */
+    public synchronized void releaseIdleAudio() {
+        if (state == MatchState.IDLE && orphanedStop == null && !obs.isRecording()) {
+            obs.detachIdleAudio();
+        }
+    }
+
     /** The in-flight session, or null when IDLE. Exposed for tests/diagnostics. */
     public RecordingSession currentSession() {
         return session;
@@ -525,6 +536,9 @@ public class MatchFsm {
             log.warn("Cannot start recording: OBS not connected; will retry on next frame");
             return;
         }
+        // The audio captures exist only while a match records (idle OBS holds no audio device), so
+        // add them before the readiness gate, which checks for a live one.
+        obs.attachAudio();
         // Readiness gate: OBS connected but with no active program scene or a muted/absent
         // desktop-audio input would capture a black/silent file against a green GSI card. Stay IDLE
         // and retry rather than record nothing -- we armed early (HERO_SELECTION), so there is slack.

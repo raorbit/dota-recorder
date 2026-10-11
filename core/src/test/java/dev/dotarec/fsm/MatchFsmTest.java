@@ -79,10 +79,21 @@ class MatchFsmTest {
         /** The path OBS reported when it stopped the output on its own; cleared on a new start,
          *  as ObsEvents clears it on OUTPUT_STARTED. */
         String lastStoppedPath;
+        /** When true, readiness also needs the audio captures attached, as the real gate does. */
+        boolean readyNeedsAudio;
+        boolean audioAttached;
+        int detachCalls;
 
         @Override public void connect() { }
         @Override public boolean ensureConnected() { return connected; }
-        @Override public boolean isReady() { return connected && ready; }
+        @Override public boolean isReady() {
+            return connected && ready && (!readyNeedsAudio || audioAttached);
+        }
+        @Override public void attachAudio() { audioAttached = true; }
+        @Override public void detachIdleAudio() {
+            detachCalls++;
+            audioAttached = false;
+        }
         @Override public boolean isRenderBroken() {
             renderProbes++;
             return connected && renderBroken;
@@ -195,6 +206,32 @@ class MatchFsmTest {
 
         assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
         assertThat(obs.startCalls).isEqualTo(1);
+    }
+
+    @Test
+    void start_attachesTheAudioCapturesBeforeTheReadinessGate() {
+        // Idle OBS holds no audio captures; the start must add them before isReady() looks for one.
+        obs.readyNeedsAudio = true;
+
+        fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
+
+        assertThat(obs.audioAttached).isTrue();
+        assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
+    }
+
+    @Test
+    void releaseIdleAudio_onlyWhileNothingRecords() {
+        fsm.releaseIdleAudio();
+        assertThat(obs.detachCalls).as("idle: the captures can go").isEqualTo(1);
+
+        fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
+        fsm.releaseIdleAudio();
+        assertThat(obs.detachCalls).as("recording: keep them").isEqualTo(1);
+
+        fsm.onFrame(frame().state("DOTA_GAMERULES_STATE_POST_GAME").build());
+        obs.recording = true; // an output the FSM no longer tracks, e.g. started by hand in OBS
+        fsm.releaseIdleAudio();
+        assertThat(obs.detachCalls).as("OBS still recording: keep them").isEqualTo(1);
     }
 
     @Test

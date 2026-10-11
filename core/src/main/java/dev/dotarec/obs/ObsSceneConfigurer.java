@@ -38,7 +38,8 @@ import org.springframework.stereotype.Component;
  *   <li>input {@code "Game Capture"} of kind {@code game_capture} exists in that scene, locked to
  *       the Dota window ({@code capture_mode=window}, {@code window="Dota 2:SDL_app:dota2.exe"}, exe
  *       priority) so it never hooks some other fullscreen app;
- *   <li>the user's audio source list is reconciled into {@code dotarec:<id>}-named WASAPI inputs;
+ *   <li>the user's audio source list is reconciled into {@code dotarec:<id>}-named WASAPI inputs
+ *       while a recording wants them, and removed otherwise (see {@link #reconcileAudioInputs});
  *   <li>{@code "Dota"} is the current program scene.
  * </ul>
  *
@@ -162,13 +163,22 @@ public class ObsSceneConfigurer {
      * @throws Exception on a fatal, non-recoverable OBS error
      */
     public void ensureSceneReady(OBSRemoteController controller) throws Exception {
+        ensureSceneReady(controller, true);
+    }
+
+    /**
+     * {@link #ensureSceneReady(OBSRemoteController)}, with the audio captures present only when
+     * {@code attachAudio} (a recording is arming or running).
+     */
+    public void ensureSceneReady(OBSRemoteController controller, boolean attachAudio)
+            throws Exception {
         if (controller == null) {
             throw new IllegalArgumentException("Controller cannot be null");
         }
         ensureScene(controller);
         ensureGameCaptureInput(controller);
         fitGameCaptureToCanvas(controller);
-        reconcileAudioInputs(controller);
+        reconcileAudioInputs(controller, attachAudio);
         ensureProgramScene(controller);
         log.info("OBS scene '{}' is fully configured and active", SCENE_NAME);
     }
@@ -373,10 +383,21 @@ public class ObsSceneConfigurer {
      * create/setSettings/remove sequences against the same OBS inputs.
      */
     public synchronized void reconcileAudioInputs(OBSRemoteController controller) {
+        reconcileAudioInputs(controller, true);
+    }
+
+    /**
+     * {@link #reconcileAudioInputs(OBSRemoteController)}, or with {@code attach} false, removes every
+     * {@code dotarec:} input instead. Removing (not muting) is what releases the device: a muted
+     * WASAPI input still captures, and an idle OBS holding the user's output device open was enough
+     * to stutter browser video. The settings stay the source of truth and are re-applied by the next
+     * attach.
+     */
+    public synchronized void reconcileAudioInputs(OBSRemoteController controller, boolean attach) {
         if (controller == null) {
             return;
         }
-        List<AudioSource> desired = settings.get().audioSources;
+        List<AudioSource> desired = attach ? settings.get().audioSources : List.of();
         if (desired == null) {
             desired = List.of();
         }

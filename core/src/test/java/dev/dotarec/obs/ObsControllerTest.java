@@ -3,6 +3,7 @@ package dev.dotarec.obs;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -11,6 +12,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -30,6 +32,7 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.LongSupplier;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -666,11 +669,86 @@ class ObsControllerTest {
                 .isFalse();
     }
 
+    @Test
+    void attachAudio_reconcilesOnceThenNoOpsOnStartRetries() {
+        ObsSceneConfigurer cfg = mock(ObsSceneConfigurer.class);
+        OBSRemoteController obs = mock(OBSRemoteController.class);
+        ObsController controller = connectedTo(obs, cfg);
+
+        controller.attachAudio();
+        controller.attachAudio(); // the next ~10Hz start retry
+
+        verify(cfg).reconcileAudioInputs(obs, true);
+    }
+
+    @Test
+    void detachIdleAudio_waitsOutTheReleaseDelayThenRemovesTheCaptures() {
+        ObsSceneConfigurer cfg = mock(ObsSceneConfigurer.class);
+        OBSRemoteController obs = mock(OBSRemoteController.class);
+        ObsController controller = connectedTo(obs, cfg);
+        long[] now = {0L};
+        ReflectionTestUtils.setField(controller, "nanoTime", (LongSupplier) () -> now[0]);
+
+        controller.attachAudio();
+        now[0] = (ObsController.AUDIO_IDLE_RELEASE_MS - 1) * 1_000_000L;
+        controller.detachIdleAudio();
+        verify(cfg, never()).reconcileAudioInputs(obs, false);
+
+        now[0] = ObsController.AUDIO_IDLE_RELEASE_MS * 1_000_000L;
+        controller.detachIdleAudio();
+        controller.detachIdleAudio(); // already released: no second reconcile
+        verify(cfg).reconcileAudioInputs(obs, false);
+
+        // The next start re-attaches.
+        controller.attachAudio();
+        verify(cfg, times(2)).reconcileAudioInputs(obs, true);
+    }
+
+    @Test
+    void detachIdleAudio_neverAttached_isNoOp() {
+        ObsSceneConfigurer cfg = mock(ObsSceneConfigurer.class);
+        ObsController controller = connectedTo(mock(OBSRemoteController.class), cfg);
+
+        controller.detachIdleAudio();
+
+        verify(cfg, never()).reconcileAudioInputs(any(), anyBoolean());
+    }
+
+    @Test
+    void configureScene_carriesTheAudioState() throws Exception {
+        ObsSceneConfigurer cfg = mock(ObsSceneConfigurer.class);
+        OBSRemoteController obs = mock(OBSRemoteController.class);
+        ObsController controller = connectedTo(obs, cfg);
+
+        controller.configureScene(); // between matches: no audio captures
+        verify(cfg).ensureSceneReady(obs, false);
+
+        controller.attachAudio();
+        controller.configureScene(); // a reconnect mid-recording keeps them
+        verify(cfg).ensureSceneReady(obs, true);
+    }
+
+    @Test
+    void reconcileAudioOnDemand_betweenMatches_keepsTheCapturesDetached() {
+        ObsSceneConfigurer cfg = mock(ObsSceneConfigurer.class);
+        OBSRemoteController obs = mock(OBSRemoteController.class);
+        ObsController controller = connectedTo(obs, cfg);
+
+        controller.reconcileAudioOnDemand();
+
+        verify(cfg).reconcileAudioInputs(obs, false);
+        verify(cfg, never()).reconcileAudioInputs(obs, true);
+    }
+
     /** A connected controller over {@code obs}, for the render probe. */
     private static ObsController connectedTo(OBSRemoteController obs) {
+        return connectedTo(obs, sceneConfigurer());
+    }
+
+    private static ObsController connectedTo(OBSRemoteController obs, ObsSceneConfigurer cfg) {
         ObsHealth health = new ObsHealth();
         ObsController controller =
-                new ObsController(null, health, new ObsEvents(health, mock(CaptureBlackFrameGuard.class)), sceneConfigurer());
+                new ObsController(null, health, new ObsEvents(health, mock(CaptureBlackFrameGuard.class)), cfg);
         ReflectionTestUtils.setField(controller, "controller", obs);
         health.setConnected(true);
         return controller;
