@@ -88,29 +88,27 @@ class MigrationRunnerTest {
         }
     }
 
+    private static final String TEST_V1 = "db/test-migration/V1__parent_child.sql";
+    private static final String TEST_V2_ORPHANS = "db/test-migration/V2__orphan_a_child.sql";
+
     /**
-     * A script that leaves ANY foreign-key violation behind must roll back (enforcement was off, so
-     * {@code PRAGMA foreign_key_check} is the only guard), and the finally must still switch
+     * A script that leaves a NEW foreign-key violation behind must roll back (enforcement was off,
+     * so {@code PRAGMA foreign_key_check} is the only guard), and the finally must still switch
      * enforcement back on for the pooled connection -- the failure path is exactly where a leak would
-     * hide. A pre-existing orphan (inserted by an FK-unaware connection, e.g. a sqlite3 CLI session)
-     * trips the check for the latest script.
+     * hide. The test-only V2 deletes a parent row, which with FKs off orphans its child.
      */
     @Test
     void failingMigrationRollsBackAndStillReenablesForeignKeys() throws Exception {
         Path dbFile = tempDir.resolve("test.sqlite");
         try (HikariDataSource pool = singleConnectionPool(dbFile)) {
-            new MigrationRunner(pool).migrateTo(MigrationRunner.LATEST_VERSION - 1);
-            try (Connection raw = DriverManager.getConnection("jdbc:sqlite:" + dbFile.toAbsolutePath());
-                    Statement st = raw.createStatement()) {
-                st.execute("PRAGMA foreign_keys = OFF");
-                st.execute("INSERT INTO markers (match_id, type, video_offset_s) VALUES (999, 'death', 1.0)");
-            }
+            new MigrationRunner(pool, TEST_V1, TEST_V2_ORPHANS).migrateTo(1);
             SQLiteConnection physicalBefore = physicalConnection(pool);
 
-            MigrationRunner runner = new MigrationRunner(pool);
+            MigrationRunner runner = new MigrationRunner(pool, TEST_V1, TEST_V2_ORPHANS);
             assertThatThrownBy(() -> runner.run(null))
                     .isInstanceOf(SQLException.class)
-                    .hasMessageContaining("foreign_key_check");
+                    .hasMessageContaining("foreign_key_check")
+                    .hasMessageContaining("child rowid 10");
 
             assertThat(runner.isReady()).isFalse();
             try (Connection conn = pool.getConnection();
@@ -120,7 +118,41 @@ class MigrationRunnerTest {
                 try (ResultSet rs = st.executeQuery("PRAGMA user_version")) {
                     assertThat(rs.getInt(1))
                             .as("the failed script rolled back, user_version stamp included")
-                            .isEqualTo(MigrationRunner.LATEST_VERSION - 1);
+                            .isEqualTo(1);
+                }
+                try (ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM parent WHERE id = 1")) {
+                    assertThat(rs.getInt(1)).as("the orphaning delete was rolled back").isEqualTo(1);
+                }
+            }
+        }
+    }
+
+    /**
+     * An orphan that predates the migration (inserted by an FK-unaware connection, e.g. a sqlite3
+     * CLI session where foreign keys default to off) is not the migration's doing. Failing on it
+     * would roll V7 back on every boot and keep the core from starting at all, so the runner only
+     * fails on violations the script itself introduced, and leaves the old orphan as it found it.
+     */
+    @Test
+    void preexistingOrphanDoesNotBlockTheMigration() throws Exception {
+        Path dbFile = tempDir.resolve("test.sqlite");
+        try (HikariDataSource pool = singleConnectionPool(dbFile)) {
+            new MigrationRunner(pool).migrateTo(MigrationRunner.LATEST_VERSION - 1);
+            try (Connection raw = DriverManager.getConnection("jdbc:sqlite:" + dbFile.toAbsolutePath());
+                    Statement st = raw.createStatement()) {
+                st.execute("PRAGMA foreign_keys = OFF");
+                st.execute("INSERT INTO markers (match_id, type, video_offset_s) VALUES (999, 'death', 1.0)");
+            }
+
+            MigrationRunner runner = new MigrationRunner(pool);
+            runner.run(null);
+
+            assertThat(runner.isReady()).isTrue();
+            try (Connection conn = pool.getConnection();
+                    Statement st = conn.createStatement()) {
+                assertThat(foreignKeysPragma(conn)).isEqualTo(1);
+                try (ResultSet rs = st.executeQuery("PRAGMA user_version")) {
+                    assertThat(rs.getInt(1)).isEqualTo(MigrationRunner.LATEST_VERSION);
                 }
                 try (ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM markers WHERE match_id = 999")) {
                     assertThat(rs.getInt(1)).isEqualTo(1);

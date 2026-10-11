@@ -2,6 +2,7 @@ package dev.dotarec.data;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.core.annotation.Order;
@@ -23,7 +24,9 @@ import java.sql.Statement;
 import java.time.format.DateTimeFormatter;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -46,8 +49,12 @@ import java.util.concurrent.atomic.AtomicInteger;
  *       is a silent no-op inside a transaction, and this connection BEGINs IMMEDIATE the moment
  *       autocommit goes false (see {@link DataSourceConfig});</li>
  *   <li>runs the script's statements in one transaction;</li>
- *   <li>runs {@code PRAGMA foreign_key_check} before commit and rolls back on ANY returned row --
- *       with enforcement off, nothing else would catch a script that orphaned child rows;</li>
+ *   <li>runs {@code PRAGMA foreign_key_check} before and after the statements, and rolls back if the
+ *       script left any violation that was not already there -- with enforcement off, nothing else
+ *       would catch a script that orphaned child rows. Violations that predate the script (e.g. a
+ *       row hand-edited through the sqlite3 CLI, where foreign keys default to off) are logged, not
+ *       fatal: failing on them would roll the migration back on EVERY boot and keep the core from
+ *       starting at all, for damage the migration didn't cause;</li>
  *   <li>in a {@code finally}, back in autocommit, ALWAYS switches {@code foreign_keys} back ON. The
  *       connection is a pooled Hikari one: leaving enforcement off -- including after a failed
  *       migration -- would silently leak unenforced FKs (and thus non-cascading deletes) to every
@@ -64,7 +71,6 @@ public class MigrationRunner implements ApplicationRunner {
 
     private static final Logger log = LoggerFactory.getLogger(MigrationRunner.class);
 
-    public static final int LATEST_VERSION = 7;
     private static final String[] SCRIPTS = {
         "db/migration/V1__init.sql",
         "db/migration/V2__enrich_retry.sql",
@@ -75,17 +81,32 @@ public class MigrationRunner implements ApplicationRunner {
         "db/migration/V7__matches_dota_match_id_not_unique.sql",
     };
 
+    public static final int LATEST_VERSION = SCRIPTS.length;
+
     private final DataSource dataSource;
+    private final String[] scripts;
     private final AtomicInteger currentVersion = new AtomicInteger(0);
     private volatile boolean ready;
 
+    // @Autowired: with the test-seam constructor below, Spring would otherwise look for a no-arg one.
+    @Autowired
     public MigrationRunner(DataSource dataSource) {
+        this(dataSource, SCRIPTS);
+    }
+
+    /**
+     * Test seam: runs {@code scripts} (classpath locations, V1 first) instead of the shipped
+     * migrations, so a test can exercise the runner's own guarantees -- rollback, the
+     * foreign-key check, re-enabling enforcement -- with a script built to break them.
+     */
+    MigrationRunner(DataSource dataSource, String... scripts) {
         this.dataSource = dataSource;
+        this.scripts = scripts.clone();
     }
 
     @Override
     public void run(ApplicationArguments args) throws Exception {
-        migrateTo(LATEST_VERSION);
+        migrateTo(scripts.length);
     }
 
     /**
@@ -108,7 +129,7 @@ public class MigrationRunner implements ApplicationRunner {
             backupIfNeeded(conn, version);
 
             for (int next = version + 1; next <= targetVersion; next++) {
-                applyScript(conn, SCRIPTS[next - 1], next);
+                applyScript(conn, scripts[next - 1], next);
                 currentVersion.set(next);
             }
             ready = true;
@@ -123,7 +144,7 @@ public class MigrationRunner implements ApplicationRunner {
 
     /** True once startup migrations have completed successfully. */
     public boolean isReady() {
-        return ready && currentVersion.get() >= LATEST_VERSION;
+        return ready && currentVersion.get() >= scripts.length;
     }
 
     private int readUserVersion(Connection conn) throws SQLException {
@@ -196,10 +217,16 @@ public class MigrationRunner implements ApplicationRunner {
             setForeignKeys(conn, false);
             conn.setAutoCommit(false);
             try (Statement st = conn.createStatement()) {
+                Set<String> preexisting = foreignKeyViolations(st);
+                if (!preexisting.isEmpty()) {
+                    log.warn("DB already holds {} foreign-key violation(s) before migration V{} (first: {});"
+                            + " leaving them as they are", preexisting.size(), version,
+                            preexisting.iterator().next());
+                }
                 for (String stmt : splitStatements(sql)) {
                     st.execute(stmt);
                 }
-                assertNoForeignKeyViolations(st, version);
+                assertNoNewForeignKeyViolations(st, preexisting, version);
                 conn.commit();
                 log.info("Applied migration V{}", version);
             } catch (SQLException | RuntimeException e) {
@@ -236,24 +263,36 @@ public class MigrationRunner implements ApplicationRunner {
     }
 
     /**
-     * Fails the in-flight migration (the caller's catch rolls it back) if the DB holds ANY
-     * foreign-key violation. With enforcement off for the script, this is the only thing standing
-     * between a buggy rebuild and silently orphaned markers/pauses/clips.
+     * Fails the in-flight migration (the caller's catch rolls it back) if the script left any
+     * foreign-key violation that wasn't in {@code preexisting}. With enforcement off for the script,
+     * this is the only thing standing between a buggy rebuild and silently orphaned
+     * markers/pauses/clips.
      */
-    private static void assertNoForeignKeyViolations(Statement st, int version) throws SQLException {
-        try (ResultSet rs = st.executeQuery("PRAGMA foreign_key_check")) {
-            if (!rs.next()) {
-                return;
-            }
-            // Columns: child table, child rowid, parent table, fk index. Report the first + a count.
-            String first = rs.getString(1) + " rowid " + rs.getString(2) + " -> missing " + rs.getString(3);
-            int count = 1;
-            while (rs.next()) {
-                count++;
-            }
+    private static void assertNoNewForeignKeyViolations(
+            Statement st, Set<String> preexisting, int version) throws SQLException {
+        Set<String> introduced = foreignKeyViolations(st);
+        introduced.removeAll(preexisting);
+        if (!introduced.isEmpty()) {
             throw new SQLException("Migration V" + version + " rolled back: PRAGMA foreign_key_check found "
-                    + count + " violation(s), first: " + first);
+                    + introduced.size() + " new violation(s), first: " + introduced.iterator().next());
         }
+    }
+
+    /**
+     * Every row {@code PRAGMA foreign_key_check} reports, as {@code "<child> rowid <n> -> missing
+     * <parent> (fk <i>)"}: the child row and which of its foreign keys dangles identify a violation
+     * across the script, since a script never renumbers the rows of tables it doesn't touch.
+     */
+    private static Set<String> foreignKeyViolations(Statement st) throws SQLException {
+        Set<String> violations = new LinkedHashSet<>();
+        try (ResultSet rs = st.executeQuery("PRAGMA foreign_key_check")) {
+            // Columns: child table, child rowid, parent table, fk index.
+            while (rs.next()) {
+                violations.add(rs.getString(1) + " rowid " + rs.getString(2) + " -> missing "
+                        + rs.getString(3) + " (fk " + rs.getString(4) + ")");
+            }
+        }
+        return violations;
     }
 
     private String readClasspath(String location) throws IOException {
