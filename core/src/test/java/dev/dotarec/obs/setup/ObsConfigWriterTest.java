@@ -66,6 +66,65 @@ class ObsConfigWriterTest {
     }
 
     @Test
+    void freshInstall_marksFirstRunDone_soTheAutoConfigWizardNeverOpens(@TempDir Path dir) throws Exception {
+        // Regression: a fresh OBS opened its Auto-Configuration Wizard, which disables outputs while
+        // open; tray-hidden, it silently swallowed every StartRecord of the first live match.
+        AppPaths paths = paths(dir);
+        writer(paths, new SettingsStore(paths), "", "0").configure();
+
+        Path userIni = new ObsLayout(paths.obsDir()).userIni();
+        assertThat(Files.readString(userIni)).isEqualTo("[General]\nFirstRun=true\n");
+    }
+
+    @Test
+    void unreadableUserIni_stillWritesTheProfileAndCompletes(@TempDir Path dir) throws Exception {
+        // Regression: the FirstRun edit ran BEFORE writeProfile and threw, so a briefly locked
+        // user.ini (e.g. an AV scan on first run) aborted configure() before basic.ini was written and
+        // ObsConfigBootstrap never marked readiness -- a cosmetic write blocked all recording.
+        // Occupying user.ini's path with a DIRECTORY makes its read fail reliably on Windows and Linux.
+        AppPaths paths = paths(dir);
+        ObsLayout layout = new ObsLayout(paths.obsDir());
+        Files.createDirectories(layout.userIni());
+
+        writer(paths, new SettingsStore(paths), "", "0").configure();
+
+        assertThat(Files.readString(layout.profileIni())).contains("Mode=Simple");
+        assertThat(layout.websocketConfig()).exists();
+        assertThat(layout.userIni()).isDirectory();
+    }
+
+    @Test
+    void unwritableUserIni_stillWritesTheProfileAndCompletes(@TempDir Path dir) throws Exception {
+        // The write-side twin: writeAtomically throws UncheckedIOException (not IOException) when its
+        // sibling .tmp cannot be written -- occupied here by a DIRECTORY -- and that is swallowed too.
+        AppPaths paths = paths(dir);
+        ObsLayout layout = new ObsLayout(paths.obsDir());
+        Path tmp = layout.userIni().resolveSibling(layout.userIni().getFileName() + ".tmp");
+        Files.createDirectories(tmp);
+
+        writer(paths, new SettingsStore(paths), "", "0").configure();
+
+        assertThat(Files.readString(layout.profileIni())).contains("Mode=Simple");
+        assertThat(layout.userIni()).doesNotExist();
+    }
+
+    @Test
+    void firstRunDone_mergesIntoOBSsOwnUserIni() {
+        // The shape OBS itself writes: UTF-8 BOM, LF endings, [General] first, no FirstRun yet.
+        String obs = "\uFEFF[General]\nPre19Defaults=false\nConfirmOnExit=true\n\n[BasicWindow]\nPreviewEnabled=true\n";
+        String merged = ObsConfigWriter.withFirstRunDone(obs);
+        assertThat(merged).isEqualTo(
+                "\uFEFF[General]\nFirstRun=true\nPre19Defaults=false\nConfirmOnExit=true\n\n[BasicWindow]\nPreviewEnabled=true\n");
+        // Idempotent, and a false flag is flipped in place.
+        assertThat(ObsConfigWriter.withFirstRunDone(merged)).isEqualTo(merged);
+        assertThat(ObsConfigWriter.withFirstRunDone("[General]\r\nFirstRun=false\r\nX=1\r\n"))
+                .isEqualTo("[General]\r\nFirstRun=true\r\nX=1\r\n");
+        // A FirstRun key in another section is not the frontend's flag.
+        assertThat(ObsConfigWriter.withFirstRunDone("[Other]\nFirstRun=false\n"))
+                .isEqualTo("[General]\nFirstRun=true\n\n[Other]\nFirstRun=false\n");
+    }
+
+    @Test
     void writesSimpleOutputProfileWithProbedEncoder(@TempDir Path dir) throws Exception {
         AppPaths paths = paths(dir);
         SettingsStore settings = new SettingsStore(paths);

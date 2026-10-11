@@ -32,6 +32,22 @@ export interface SupervisionDeps {
   isShuttingDown(): boolean;
 }
 
+/**
+ * An OBS that ran this long after its last relaunch before exiting was healthy, so its relaunch budget
+ * starts over. Without this the budget never refilled: two OBS restarts in a days-long tray session
+ * (the core restarts a wedged OBS on purpose, at most every few minutes) left OBS down for good.
+ *
+ * The core's heal spacing (ObsHealer.MIN_INTERVAL_MS, Java) must stay longer than this, or each heal's
+ * kill lands inside the window, reads as a crash loop and spends this budget. supervision.test.ts parses
+ * that Java constant and fails unless it outlasts this window by 30s of headroom.
+ *
+ * Measured on a monotonic clock (the controller's default `now` is `performance.now()`), never wall
+ * time: an NTP correction or manual clock change in a days-long session would otherwise either make a
+ * fast crash loop look stable (a forward step: unbounded relaunches) or push the elapsed time negative
+ * (a backward step: the budget never refills).
+ */
+export const OBS_STABLE_MS = 2 * 60_000;
+
 function formatExit(info: ChildExit): string {
   return `code=${info.code ?? 'null'} signal=${info.signal ?? 'null'}`;
 }
@@ -49,10 +65,17 @@ export class SupervisionController {
   private corePendingRecrash = false;
   private obsLaunching = false;
   private obsRelaunchPending = false;
+  private lastObsRelaunchAt = Number.NEGATIVE_INFINITY;
 
+  /**
+   * @param now monotonic milliseconds, only ever compared against itself (see {@link OBS_STABLE_MS});
+   *   tests inject a fake clock. The default is wrapped rather than passed as `performance.now`
+   *   because Node rejects that method called without its `performance` receiver (ERR_INVALID_THIS).
+   */
   constructor(
     private readonly deps: SupervisionDeps,
     private readonly maxRestarts = 2,
+    private readonly now: () => number = () => performance.now(),
   ) {}
 
   /**
@@ -82,9 +105,7 @@ export class SupervisionController {
           // the crash paths, so an escaping rejection would be unhandled AND would skip the remaining
           // drain iterations — dropping a queued relaunch whose budget was already charged. Log it and
           // keep draining.
-          this.deps.log(
-            `[obs] launch failed: ${err instanceof Error ? err.message : String(err)}`,
-          );
+          this.deps.log(`[obs] launch failed: ${err instanceof Error ? err.message : String(err)}`);
         }
       } while (this.obsRelaunchPending);
     } finally {
@@ -97,6 +118,10 @@ export class SupervisionController {
   handleObsCrash(info: ChildExit): void {
     if (this.deps.isShuttingDown()) return;
     this.deps.log(`[obs] crash detected (${formatExit(info)})`);
+    const t = this.now();
+    if (t - this.lastObsRelaunchAt >= OBS_STABLE_MS) {
+      this.obsRestartAttempts = 0; // it ran fine since the last relaunch: not a crash loop
+    }
     if (this.obsRestartAttempts >= this.maxRestarts) {
       this.deps.log(
         '[obs] exceeded restart attempts; leaving OBS down (recorder will show not ready)',
@@ -104,6 +129,7 @@ export class SupervisionController {
       return;
     }
     this.obsRestartAttempts += 1;
+    this.lastObsRelaunchAt = t;
     this.deps.log(`[obs] relaunching (attempt ${this.obsRestartAttempts}/${this.maxRestarts})`);
     if (this.obsLaunching) {
       // The crashed OBS is the in-flight launch's own child (it died before start() settled). launchObs

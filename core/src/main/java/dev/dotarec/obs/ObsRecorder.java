@@ -57,6 +57,16 @@ public interface ObsRecorder {
     boolean isRecording();
 
     /**
+     * Whether OBS is connected yet refuses to render a frame of its program scene: the signature of
+     * a lost graphics device, after which every recording comes out empty. False whenever that
+     * can't be established (not connected, no scene), so only a positive failure ever triggers a
+     * restart.
+     */
+    default boolean isRenderBroken() {
+        return false;
+    }
+
+    /**
      * Sends StartRecord and BLOCKS until OBS confirms the recording is really rolling (the
      * OUTPUT_STARTED event), returning that confirmed instant as an ISO-8601 string. On return
      * {@link #recordConfirmedAt()} is non-null and fresh for THIS recording, so the caller can anchor
@@ -76,6 +86,16 @@ public interface ObsRecorder {
      * @throws ObsException if OBS is not connected or rejects/times out the request
      */
     String stopRecording();
+
+    /**
+     * The file path of the current recording's output if OBS has already stopped it on its own, or
+     * {@code null}. Only a STOPPED seen since this recording's OUTPUT_STARTED counts, so a path here
+     * never belongs to an earlier recording. Lets a finalize whose StopRecord fails (OBS ended the
+     * output first, e.g. on an encode error after a GPU reset) still attach the file OBS closed.
+     */
+    default String lastStoppedOutputPath() {
+        return null;
+    }
 
     /**
      * The wall-clock instant OBS confirmed OUTPUT_STARTED for the current/most-recent recording, or

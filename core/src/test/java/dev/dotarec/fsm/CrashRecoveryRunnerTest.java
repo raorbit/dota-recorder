@@ -335,24 +335,25 @@ class CrashRecoveryRunnerTest {
     }
 
     @Test
-    void recoveryDropsStaleJournalWhenDotaMatchAlreadyFinalized() {
-        // First recovery finalizes Dota match 99 into a matches row (UNIQUE dota_match_id).
+    void recoveryKeepsAStrandedPartOfAnAlreadyRecordedMatch_asItsOwnLinkedRow() {
+        // First recovery finalizes Dota match 99 into a matches row.
         journal.open(sessionRow("session-a", 99L));
         runner.run(null);
         assertThat(matches.findAll())
                 .filteredOn(m -> Long.valueOf(99L).equals(m.dotaMatchId()))
                 .hasSize(1);
 
-        // A second stranded journal row references the same, now-taken, Dota match id. Re-inserting
-        // would hit the UNIQUE constraint, roll back, and replay every boot; recovery must instead
-        // drop the stale row.
+        // A second stranded journal row for the same Dota match is another part of a split match:
+        // finalize deletes a journal in the same transaction as its insert, so a stranded one is
+        // never a duplicate. It is recovered as its own row, linked and enriched like the first.
         journal.open(sessionRow("session-b", 99L));
         runner.run(null);
 
         assertThat(journal.findUnfinished()).isEmpty();
         assertThat(matches.findAll())
                 .filteredOn(m -> Long.valueOf(99L).equals(m.dotaMatchId()))
-                .hasSize(1);
+                .hasSize(2)
+                .allSatisfy(m -> assertThat(m.enrichmentState()).isEqualTo("pending"));
     }
 
     @Test

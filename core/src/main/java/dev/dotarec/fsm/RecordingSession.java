@@ -77,6 +77,23 @@ public class RecordingSession {
     private boolean heroDemo;
     private boolean mapIdentitySeen;
 
+    /** Bytes OBS last reported written, and the monotonic instant that count last grew. */
+    private Long outputBytes;
+    private long outputGrewAtNanos;
+
+    /**
+     * Records OBS's latest written-bytes count; returns how long (ms) it has gone without growing,
+     * or 0 when it just grew (or this is the first reading).
+     */
+    public long observeOutputBytes(long bytes, long nowNanos) {
+        if (outputBytes == null || bytes > outputBytes) {
+            outputBytes = bytes;
+            outputGrewAtNanos = nowNanos;
+            return 0L;
+        }
+        return (nowNanos - outputGrewAtNanos) / 1_000_000L;
+    }
+
     public String getSurrogateId() {
         return surrogateId;
     }

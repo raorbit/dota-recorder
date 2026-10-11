@@ -45,6 +45,32 @@ The same defense-in-depth shape recurs at finalize time: `ForceStopWatchdog` for
 recording after 30s of GSI silence (a demo or abandon never sends `POST_GAME`), keyed to the last
 *authenticated* frame so spoofed posts can't keep a runaway recording alive.
 
+## Self-healing OBS
+
+The managed OBS runs for days in the tray, and some failures leave it alive but useless. A GPU
+driver update (or reset) while it runs takes away its graphics device; OBS never recovers, yet
+StartRecord still succeeds and writes an empty file. Its first-run wizard, left open, disables
+every output the same way. Neither shows up as a crash, so the reaping layers above never fire.
+
+The core watches for it instead:
+
+- **Before recording**, OBS must render a frame of its scene (`ObsController.isRenderBroken`, a
+  tiny screenshot, probed at most every 5s of frame time since starts retry on every frame); a
+  start OBS accepts but never confirms counts as broken too.
+- **While recording** (`MatchFsm.superviseRecording`, every watchdog tick), OBS's written-bytes
+  count must grow. If it sits at zero 10s in, or stays flat for 15s, *and* OBS refuses to render,
+  the recording is broken. A flat count alone never acts. An output OBS stopped on its own (a
+  hardware encoder erroring out after a GPU reset) counts too, again only while OBS refuses to
+  render; one the user stopped, or a full disk, is left for `POST_GAME`.
+
+A broken OBS is ended by `ObsHealer`, which only ever touches the process running this app's own
+OBS executable, at most every 3 minutes and 3 times an hour. Electron relaunches it like any exit;
+its relaunch budget refills once OBS has run stably for 2 minutes, so healing keeps working in a
+long session while a real crash loop stays capped. The bundled OBS runs with `--multi`, which skips
+OBS's unclean-shutdown prompt, so the relaunch needs no click. An empty recording is discarded and
+a partial one kept; the next in-match GSI frame starts recording the rest of the match. Each part
+keeps the Dota match id, so every recording of a split match is enriched.
+
 ## The recording brain and its anchor
 
 `MatchFsm` (`fsm/`) interprets normalized GSI frames and owns the record path. The load-bearing

@@ -18,6 +18,7 @@ import dev.dotarec.data.RecordingSessionRepository;
 import dev.dotarec.data.TestDb;
 import dev.dotarec.obs.ObsException;
 import dev.dotarec.obs.ObsRecorder;
+import dev.dotarec.obs.ObsRestarter;
 import dev.dotarec.obs.ThumbnailCapturer;
 import dev.dotarec.tagger.EventTagger;
 import java.nio.file.Path;
@@ -114,7 +115,7 @@ class OrphanedStopRetryTest {
         when(settings.get()).thenReturn(new SettingsStore.Settings());
         fsm = new MatchFsm(obs, obs, new FakeThumbs(), new EventTagger(), matches, markers, pauses,
                 journal, events, ds, clipService, settings, new ObjectMapper(),
-                new TimeSource(nano::get, System::currentTimeMillis));
+                new TimeSource(nano::get, System::currentTimeMillis), ObsRestarter.NONE);
     }
 
     /**

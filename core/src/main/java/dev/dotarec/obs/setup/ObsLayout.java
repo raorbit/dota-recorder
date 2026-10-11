@@ -59,6 +59,14 @@ public final class ObsLayout {
                 .resolve("config.json");
     }
 
+    /**
+     * OBS's per-user frontend config. Its {@code [General] FirstRun} key is what stops OBS from opening
+     * the Auto-Configuration Wizard on a fresh install.
+     */
+    public Path userIni() {
+        return obsStudioConfig().resolve("user.ini");
+    }
+
     /** Directory of our generated recording profile. */
     public Path profileDir() {
         return obsStudioConfig().resolve("basic").resolve("profiles").resolve(PROFILE_NAME);

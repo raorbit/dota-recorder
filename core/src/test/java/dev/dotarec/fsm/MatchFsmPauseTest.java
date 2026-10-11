@@ -21,6 +21,7 @@ import dev.dotarec.data.RecordingSessionRepository;
 import dev.dotarec.data.TestDb;
 import dev.dotarec.obs.ObsException;
 import dev.dotarec.obs.ObsRecorder;
+import dev.dotarec.obs.ObsRestarter;
 import dev.dotarec.obs.ThumbnailCapturer;
 import dev.dotarec.tagger.EventTagger;
 import java.nio.file.Path;
@@ -110,7 +111,8 @@ class MatchFsmPauseTest {
         when(settings.get()).thenReturn(new SettingsStore.Settings());
         fsm = new MatchFsm(
                 obs, obs, new FakeThumbs(), new EventTagger(), matches, markers, pauses, journal,
-                events, ds, clipService, settings, new ObjectMapper(), TimeSource.system());
+                events, ds, clipService, settings, new ObjectMapper(), TimeSource.system(),
+                ObsRestarter.NONE);
     }
 
     @Test
@@ -236,7 +238,7 @@ class MatchFsmPauseTest {
                 clipService,
                 settings,
                 new ObjectMapper(),
-                TimeSource.system());
+                TimeSource.system(), ObsRestarter.NONE);
 
         // Open a pause so finalize has a span to persist -- which then throws and triggers rollback.
         fsmWithBadPauses.onFrame(frame().state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")

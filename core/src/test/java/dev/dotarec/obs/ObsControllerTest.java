@@ -2,7 +2,9 @@ package dev.dotarec.obs;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.doThrow;
@@ -21,9 +23,13 @@ import io.obswebsocket.community.client.message.response.record.GetRecordStatusR
 import io.obswebsocket.community.client.message.response.record.StartRecordResponse;
 import io.obswebsocket.community.client.message.response.record.StopRecordResponse;
 import io.obswebsocket.community.client.message.response.scenes.GetCurrentProgramSceneResponse;
+import io.obswebsocket.community.client.message.response.sources.SaveSourceScreenshotResponse;
 import io.obswebsocket.community.client.model.Input;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -658,5 +664,123 @@ class ObsControllerTest {
         assertThat(health.isSceneActive())
                 .as("connection-lost must still clear sceneActive")
                 .isFalse();
+    }
+
+    /** A connected controller over {@code obs}, for the render probe. */
+    private static ObsController connectedTo(OBSRemoteController obs) {
+        ObsHealth health = new ObsHealth();
+        ObsController controller =
+                new ObsController(null, health, new ObsEvents(health, mock(CaptureBlackFrameGuard.class)), sceneConfigurer());
+        ReflectionTestUtils.setField(controller, "controller", obs);
+        health.setConnected(true);
+        return controller;
+    }
+
+    /** An OBS whose program scene is {@code sceneName}. */
+    private static OBSRemoteController obsWithScene(String sceneName) {
+        OBSRemoteController obs = mock(OBSRemoteController.class);
+        GetCurrentProgramSceneResponse scene = mock(GetCurrentProgramSceneResponse.class);
+        when(scene.isSuccessful()).thenReturn(true);
+        when(scene.getCurrentProgramSceneName()).thenReturn(sceneName);
+        when(obs.getCurrentProgramScene(anyLong())).thenReturn(scene);
+        return obs;
+    }
+
+    /**
+     * Stubs SaveSourceScreenshot to write {@code bytes} where it was asked to and answer
+     * {@code successful}. Returns the temp path OBS was handed.
+     */
+    private static AtomicReference<Path> answerScreenshot(
+            OBSRemoteController obs, boolean successful, byte[] bytes) {
+        SaveSourceScreenshotResponse resp = mock(SaveSourceScreenshotResponse.class);
+        when(resp.isSuccessful()).thenReturn(successful);
+        AtomicReference<Path> requested = new AtomicReference<>();
+        when(obs.saveSourceScreenshot(
+                        anyString(), anyString(), anyString(), any(), any(), any(), anyLong()))
+                .thenAnswer(
+                        inv -> {
+                            Path p = Path.of(inv.getArgument(2, String.class));
+                            requested.set(p);
+                            Files.write(p, bytes);
+                            return resp;
+                        });
+        return requested;
+    }
+
+    @Test
+    void isRenderBroken_whenObsRefusesToShootItsScene_isBroken() {
+        OBSRemoteController obs = obsWithScene("Dota");
+        AtomicReference<Path> requested = answerScreenshot(obs, false, new byte[0]);
+
+        assertThat(connectedTo(obs).isRenderBroken())
+                .as("a scene OBS has but won't draw is the lost-graphics-device signature")
+                .isTrue();
+        assertThat(requested.get()).doesNotExist();
+    }
+
+    @Test
+    void isRenderBroken_whenObsSavesAFrame_isNotBroken() {
+        OBSRemoteController obs = obsWithScene("Dota");
+        AtomicReference<Path> requested = answerScreenshot(obs, true, new byte[] {1, 2, 3});
+
+        assertThat(connectedTo(obs).isRenderBroken()).isFalse();
+        assertThat(requested.get().getFileName().toString())
+                .as("the probe's temp file carries this app's prefix")
+                .startsWith("dotarec-render-probe-");
+        assertThat(requested.get()).doesNotExist();
+    }
+
+    @Test
+    void isRenderBroken_withNoActiveScene_isNotBroken() {
+        // No scene says nothing about the renderer: it must never lead to a restart.
+        OBSRemoteController obs = obsWithScene("");
+
+        assertThat(connectedTo(obs).isRenderBroken()).isFalse();
+        verify(obs, never())
+                .saveSourceScreenshot(
+                        anyString(), anyString(), anyString(), any(), any(), any(), anyLong());
+    }
+
+    @Test
+    void isRenderBroken_whenTheProbeThrows_isNotBroken() {
+        OBSRemoteController obs = mock(OBSRemoteController.class);
+        when(obs.getCurrentProgramScene(anyLong())).thenThrow(new RuntimeException("socket gone"));
+
+        assertThat(connectedTo(obs).isRenderBroken()).isFalse();
+    }
+
+    @Test
+    void isRenderBroken_probesWithinTheShortReadinessTimeout() {
+        // The render probe runs under the MatchFsm monitor (GSI thread before a start, scheduler in
+        // superviseRecording), the same monitor that gates the ForceStopWatchdog. Like isReady(), both
+        // of its calls must use the ~1s READINESS_TIMEOUT_MS so a wedged OBS cannot hold that lock for
+        // a longer budget. Asserting the per-call timeout is the robust check (a wall-clock bound
+        // would only measure the mock).
+        OBSRemoteController obs = obsWithScene("Dota");
+        answerScreenshot(obs, true, new byte[] {1});
+
+        connectedTo(obs).isRenderBroken();
+
+        long readinessTimeoutMs =
+                (long) ReflectionTestUtils.getField(ObsController.class, "READINESS_TIMEOUT_MS");
+        verify(obs).getCurrentProgramScene(readinessTimeoutMs);
+        verify(obs).getCurrentProgramScene(anyLong()); // exactly once, at the readiness timeout
+        verify(obs)
+                .saveSourceScreenshot(
+                        eq("Dota"), eq("png"), anyString(), any(), any(), any(),
+                        eq(readinessTimeoutMs));
+        verify(obs) // exactly once, at the readiness timeout
+                .saveSourceScreenshot(
+                        anyString(), anyString(), anyString(), any(), any(), any(), anyLong());
+    }
+
+    @Test
+    void isRenderBroken_whenNotConnected_isNotBroken() {
+        OBSRemoteController obs = obsWithScene("Dota");
+        ObsController controller = connectedTo(obs);
+        ((ObsHealth) ReflectionTestUtils.getField(controller, "health")).setConnected(false);
+
+        assertThat(controller.isRenderBroken()).isFalse();
+        verify(obs, never()).getCurrentProgramScene(anyLong());
     }
 }

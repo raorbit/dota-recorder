@@ -82,6 +82,12 @@ public class ObsEvents {
                 // sees recording can always read back a non-null start instant, then release any
                 // awaitRecordConfirmed() waiter LAST so it observes both.
                 recordConfirmedAt.set(Instant.now());
+                // A new output owns the STOPPED path from here on. reset() at the top of
+                // ObsController.startRecording runs BEFORE its corrective StopRecord of the previous
+                // recording, whose STOPPED would otherwise leave the old file's path looking like
+                // this recording's. OBS stops the old output before it can start the new one, so
+                // its STOPPED always lands before this STARTED.
+                lastStoppedOutputPath.set(null);
                 health.setRecording(true);
                 CountDownLatch latch = confirmLatch;
                 if (latch != null) {
@@ -155,8 +161,9 @@ public class ObsEvents {
     }
 
     /**
-     * Output path seen on the last STOPPED event, or {@code null}. This is a fallback only -- the
-     * primary path comes from the synchronous StopRecord response.
+     * Output path seen on a STOPPED event since the latest OUTPUT_STARTED, or {@code null}. This is
+     * a fallback only -- the primary path comes from the synchronous StopRecord response -- and is
+     * also what a finalize attaches when OBS ended the output on its own and StopRecord fails.
      */
     public String lastStoppedOutputPath() {
         return lastStoppedOutputPath.get();
