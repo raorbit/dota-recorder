@@ -1,13 +1,8 @@
 package dev.dotarec.obs;
 
 import io.obswebsocket.community.client.OBSRemoteController;
-import io.obswebsocket.community.client.message.response.scenes.GetCurrentProgramSceneResponse;
-import io.obswebsocket.community.client.message.response.sources.SaveSourceScreenshotResponse;
 import jakarta.annotation.PreDestroy;
 import java.awt.image.BufferedImage;
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
@@ -66,7 +61,7 @@ public class CaptureBlackFrameGuard {
     private static final int SAMPLE_WIDTH = 320;
     private static final int SAMPLE_HEIGHT = 180;
     private static final String IMAGE_FORMAT = "png";
-    private static final int COMPRESSION_DEFAULT = -1;
+    private static final String TEMP_PREFIX = "dotarec-blackcheck-";
 
     private final ObsController obs;
     private final ObsHealth health;
@@ -150,8 +145,8 @@ public class CaptureBlackFrameGuard {
      * to catch — the source's base size is 0x0 and OBS refuses a zero-size {@code SaveSourceScreenshot},
      * returning an unsuccessful response we would misread as "unknown" and never warn on. A scene is
      * always canvas-sized and renderable, so it screenshots as a decodable BLACK frame when its only
-     * source is unhooked, and it faithfully measures what is actually encoded into the VOD. Mirrors
-     * {@link ThumbnailService#captureCurrentScene}.
+     * source is unhooked, and it faithfully measures what is actually encoded into the VOD. The
+     * screenshot itself is {@link ProgramScene#screenshot}, shared with the render probe.
      *
      * <p>Package-visible and overridable purely as a test seam: a test can subclass and return a canned
      * luminance to exercise {@link #runCheck()}'s decision without a live OBS.
@@ -161,46 +156,25 @@ public class CaptureBlackFrameGuard {
         if (c == null) {
             return null;
         }
-        GetCurrentProgramSceneResponse scene = c.getCurrentProgramScene(SCREENSHOT_TIMEOUT_MS);
-        if (scene == null
-                || !scene.isSuccessful()
-                || scene.getCurrentProgramSceneName() == null
-                || scene.getCurrentProgramSceneName().isBlank()) {
-            // No active scene to sample -> unknown, not black.
-            return null;
-        }
-        String sceneName = scene.getCurrentProgramSceneName();
-        Path tmp = null;
         try {
-            tmp = Files.createTempFile("dotarec-blackcheck-", "." + IMAGE_FORMAT);
-            SaveSourceScreenshotResponse resp =
-                    c.saveSourceScreenshot(
-                            sceneName,
+            // Only a SAVED shot carries a value. No active scene, a refused screenshot, and an
+            // undecodable image all come back null: unknown, never black. (A refusal is the render
+            // probe's signal, ObsController#isRenderBroken, not this detector's.)
+            return ProgramScene.screenshot(
+                            c,
+                            TEMP_PREFIX,
                             IMAGE_FORMAT,
-                            tmp.toString(),
                             SAMPLE_WIDTH,
                             SAMPLE_HEIGHT,
-                            COMPRESSION_DEFAULT,
-                            SCREENSHOT_TIMEOUT_MS);
-            if (resp == null || !resp.isSuccessful()) {
-                return null;
-            }
-            BufferedImage img = ImageIO.read(tmp.toFile());
-            if (img == null) {
-                return null;
-            }
-            return meanLuma(img);
+                            SCREENSHOT_TIMEOUT_MS,
+                            image -> {
+                                BufferedImage img = ImageIO.read(image.toFile());
+                                return img == null ? null : meanLuma(img);
+                            })
+                    .value();
         } catch (Exception e) {
             log.debug("Black-frame sample failed: {}", e.toString());
             return null;
-        } finally {
-            if (tmp != null) {
-                try {
-                    Files.deleteIfExists(tmp);
-                } catch (IOException ignored) {
-                    // Temp file cleanup is best-effort.
-                }
-            }
         }
     }
 

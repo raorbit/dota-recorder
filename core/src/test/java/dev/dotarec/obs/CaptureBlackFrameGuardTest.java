@@ -1,19 +1,29 @@
 package dev.dotarec.obs;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import dev.dotarec.bridge.EventPublisher;
+import io.obswebsocket.community.client.OBSRemoteController;
+import io.obswebsocket.community.client.message.response.scenes.GetCurrentProgramSceneResponse;
+import io.obswebsocket.community.client.message.response.sources.SaveSourceScreenshotResponse;
 import java.awt.Color;
 import java.awt.image.BufferedImage;
+import java.nio.file.Path;
+import java.util.concurrent.atomic.AtomicReference;
+import javax.imageio.ImageIO;
 import org.junit.jupiter.api.Test;
 
 /**
- * Unit tests for {@link CaptureBlackFrameGuard}: the pure luminance measurement, and the
- * black/non-black decision in {@link CaptureBlackFrameGuard#runCheck()} driven through an overridden
- * sampler so no live OBS is needed.
+ * Unit tests for {@link CaptureBlackFrameGuard}: the pure luminance measurement, the black/non-black
+ * decision in {@link CaptureBlackFrameGuard#runCheck()} driven through an overridden sampler so no
+ * live OBS is needed, and the real sampler against a mocked OBS.
  */
 class CaptureBlackFrameGuardTest {
 
@@ -107,6 +117,64 @@ class CaptureBlackFrameGuardTest {
 
         assertThat(health.isCaptureBlack()).isFalse();
         verify(events, never()).publishStatus();
+    }
+
+    /**
+     * A guard whose REAL sampler runs against a mocked OBS, whose SaveSourceScreenshot answers
+     * {@code successful} after writing {@code frame} (when non-null) as a PNG where it was asked to.
+     * Records the temp path OBS was handed in {@code requested}.
+     */
+    private static CaptureBlackFrameGuard guardShooting(
+            String sceneName, boolean successful, BufferedImage frame, AtomicReference<Path> requested) {
+        OBSRemoteController c = mock(OBSRemoteController.class);
+        GetCurrentProgramSceneResponse scene = mock(GetCurrentProgramSceneResponse.class);
+        when(scene.isSuccessful()).thenReturn(true);
+        when(scene.getCurrentProgramSceneName()).thenReturn(sceneName);
+        when(c.getCurrentProgramScene(anyLong())).thenReturn(scene);
+        SaveSourceScreenshotResponse resp = mock(SaveSourceScreenshotResponse.class);
+        when(resp.isSuccessful()).thenReturn(successful);
+        when(c.saveSourceScreenshot(anyString(), anyString(), anyString(), any(), any(), any(), anyLong()))
+                .thenAnswer(
+                        inv -> {
+                            Path p = Path.of(inv.getArgument(2, String.class));
+                            requested.set(p);
+                            if (frame != null) {
+                                ImageIO.write(frame, "png", p.toFile());
+                            }
+                            return resp;
+                        });
+        ObsController obs = mock(ObsController.class);
+        when(obs.connectedController()).thenReturn(c);
+        return new CaptureBlackFrameGuard(obs, new ObsHealth(), mock(EventPublisher.class));
+    }
+
+    @Test
+    void sampleProgramSceneLuma_measuresTheSavedSceneFrame_andCleansUpItsTempFile() {
+        AtomicReference<Path> requested = new AtomicReference<>();
+        CaptureBlackFrameGuard guard = guardShooting("Dota", true, solid(Color.BLACK), requested);
+
+        assertThat(guard.sampleProgramSceneLuma()).isEqualTo(0.0);
+        assertThat(requested.get().getFileName().toString()).startsWith("dotarec-blackcheck-");
+        assertThat(requested.get()).doesNotExist();
+    }
+
+    @Test
+    void sampleProgramSceneLuma_isUnknownWhenTheScreenshotIsRefused() {
+        // A refusal is the render probe's signal, not black: the guard must not raise a false alarm.
+        AtomicReference<Path> requested = new AtomicReference<>();
+        CaptureBlackFrameGuard guard = guardShooting("Dota", false, null, requested);
+
+        assertThat(guard.sampleProgramSceneLuma()).isNull();
+        assertThat(requested.get()).doesNotExist();
+    }
+
+    @Test
+    void sampleProgramSceneLuma_isUnknownWithNoActiveScene() {
+        AtomicReference<Path> requested = new AtomicReference<>();
+        CaptureBlackFrameGuard guard = guardShooting("", true, solid(Color.BLACK), requested);
+
+        assertThat(guard.sampleProgramSceneLuma()).isNull();
+        assertThat(requested.get()).as("no scene, so nothing was shot").isNull();
     }
 
     @Test

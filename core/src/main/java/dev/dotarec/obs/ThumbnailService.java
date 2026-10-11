@@ -3,7 +3,6 @@ package dev.dotarec.obs;
 import dev.dotarec.config.AppPaths;
 import dev.dotarec.config.SettingsStore;
 import io.obswebsocket.community.client.OBSRemoteController;
-import io.obswebsocket.community.client.message.response.scenes.GetCurrentProgramSceneResponse;
 import io.obswebsocket.community.client.message.response.sources.SaveSourceScreenshotResponse;
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -65,14 +64,12 @@ public class ThumbnailService implements ThumbnailCapturer {
             throw new ObsException("Cannot capture thumbnail: OBS is not connected");
         }
 
-        GetCurrentProgramSceneResponse scene = controller.getCurrentProgramScene(REQUEST_TIMEOUT_MS);
-        if (scene == null
-                || !scene.isSuccessful()
-                || scene.getCurrentProgramSceneName() == null
-                || scene.getCurrentProgramSceneName().isBlank()) {
+        // Only the lookup is shared (ProgramScene): the thumbnail is saved to a persistent path, not
+        // a temp file, and a failure here is an error for the caller rather than a verdict.
+        String sceneName = ProgramScene.currentName(controller, REQUEST_TIMEOUT_MS);
+        if (sceneName == null) {
             throw new ObsException("Cannot capture thumbnail: no active OBS program scene");
         }
-        String sceneName = scene.getCurrentProgramSceneName();
 
         Path out = thumbPathFor(id);
         ensureParent(out);

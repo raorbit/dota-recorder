@@ -11,11 +11,7 @@ import io.obswebsocket.community.client.message.response.inputs.GetInputMuteResp
 import io.obswebsocket.community.client.message.response.record.GetRecordStatusResponse;
 import io.obswebsocket.community.client.message.response.record.StopRecordResponse;
 import io.obswebsocket.community.client.message.response.scenes.GetCurrentProgramSceneResponse;
-import io.obswebsocket.community.client.message.response.sources.SaveSourceScreenshotResponse;
 import io.obswebsocket.community.client.model.Input;
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.time.Instant;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -85,6 +81,7 @@ public class ObsController implements ObsRecorder, MatchFsm.RecordStatusProbe {
 
     private static final int RENDER_PROBE_WIDTH = 64;
     private static final int RENDER_PROBE_HEIGHT = 36;
+    private static final String RENDER_PROBE_TEMP_PREFIX = "dotarec-render-probe-";
 
     /** How long to wait for the websocket to become identified/ready after connect(). */
     private static final int CONNECT_TIMEOUT_SECONDS = 3;
@@ -378,43 +375,25 @@ public class ObsController implements ObsRecorder, MatchFsm.RecordStatusProbe {
         if (c == null) {
             return false;
         }
-        Path tmp = null;
         try {
-            GetCurrentProgramSceneResponse scene =
-                    c.getCurrentProgramScene(RENDER_PROBE_TIMEOUT_MS);
-            if (scene == null
-                    || !scene.isSuccessful()
-                    || scene.getCurrentProgramSceneName() == null
-                    || scene.getCurrentProgramSceneName().isBlank()) {
-                return false;
-            }
-            tmp = Files.createTempFile("dotarec-render-probe-", ".png");
-            SaveSourceScreenshotResponse resp =
-                    c.saveSourceScreenshot(
-                            scene.getCurrentProgramSceneName(),
-                            "png",
-                            tmp.toString(),
-                            RENDER_PROBE_WIDTH,
-                            RENDER_PROBE_HEIGHT,
-                            -1,
-                            RENDER_PROBE_TIMEOUT_MS);
-            boolean rendered = resp != null && resp.isSuccessful() && Files.size(tmp) > 0;
-            if (!rendered) {
+            // No active scene is NOT broken: only a refusal of a scene OBS does have counts.
+            boolean refused =
+                    ProgramScene.screenshot(
+                                    c,
+                                    RENDER_PROBE_TEMP_PREFIX,
+                                    "png",
+                                    RENDER_PROBE_WIDTH,
+                                    RENDER_PROBE_HEIGHT,
+                                    RENDER_PROBE_TIMEOUT_MS)
+                            == ProgramScene.Outcome.REFUSED;
+            if (refused) {
                 // Debug only: callers probe repeatedly and log the decision they take on it.
                 log.debug("OBS refused to render its scene (graphics device lost?)");
             }
-            return !rendered;
+            return refused;
         } catch (Exception e) {
             log.debug("OBS render probe failed: {}", e.toString());
             return false;
-        } finally {
-            if (tmp != null) {
-                try {
-                    Files.deleteIfExists(tmp);
-                } catch (IOException ignored) {
-                    // Temp file cleanup is best-effort.
-                }
-            }
         }
     }
 
