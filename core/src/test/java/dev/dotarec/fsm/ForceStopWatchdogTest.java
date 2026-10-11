@@ -31,6 +31,15 @@ class ForceStopWatchdogTest {
     }
 
     @Test
+    void everyTick_letsTheFsmReleaseIdleAudio() {
+        when(fsm.getState()).thenReturn(MatchState.IDLE);
+
+        watchdog.tick();
+
+        verify(fsm, times(1)).releaseIdleAudio();
+    }
+
+    @Test
     void fires_whenRecordingAndStale() {
         when(fsm.getState()).thenReturn(MatchState.RECORDING);
         // Last authorized frame 31s ago: past the 30s threshold.

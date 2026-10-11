@@ -9,6 +9,7 @@ import static org.mockito.Mockito.when;
 
 import dev.dotarec.bridge.PreviewController.ScenePreview;
 import dev.dotarec.obs.ObsController;
+import dev.dotarec.obs.ObsDemand;
 import dev.dotarec.obs.ObsSceneConfigurer;
 import io.obswebsocket.community.client.OBSRemoteController;
 import io.obswebsocket.community.client.message.response.sources.GetSourceScreenshotResponse;
@@ -35,7 +36,7 @@ class PreviewControllerTest {
         ObsController obs = mock(ObsController.class);
         when(obs.ensureConnected()).thenReturn(false);
 
-        assertThat(new PreviewController(obs).preview().dataUri()).isNull();
+        assertThat(new PreviewController(obs, mock(ObsDemand.class)).preview().dataUri()).isNull();
     }
 
     @Test
@@ -44,7 +45,7 @@ class PreviewControllerTest {
         when(obs.ensureConnected()).thenReturn(true);
         when(obs.connectedController()).thenReturn(null);
 
-        assertThat(new PreviewController(obs).preview().dataUri()).isNull();
+        assertThat(new PreviewController(obs, mock(ObsDemand.class)).preview().dataUri()).isNull();
     }
 
     @Test
@@ -57,7 +58,7 @@ class PreviewControllerTest {
         when(resp.isSuccessful()).thenReturn(true);
         when(resp.getImageData()).thenReturn("data:image/jpeg;base64,AAAA");
 
-        assertThat(new PreviewController(obs).preview().dataUri())
+        assertThat(new PreviewController(obs, mock(ObsDemand.class)).preview().dataUri())
                 .isEqualTo("data:image/jpeg;base64,AAAA");
     }
 
@@ -70,7 +71,7 @@ class PreviewControllerTest {
         GetSourceScreenshotResponse resp = screenshot(c);
         when(resp.isSuccessful()).thenReturn(false);
 
-        assertThat(new PreviewController(obs).preview().dataUri()).isNull();
+        assertThat(new PreviewController(obs, mock(ObsDemand.class)).preview().dataUri()).isNull();
     }
 
     @Test
@@ -83,7 +84,7 @@ class PreviewControllerTest {
         when(resp.isSuccessful()).thenReturn(true);
         when(resp.getImageData()).thenReturn(null);
 
-        assertThat(new PreviewController(obs).preview().dataUri()).isNull();
+        assertThat(new PreviewController(obs, mock(ObsDemand.class)).preview().dataUri()).isNull();
     }
 
     @Test
@@ -97,6 +98,6 @@ class PreviewControllerTest {
                 .thenThrow(new RuntimeException("boom"));
 
         // The endpoint swallows the exception and degrades; it must not propagate / 500.
-        assertThat(new PreviewController(obs).preview().dataUri()).isNull();
+        assertThat(new PreviewController(obs, mock(ObsDemand.class)).preview().dataUri()).isNull();
     }
 }

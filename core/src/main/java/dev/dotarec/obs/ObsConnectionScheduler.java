@@ -1,7 +1,6 @@
 package dev.dotarec.obs;
 
 import dev.dotarec.bridge.EventPublisher;
-import io.obswebsocket.community.client.OBSRemoteController;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -16,10 +15,12 @@ import org.springframework.stereotype.Component;
  * retry loop is what lets Electron simply spawn OBS and walk away: the core auto-connects and
  * configures as soon as OBS's websocket comes up, with no extra IPC or manual trigger after spawn.
  *
+ * <p>OBS runs only on demand (see {@link ObsDemand}), so while it is neither wanted nor connected a
+ * tick doesn't try to connect: there is no OBS to reach, and each attempt would log a warning.
+ *
  * <p>A failed tick (OBS not yet reachable, a transient request error) only logs at debug and is
- * retried on the next tick; nothing here is fatal. The {@code controller()} accessor on
- * {@link ObsController} is package-private, which is exactly the in-package hook this scheduler
- * uses to hand the live controller to the configurer.
+ * retried on the next tick; nothing here is fatal. Scene setup runs through the package-private
+ * {@link ObsController#configureScene()}, which also decides whether the audio captures belong in it.
  */
 @Component
 public class ObsConnectionScheduler {
@@ -27,7 +28,8 @@ public class ObsConnectionScheduler {
     private static final Logger log = LoggerFactory.getLogger(ObsConnectionScheduler.class);
 
     private final ObsController obsController;
-    private final ObsSceneConfigurer sceneConfigurer;
+    private final ObsHealth health;
+    private final ObsDemand demand;
     private final EventPublisher eventPublisher;
 
     /**
@@ -43,23 +45,28 @@ public class ObsConnectionScheduler {
 
     public ObsConnectionScheduler(
             ObsController obsController,
-            ObsSceneConfigurer sceneConfigurer,
+            ObsHealth health,
+            ObsDemand demand,
             EventPublisher eventPublisher) {
         this.obsController = obsController;
-        this.sceneConfigurer = sceneConfigurer;
+        this.health = health;
+        this.demand = demand;
         this.eventPublisher = eventPublisher;
     }
 
     @Scheduled(fixedRate = 5_000) // every 5 seconds
     public void tryConnectAndConfigure() {
         try {
+            if (!health.isConnected() && !demand.isWanted()) {
+                wasConnected = false;
+                return; // OBS is stopped on purpose; nothing to connect to
+            }
             boolean connected = obsController.ensureConnected(); // idempotent; no-op if connected
             // Configure on the disconnected->connected EDGE. ensureSceneReady is idempotent, so
             // re-running it on a reconnect is a cheap no-op, but it also self-heals a relaunched OBS.
             if (connected && !wasConnected) {
-                OBSRemoteController controller = obsController.controller();
-                if (controller != null) {
-                    sceneConfigurer.ensureSceneReady(controller);
+                if (obsController.controller() != null) {
+                    obsController.configureScene();
                     log.info("OBS scene configured on connect");
                     loggedConfigError = false;
                 }

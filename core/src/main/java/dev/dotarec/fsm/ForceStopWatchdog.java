@@ -25,7 +25,8 @@ import org.springframework.stereotype.Component;
  * endpoint cannot keep a runaway recording alive past a real GSI silence.
  *
  * <p>Each tick also drives {@link MatchFsm#superviseRecording()}, which restarts an OBS that has
- * stopped writing the recording.
+ * stopped writing the recording, and {@link MatchFsm#releaseIdleAudio()}, which drops the audio
+ * captures once no match needs them.
  *
  * <p>Threading: this runs on the Spring scheduler thread while {@link MatchFsm#onFrame} runs on the
  * GSI request thread. Both {@code onFrame} and {@code forceFinalize} are {@code synchronized} on the
@@ -66,6 +67,7 @@ public class ForceStopWatchdog {
     public void tick() {
         // First, so a recording OBS stopped writing is healed before the silence check looks at it.
         fsm.superviseRecording();
+        fsm.releaseIdleAudio();
         if (fsm.getState() != MatchState.RECORDING) {
             return;
         }

@@ -134,9 +134,10 @@ public class MatchFsm {
      * failure while OBS still reports the output active, cleared when the output is stopped / goes
      * inactive / can no longer be attributed to us, or when a new match arms. Guarded by the FSM
      * monitor like {@link #session}. In-memory only: an app quit loses it, and the next boot's orphan
-     * scan adopts the file instead.
+     * scan adopts the file instead. Volatile only so {@link #hasPendingOrphanedStop()} can read it
+     * without the monitor; every write still happens under it.
      */
-    private OrphanedStop orphanedStop;
+    private volatile OrphanedStop orphanedStop;
 
     /** Latches the once-per-demo-session "not recording" log so the ~10Hz feed can't spam it. */
     private boolean demoSkipLogged;
@@ -199,6 +200,25 @@ public class MatchFsm {
 
     public MatchState getState() {
         return state;
+    }
+
+    /**
+     * Whether a stop-failed output is still being retried, so OBS must stay up for it. Lock-free, for
+     * the OBS demand check that a status poll runs.
+     */
+    public boolean hasPendingOrphanedStop() {
+        return orphanedStop != null;
+    }
+
+    /**
+     * Watchdog tick: lets OBS drop the audio captures it only holds for recording once no match is
+     * arming or recording. Under the monitor so it can't detach between a start's attach and its
+     * StartRecord.
+     */
+    public synchronized void releaseIdleAudio() {
+        if (state == MatchState.IDLE && orphanedStop == null && !obs.isRecording()) {
+            obs.detachIdleAudio();
+        }
     }
 
     /** The in-flight session, or null when IDLE. Exposed for tests/diagnostics. */
@@ -525,6 +545,9 @@ public class MatchFsm {
             log.warn("Cannot start recording: OBS not connected; will retry on next frame");
             return;
         }
+        // The audio captures exist only while a match records (idle OBS holds no audio device), so
+        // add them before the readiness gate, which checks for a live one.
+        obs.attachAudio();
         // Readiness gate: OBS connected but with no active program scene or a muted/absent
         // desktop-audio input would capture a black/silent file against a green GSI card. Stay IDLE
         // and retry rather than record nothing -- we armed early (HERO_SELECTION), so there is slack.

@@ -15,6 +15,7 @@ import io.obswebsocket.community.client.model.Input;
 import java.time.Instant;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.function.LongSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -86,6 +87,13 @@ public class ObsController implements ObsRecorder, MatchFsm.RecordStatusProbe {
     private static final int RENDER_PROBE_HEIGHT = 36;
     private static final String RENDER_PROBE_TEMP_PREFIX = "dotarec-render-probe-";
 
+    /**
+     * How long after the last {@link #attachAudio()} the captures are kept while nothing records. A
+     * start that isn't ready yet re-attaches on every frame, so this only runs out once no match is
+     * arming.
+     */
+    static final long AUDIO_IDLE_RELEASE_MS = 30_000L;
+
     /** How long to wait for the websocket to become identified/ready after connect(). */
     private static final int CONNECT_TIMEOUT_SECONDS = 3;
 
@@ -123,6 +131,26 @@ public class ObsController implements ObsRecorder, MatchFsm.RecordStatusProbe {
      */
     private volatile boolean connectionReady;
 
+    /**
+     * Whether the audio captures should be in OBS: set by {@link #attachAudio()}, cleared by {@link
+     * #detachIdleAudio()}. The scene setup on (re)connect applies it, so a reconnect mid-recording
+     * keeps the audio and one between matches doesn't bring it back.
+     */
+    private volatile boolean audioWanted;
+
+    /** {@link #nanoTime} of the last {@link #attachAudio()}. */
+    private volatile long audioWantedAtNanos;
+
+    /** Monotonic clock for the audio release delay; a test swaps it to step time. */
+    private LongSupplier nanoTime = System::nanoTime;
+
+    /**
+     * The audio state applied to the current connection, or null when not applied yet (a fresh
+     * connection, or an apply that couldn't run). Lets {@link #attachAudio()} stay a no-op on the
+     * ~10Hz start retries. Guarded by {@code this}.
+     */
+    private Boolean audioApplied;
+
     public ObsController(
             SettingsStore settings,
             ObsHealth health,
@@ -149,7 +177,58 @@ public class ObsController implements ObsRecorder, MatchFsm.RecordStatusProbe {
         if (c == null) {
             return;
         }
-        sceneConfigurer.reconcileAudioInputs(c);
+        // Between matches the captures are detached; an edit then only needs persisting, and the next
+        // attach applies it.
+        boolean attach = audioWanted;
+        sceneConfigurer.reconcileAudioInputs(c, attach);
+        audioApplied = attach;
+    }
+
+    /**
+     * Configures the recorder scene on a fresh connection, with the audio captures present only while
+     * a recording wants them. Called by {@link ObsConnectionScheduler} on each connect edge.
+     */
+    synchronized void configureScene() throws Exception {
+        OBSRemoteController c = this.controller;
+        if (c == null) {
+            return;
+        }
+        boolean attach = audioWanted;
+        sceneConfigurer.ensureSceneReady(c, attach);
+        audioApplied = attach;
+    }
+
+    @Override
+    public synchronized void attachAudio() {
+        audioWantedAtNanos = nanoTime.getAsLong();
+        audioWanted = true;
+        if (Boolean.TRUE.equals(audioApplied)) {
+            return;
+        }
+        OBSRemoteController c = connectedController();
+        if (c == null) {
+            return; // the next connect's scene setup attaches it
+        }
+        sceneConfigurer.reconcileAudioInputs(c, true);
+        audioApplied = Boolean.TRUE;
+        log.info("Attached audio captures for recording");
+    }
+
+    @Override
+    public synchronized void detachIdleAudio() {
+        if (!audioWanted
+                || nanoTime.getAsLong() - audioWantedAtNanos < AUDIO_IDLE_RELEASE_MS * 1_000_000L) {
+            return;
+        }
+        audioWanted = false;
+        OBSRemoteController c = connectedController();
+        if (c == null) {
+            audioApplied = null; // the next connect's scene setup leaves it detached
+            return;
+        }
+        sceneConfigurer.reconcileAudioInputs(c, false);
+        audioApplied = Boolean.FALSE;
+        log.info("Released audio captures; no match is recording");
     }
 
     @Override
@@ -165,6 +244,7 @@ public class ObsController implements ObsRecorder, MatchFsm.RecordStatusProbe {
 
         OBSRemoteController c = buildController(s, latch);
         this.controller = c;
+        this.audioApplied = null; // a new connection (maybe a new OBS) has nothing applied yet
         events.reset();
         c.connect();
     }

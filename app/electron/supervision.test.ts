@@ -315,6 +315,52 @@ describe('SupervisionController — OBS crash & launch', () => {
     expect(deps.log).toHaveBeenCalledWith(expect.stringContaining('exceeded restart attempts'));
   });
 
+  it('reports giving up, and a budget reset lets OBS relaunch again', async () => {
+    // OBS runs on demand: once a need ends, the next one starts with a fresh crash budget.
+    const deps = makeDeps();
+    const controller = new SupervisionController(deps, 1);
+
+    controller.handleObsCrash(exit);
+    await flush();
+    expect(controller.hasObsGivenUp()).toBe(false);
+    controller.handleObsCrash(exit); // budget exhausted
+    await flush();
+    expect(controller.hasObsGivenUp()).toBe(true);
+
+    controller.resetObsBudget();
+    expect(controller.hasObsGivenUp()).toBe(false);
+    controller.handleObsCrash(exit);
+    await flush();
+    expect(deps.startObs).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports a launch in flight', async () => {
+    const pending = deferred<void>();
+    const deps = makeDeps({ startObs: vi.fn(() => pending.promise) });
+    const controller = new SupervisionController(deps);
+
+    const launch = controller.launchObs();
+    expect(controller.isObsLaunching()).toBe(true);
+    pending.resolve();
+    await launch;
+    expect(controller.isObsLaunching()).toBe(false);
+  });
+
+  it('a recovered core clears an OBS that had given up', async () => {
+    const deps = makeDeps();
+    const controller = new SupervisionController(deps, 1);
+    controller.handleObsCrash(exit);
+    await flush();
+    controller.handleObsCrash(exit);
+    await flush();
+    expect(controller.hasObsGivenUp()).toBe(true);
+
+    await controller.handleCoreCrash(exit);
+    await flush();
+
+    expect(controller.hasObsGivenUp()).toBe(false);
+  });
+
   it('gives the relaunch budget back once OBS has run stably', async () => {
     // A days-long tray session: the core restarts a wedged OBS (GPU driver update) now and then. Each
     // relaunch that then runs fine must not count toward the crash-loop budget.

@@ -67,6 +67,19 @@ public interface ObsRecorder {
     }
 
     /**
+     * Adds the configured audio captures to OBS ahead of a recording. Idle OBS holds none, so no
+     * audio device is kept open between matches. Idempotent and best-effort: a failure leaves the
+     * readiness gate to decide whether the start can go ahead.
+     */
+    default void attachAudio() {}
+
+    /**
+     * Removes the audio captures {@link #attachAudio()} added, once no start has asked for them for a
+     * while. The caller guarantees nothing is recording.
+     */
+    default void detachIdleAudio() {}
+
+    /**
      * Sends StartRecord and BLOCKS until OBS confirms the recording is really rolling (the
      * OUTPUT_STARTED event), returning that confirmed instant as an ISO-8601 string. On return
      * {@link #recordConfirmedAt()} is non-null and fresh for THIS recording, so the caller can anchor

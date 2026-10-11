@@ -65,6 +65,7 @@ export class SupervisionController {
   private corePendingRecrash = false;
   private obsLaunching = false;
   private obsRelaunchPending = false;
+  private obsGaveUp = false;
   private lastObsRelaunchAt = Number.NEGATIVE_INFINITY;
 
   /**
@@ -114,6 +115,26 @@ export class SupervisionController {
     }
   }
 
+  /** A launch or crash relaunch is in flight. */
+  isObsLaunching(): boolean {
+    return this.obsLaunching;
+  }
+
+  /** Whether OBS crash-looped through its relaunch budget and was left down. */
+  hasObsGivenUp(): boolean {
+    return this.obsGaveUp;
+  }
+
+  /**
+   * Start OBS's crash budget over. OBS runs on demand (see obs-demand.ts), so a new period of need,
+   * after it was stopped for being unneeded, is a fresh start rather than more of an old crash loop.
+   */
+  resetObsBudget(): void {
+    this.obsRestartAttempts = 0;
+    this.obsGaveUp = false;
+    this.lastObsRelaunchAt = Number.NEGATIVE_INFINITY;
+  }
+
   /** OBS crashed (exited without a stop()). Bounded-relaunch it. */
   handleObsCrash(info: ChildExit): void {
     if (this.deps.isShuttingDown()) return;
@@ -126,6 +147,7 @@ export class SupervisionController {
       this.deps.log(
         '[obs] exceeded restart attempts; leaving OBS down (recorder will show not ready)',
       );
+      this.obsGaveUp = true;
       return;
     }
     this.obsRestartAttempts += 1;
@@ -208,7 +230,7 @@ export class SupervisionController {
           }
           this.deps.log('[core] restarted; relaunching OBS');
           this.coreRestartAttempts = 0; // a recovered core gets its restart budget back (over a long tray session)
-          this.obsRestartAttempts = 0; // a fresh core epoch gets a fresh OBS restart budget
+          this.resetObsBudget(); // a fresh core epoch gets a fresh OBS restart budget
           void this.launchObs();
           return; // success: leave the loop and the handler
         } catch (err) {

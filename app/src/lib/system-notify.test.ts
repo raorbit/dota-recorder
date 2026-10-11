@@ -19,7 +19,7 @@ function mkStatus(recording: boolean, fsmState: string): Status {
     gsiConnected: true,
     snapshot: {
       gsi: { connected: true, lastFrameAgoMs: 0 },
-      obs: { connected: true, sceneActive: true, recording, captureBlack: false },
+      obs: { connected: true, sceneActive: true, recording, captureBlack: false, wanted: true },
       fsm: { state: fsmState, activeMatchId: null },
     },
   };

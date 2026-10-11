@@ -38,7 +38,8 @@ import org.springframework.stereotype.Component;
  *   <li>input {@code "Game Capture"} of kind {@code game_capture} exists in that scene, locked to
  *       the Dota window ({@code capture_mode=window}, {@code window="Dota 2:SDL_app:dota2.exe"}, exe
  *       priority) so it never hooks some other fullscreen app;
- *   <li>the user's audio source list is reconciled into {@code dotarec:<id>}-named WASAPI inputs;
+ *   <li>the user's audio source list is reconciled into {@code dotarec:<id>}-named WASAPI inputs
+ *       while a recording wants them, and removed otherwise (see {@link #reconcileAudioInputs});
  *   <li>{@code "Dota"} is the current program scene.
  * </ul>
  *
@@ -162,13 +163,22 @@ public class ObsSceneConfigurer {
      * @throws Exception on a fatal, non-recoverable OBS error
      */
     public void ensureSceneReady(OBSRemoteController controller) throws Exception {
+        ensureSceneReady(controller, true);
+    }
+
+    /**
+     * {@link #ensureSceneReady(OBSRemoteController)}, with the audio captures present only when
+     * {@code attachAudio} (a recording is arming or running).
+     */
+    public void ensureSceneReady(OBSRemoteController controller, boolean attachAudio)
+            throws Exception {
         if (controller == null) {
             throw new IllegalArgumentException("Controller cannot be null");
         }
         ensureScene(controller);
         ensureGameCaptureInput(controller);
         fitGameCaptureToCanvas(controller);
-        reconcileAudioInputs(controller);
+        reconcileAudioInputs(controller, attachAudio);
         ensureProgramScene(controller);
         log.info("OBS scene '{}' is fully configured and active", SCENE_NAME);
     }
@@ -373,10 +383,21 @@ public class ObsSceneConfigurer {
      * create/setSettings/remove sequences against the same OBS inputs.
      */
     public synchronized void reconcileAudioInputs(OBSRemoteController controller) {
+        reconcileAudioInputs(controller, true);
+    }
+
+    /**
+     * {@link #reconcileAudioInputs(OBSRemoteController)}, or with {@code attach} false, removes every
+     * {@code dotarec:} input instead. Removing (not muting) is what releases the device: a muted
+     * WASAPI input still captures, and an idle OBS holding the user's output device open was enough
+     * to stutter browser video. The settings stay the source of truth and are re-applied by the next
+     * attach.
+     */
+    public synchronized void reconcileAudioInputs(OBSRemoteController controller, boolean attach) {
         if (controller == null) {
             return;
         }
-        List<AudioSource> desired = settings.get().audioSources;
+        List<AudioSource> desired = attach ? settings.get().audioSources : List.of();
         if (desired == null) {
             desired = List.of();
         }
@@ -552,7 +573,9 @@ public class ObsSceneConfigurer {
     /**
      * Builds the OBS settings JSON for a source's kind. output/input -> {@code {device_id}} (literal
      * {@code "default"} when target is null/blank — an EMPTY settings object was the root cause of the
-     * old failing add); application -> {@code {window, priority:2}} (priority 2 = WINDOW_PRIORITY_EXE,
+     * old failing add), and output also turns off {@code use_device_timing}: OBS defaults it on for
+     * desktop audio, and timestamping by the device clock is what kept the desktop capture drifting
+     * into "audio is lagging ... Restarting source audio" and re-opening the device; application -> {@code {window, priority:2}} (priority 2 = WINDOW_PRIORITY_EXE,
      * match by executable; an empty window for a null/blank target matches nothing but still creates
      * the input).
      */
@@ -566,6 +589,9 @@ public class ObsSceneConfigurer {
             String deviceId =
                     (s.target() == null || s.target().isBlank()) ? "default" : s.target();
             json.addProperty("device_id", deviceId);
+            if ("output".equals(s.kind())) {
+                json.addProperty("use_device_timing", false);
+            }
         }
         return json;
     }
