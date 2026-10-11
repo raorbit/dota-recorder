@@ -89,8 +89,10 @@ public class ObsConfigWriter {
         ensureSettings();
         firstRunCopy(layout);
         writeWebsocketConfig(layout);
-        markFirstRunDone(layout);
         writeProfile(layout);
+        // AFTER the profile and best-effort (it never throws): the profile is what records; the
+        // first-run flag only keeps a wizard from opening, so its failure must not cost the profile.
+        markFirstRunDone(layout);
         log.info("OBS auto-config ready at {}", layout.root());
     }
 
@@ -263,6 +265,14 @@ public class ObsConfigWriter {
      * request, logged nothing, and never emitted OUTPUT_STARTED.
      *
      * <p>Merges rather than overwrites: OBS keeps its own frontend state in the same file.
+     *
+     * <p>Best-effort: a failure is logged, never thrown. This used to throw and ran BEFORE
+     * {@link #writeProfile}, so a non-essential edit (e.g. an AV scanner briefly locking a just-created
+     * {@code user.ini} on first run) aborted {@link #configure} before {@code basic.ini} (encoder,
+     * output path) was written, and {@link ObsConfigBootstrap} never marked readiness: a cosmetic
+     * write blocked all recording. A missed flag costs at most the wizard on that launch, and the next
+     * startup's configure() retries it. Catches both the read's {@link IOException} and the
+     * {@link UncheckedIOException} that {@link #writeAtomically} throws.
      */
     private static void markFirstRunDone(ObsLayout layout) {
         Path file = layout.userIni();
@@ -272,8 +282,12 @@ public class ObsConfigWriter {
             if (!updated.equals(current)) {
                 writeAtomically(file, updated);
             }
-        } catch (IOException e) {
-            throw new UncheckedIOException("Failed to update OBS user config: " + file, e);
+        } catch (IOException | UncheckedIOException e) {
+            log.warn(
+                    "Could not set FirstRun in OBS user config {}; OBS's Auto-Configuration Wizard may"
+                            + " open on first launch and hold recording until dismissed: {}",
+                    file,
+                    e.toString());
         }
     }
 

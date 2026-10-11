@@ -77,6 +77,38 @@ class ObsConfigWriterTest {
     }
 
     @Test
+    void unreadableUserIni_stillWritesTheProfileAndCompletes(@TempDir Path dir) throws Exception {
+        // Regression: the FirstRun edit ran BEFORE writeProfile and threw, so a briefly locked
+        // user.ini (e.g. an AV scan on first run) aborted configure() before basic.ini was written and
+        // ObsConfigBootstrap never marked readiness -- a cosmetic write blocked all recording.
+        // Occupying user.ini's path with a DIRECTORY makes its read fail reliably on Windows and Linux.
+        AppPaths paths = paths(dir);
+        ObsLayout layout = new ObsLayout(paths.obsDir());
+        Files.createDirectories(layout.userIni());
+
+        writer(paths, new SettingsStore(paths), "", "0").configure();
+
+        assertThat(Files.readString(layout.profileIni())).contains("Mode=Simple");
+        assertThat(layout.websocketConfig()).exists();
+        assertThat(layout.userIni()).isDirectory();
+    }
+
+    @Test
+    void unwritableUserIni_stillWritesTheProfileAndCompletes(@TempDir Path dir) throws Exception {
+        // The write-side twin: writeAtomically throws UncheckedIOException (not IOException) when its
+        // sibling .tmp cannot be written -- occupied here by a DIRECTORY -- and that is swallowed too.
+        AppPaths paths = paths(dir);
+        ObsLayout layout = new ObsLayout(paths.obsDir());
+        Path tmp = layout.userIni().resolveSibling(layout.userIni().getFileName() + ".tmp");
+        Files.createDirectories(tmp);
+
+        writer(paths, new SettingsStore(paths), "", "0").configure();
+
+        assertThat(Files.readString(layout.profileIni())).contains("Mode=Simple");
+        assertThat(layout.userIni()).doesNotExist();
+    }
+
+    @Test
     void firstRunDone_mergesIntoOBSsOwnUserIni() {
         // The shape OBS itself writes: UTF-8 BOM, LF endings, [General] first, no FirstRun yet.
         String obs = "\uFEFF[General]\nPre19Defaults=false\nConfirmOnExit=true\n\n[BasicWindow]\nPreviewEnabled=true\n";
