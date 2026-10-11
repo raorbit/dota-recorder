@@ -388,7 +388,7 @@ public class ObsController implements ObsRecorder, MatchFsm.RecordStatusProbe {
                     || scene.getCurrentProgramSceneName().isBlank()) {
                 return false;
             }
-            tmp = Files.createTempFile("dlrec-render-probe-", ".png");
+            tmp = Files.createTempFile("dotarec-render-probe-", ".png");
             SaveSourceScreenshotResponse resp =
                     c.saveSourceScreenshot(
                             scene.getCurrentProgramSceneName(),
