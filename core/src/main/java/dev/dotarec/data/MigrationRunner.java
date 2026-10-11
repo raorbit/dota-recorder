@@ -36,10 +36,11 @@ import java.util.concurrent.atomic.AtomicInteger;
  * the safety net for what a rollback cannot undo (a script that commits but is wrong, a corrupt file).
  *
  * <p>Every script runs under SQLite's documented 12-step ALTER procedure, because a table rebuild
- * (create new / copy / DROP old / rename -- the only way to drop a column constraint such as a
- * {@code UNIQUE}) is destructive with foreign keys on: DROP TABLE on a parent table performs an
- * implicit DELETE that FIRES the children's {@code ON DELETE CASCADE}, silently wiping every marker,
- * pause and clip of every match. So {@code applyScript}:
+ * (create new / copy / DROP old / rename -- the only way to drop a column constraint, such as V7
+ * dropping the {@code UNIQUE} on {@code matches.dota_match_id}) is destructive with foreign keys on:
+ * DROP TABLE on a parent table performs an implicit DELETE that FIRES the children's
+ * {@code ON DELETE CASCADE}, silently wiping every marker, pause and clip of every match. So
+ * {@code applyScript}:
  * <ol>
  *   <li>switches {@code foreign_keys} OFF while still in autocommit and reads it back -- the pragma
  *       is a silent no-op inside a transaction, and this connection BEGINs IMMEDIATE the moment
@@ -63,7 +64,7 @@ public class MigrationRunner implements ApplicationRunner {
 
     private static final Logger log = LoggerFactory.getLogger(MigrationRunner.class);
 
-    public static final int LATEST_VERSION = 6;
+    public static final int LATEST_VERSION = 7;
     private static final String[] SCRIPTS = {
         "db/migration/V1__init.sql",
         "db/migration/V2__enrich_retry.sql",
@@ -71,6 +72,7 @@ public class MigrationRunner implements ApplicationRunner {
         "db/migration/V4__clips.sql",
         "db/migration/V5__clip_starred.sql",
         "db/migration/V6__clip_generation_started.sql",
+        "db/migration/V7__matches_dota_match_id_not_unique.sql",
     };
 
     private final DataSource dataSource;
