@@ -50,6 +50,14 @@ public class ObsHealer implements ObsRestarter {
 
     private static final long EXIT_WAIT_MS = 5_000L;
 
+    /**
+     * After a call that found no OBS process to end, how long before scanning the process table
+     * again. Such a call spends no cooldown or budget (nothing was restarted), but the FSM asks on
+     * every render probe, and each scan walks every process on the machine while the caller holds
+     * the MatchFsm monitor. Short, so the next real restart is never held up for long.
+     */
+    static final long NO_PROCESS_RETRY_MS = 30_000L;
+
     /** Finds and ends processes by executable path. Seam for tests. */
     public interface ProcessControl {
         /** Ends every process whose executable is {@code exe}; returns how many were ended. */
@@ -67,6 +75,12 @@ public class ObsHealer implements ObsRestarter {
      * every few seconds until the hour frees up. Re-armed as soon as the window has room again.
      */
     private boolean capRefusalLogged;
+
+    /** When the last call found no OBS process to end; null once one was ended again. */
+    private Long lastNoProcessNanos;
+
+    /** Latches the "no process is running" warning to once per episode, like the cap refusal. */
+    private boolean noProcessLogged;
 
     @Autowired
     public ObsHealer(AppPaths paths, TimeSource time) {
@@ -105,14 +119,30 @@ public class ObsHealer implements ObsRestarter {
             return false;
         }
         capRefusalLogged = false;
+        if (lastNoProcessNanos != null
+                && now - lastNoProcessNanos < NO_PROCESS_RETRY_MS * 1_000_000L) {
+            log.debug("Not restarting OBS ({}): no process was running {}s ago", reason,
+                    (now - lastNoProcessNanos) / 1_000_000_000L);
+            return false;
+        }
         int killed = processes.killAll(obsExecutable, EXIT_WAIT_MS);
         if (killed == 0) {
             // Nothing was ended (e.g. Electron is mid-relaunch), so nothing was spent: no cooldown
             // starts and the hourly budget is untouched, leaving the next real restart free to run.
-            log.warn("OBS needs a restart ({}) but no process is running {}", reason,
-                    obsExecutable);
+            // Only the rescan backs off briefly, and the warning fires once per episode.
+            lastNoProcessNanos = now;
+            if (noProcessLogged) {
+                log.debug("OBS needs a restart ({}) but still no process is running {}", reason,
+                        obsExecutable);
+            } else {
+                noProcessLogged = true;
+                log.warn("OBS needs a restart ({}) but no process is running {}", reason,
+                        obsExecutable);
+            }
             return false;
         }
+        lastNoProcessNanos = null;
+        noProcessLogged = false;
         recentNanos.addLast(now);
         log.warn("Restarted OBS: {}", reason);
         return true;

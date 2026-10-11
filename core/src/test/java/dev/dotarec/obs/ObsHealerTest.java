@@ -107,6 +107,43 @@ class ObsHealerTest {
     }
 
     @Test
+    void aCallThatEndsNothing_backsOffTheRescan_andWarnsOncePerEpisode() {
+        // OBS is connected yet its process can't be found (or can't be ended): the FSM asks on
+        // every render probe, and each ask would walk the whole process table and warn.
+        Logger healerLog = (Logger) LoggerFactory.getLogger(ObsHealer.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        healerLog.addAppender(appender);
+        try {
+            ObsHealer healer = healer();
+            running = 0;
+            assertThat(healer.restartObs("probe 1")).isFalse();
+            for (int i = 0; i < 5; i++) {
+                advanceSeconds(5);
+                assertThat(healer.restartObs("probe")).isFalse();
+            }
+            assertThat(killed).as("no rescan inside the back-off").hasSize(1);
+
+            advanceSeconds(ObsHealer.NO_PROCESS_RETRY_MS / 1000);
+            assertThat(healer.restartObs("probe after back-off")).isFalse();
+            assertThat(killed).as("rescans once the back-off passes").hasSize(2);
+            assertThat(noProcessWarnings(appender)).as("one warning per episode").hasSize(1);
+
+            // A real restart ends the episode; the next no-process episode warns again.
+            advanceSeconds(ObsHealer.NO_PROCESS_RETRY_MS / 1000);
+            running = 1;
+            assertThat(healer.restartObs("real")).isTrue();
+            running = 0;
+            advanceSeconds(ObsHealer.MIN_INTERVAL_MS / 1000);
+            assertThat(healer.restartObs("gone again")).isFalse();
+            assertThat(noProcessWarnings(appender)).hasSize(2);
+        } finally {
+            healerLog.detachAppender(appender);
+            appender.stop();
+        }
+    }
+
+    @Test
     void canonical_ignoresCaseAndDotSegments(@TempDir Path dir) throws Exception {
         Path exe = Files.createFile(dir.resolve("obs64.exe"));
         String messy = dir.resolve("sub").resolve("..").resolve("OBS64.EXE").toString()
@@ -145,6 +182,13 @@ class ObsHealerTest {
         assertThat(ObsHealer.canonical("C:/bad" + (char) 0 + "path")).isNull();
     }
 
+    private static List<ILoggingEvent> noProcessWarnings(ListAppender<ILoggingEvent> appender) {
+        return appender.list.stream()
+                .filter(e -> e.getLevel() == Level.WARN)
+                .filter(e -> e.getFormattedMessage().contains("no process is running"))
+                .toList();
+    }
+
     private static List<ILoggingEvent> capWarnings(ListAppender<ILoggingEvent> appender) {
         return appender.list.stream()
                 .filter(e -> e.getLevel() == Level.WARN)
@@ -165,11 +209,12 @@ class ObsHealerTest {
         running = 0;
         for (int i = 0; i < ObsHealer.MAX_PER_WINDOW + 1; i++) {
             assertThat(healer.restartObs("nothing running")).isFalse();
+            advanceSeconds(ObsHealer.NO_PROCESS_RETRY_MS / 1000);
         }
 
         running = 1;
         assertThat(healer.restartObs("real"))
-                .as("no cooldown from the no-op calls")
+                .as("no restart cooldown from the no-op calls")
                 .isTrue();
         for (int i = 2; i <= ObsHealer.MAX_PER_WINDOW; i++) {
             advanceSeconds(ObsHealer.MIN_INTERVAL_MS / 1000);
