@@ -400,7 +400,8 @@ public class ObsController implements ObsRecorder, MatchFsm.RecordStatusProbe {
                             RENDER_PROBE_TIMEOUT_MS);
             boolean rendered = resp != null && resp.isSuccessful() && Files.size(tmp) > 0;
             if (!rendered) {
-                log.warn("OBS refused to render its scene (graphics device lost?)");
+                // Debug only: callers probe repeatedly and log the decision they take on it.
+                log.debug("OBS refused to render its scene (graphics device lost?)");
             }
             return !rendered;
         } catch (Exception e) {

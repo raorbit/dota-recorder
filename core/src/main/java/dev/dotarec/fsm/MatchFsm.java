@@ -155,6 +155,7 @@ public class MatchFsm {
 
     private final ObsRestarter obsRestarter;
 
+    /** Frame time of the last render probe; {@code Long.MIN_VALUE} means "probe on the next start". */
     private long lastRenderProbeNanos = Long.MIN_VALUE;
     private boolean lastRenderBroken;
 
@@ -304,7 +305,7 @@ public class MatchFsm {
             log.warn("OBS stopped the recording on its own and can't render; keeping what it"
                     + " recorded and restarting OBS");
             finalizeRecording();
-            obsRestarter.restartObs("it stopped the recording on its own");
+            restartObs("it stopped the recording on its own");
             return;
         }
         if (status.outputBytes() == null) {
@@ -324,7 +325,7 @@ public class MatchFsm {
                     + " recorded and restarting OBS", bytes);
             finalizeRecording();
         }
-        obsRestarter.restartObs("it stopped writing the recording");
+        restartObs("it stopped writing the recording");
     }
 
     /**
@@ -373,16 +374,45 @@ public class MatchFsm {
     }
 
     /**
-     * {@link ObsRecorder#isRenderBroken()}, probed at most every {@link #RENDER_PROBE_INTERVAL_MS}
-     * of frame time (the frame's own monotonic stamp, so the start path reads no extra clock).
+     * Whether a start must hold off because OBS can't render. {@link ObsRecorder#isRenderBroken()}
+     * is probed at most every {@link #RENDER_PROBE_INTERVAL_MS} of frame time (the frame's own
+     * monotonic stamp, so the start path reads no extra clock), and only the frame whose fresh probe
+     * finds the renderer broken logs and asks for a restart. Every other frame -- the ~10Hz feed
+     * inside the window, and every frame for as long as {@link ObsRestarter} refuses (a GPU that
+     * stays dead hits its hourly cap) -- waits quietly on the cached verdict. Without that, each
+     * frame logged a WARN plus a restart request, flushing the size-capped core.log within hours.
+     * A broken episode warns once; later probes that still find it broken log at debug.
      */
-    private boolean renderBroken(long now) {
-        if (lastRenderProbeNanos == Long.MIN_VALUE
-                || now - lastRenderProbeNanos >= RENDER_PROBE_INTERVAL_MS * 1_000_000L) {
-            lastRenderProbeNanos = now;
-            lastRenderBroken = obs.isRenderBroken();
+    private boolean holdStartForBrokenRenderer(long now) {
+        if (lastRenderProbeNanos != Long.MIN_VALUE
+                && now - lastRenderProbeNanos < RENDER_PROBE_INTERVAL_MS * 1_000_000L) {
+            return lastRenderBroken;
         }
-        return lastRenderBroken;
+        boolean wasBroken = lastRenderBroken;
+        lastRenderProbeNanos = now;
+        lastRenderBroken = obs.isRenderBroken();
+        if (!lastRenderBroken) {
+            return false;
+        }
+        if (wasBroken) {
+            log.debug("OBS still can't render a frame; asking for another restart");
+        } else {
+            log.warn("OBS can't render a frame; restarting it before recording");
+        }
+        restartObs("it can't render a frame");
+        return true;
+    }
+
+    /**
+     * Asks {@link #obsRestarter} to restart OBS. When it does, the cached render verdict is
+     * forgotten: it described the OBS that was just ended, and keeping it would hold the fresh
+     * instance's first start attempts for up to {@link #RENDER_PROBE_INTERVAL_MS} on a stale "broken".
+     */
+    private void restartObs(String reason) {
+        if (obsRestarter.restartObs(reason)) {
+            lastRenderProbeNanos = Long.MIN_VALUE;
+            lastRenderBroken = false;
+        }
     }
 
     /**
@@ -506,9 +536,7 @@ public class MatchFsm {
         }
         // A lost graphics device leaves OBS "ready" by every check above, yet every frame fails and
         // StartRecord writes an empty file. Restart OBS instead; the next frames retry the start.
-        if (renderBroken(frame.monotonicNanos())) {
-            log.warn("OBS can't render a frame; restarting it before recording");
-            obsRestarter.restartObs("it can't render a frame");
+        if (holdStartForBrokenRenderer(frame.monotonicNanos())) {
             return;
         }
         if (orphanedStop != null) {
@@ -542,7 +570,7 @@ public class MatchFsm {
             // or its renderer is gone. Either way a fresh OBS records.
             this.state = MatchState.IDLE;
             log.warn("Recording not confirmed by OBS: {}; restarting OBS", e.getMessage());
-            obsRestarter.restartObs("it accepted StartRecord but never started recording");
+            restartObs("it accepted StartRecord but never started recording");
             return;
         } catch (ObsException e) {
             this.state = MatchState.IDLE;

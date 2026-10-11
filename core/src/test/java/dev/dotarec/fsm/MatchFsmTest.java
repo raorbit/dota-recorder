@@ -72,6 +72,8 @@ class MatchFsmTest {
         boolean startThrowsRuntime;
         /** When true, OBS refuses to render (a lost graphics device). */
         boolean renderBroken;
+        /** How many times the render probe ran. */
+        int renderProbes;
         /** When true, OBS accepts StartRecord but never confirms it. */
         boolean startNotConfirmed;
         /** The path OBS reported when it stopped the output on its own; cleared on a new start,
@@ -81,7 +83,10 @@ class MatchFsmTest {
         @Override public void connect() { }
         @Override public boolean ensureConnected() { return connected; }
         @Override public boolean isReady() { return connected && ready; }
-        @Override public boolean isRenderBroken() { return connected && renderBroken; }
+        @Override public boolean isRenderBroken() {
+            renderProbes++;
+            return connected && renderBroken;
+        }
 
         @Override public String startRecording() {
             if (!connected) {

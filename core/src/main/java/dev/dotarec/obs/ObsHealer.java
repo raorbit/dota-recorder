@@ -59,6 +59,13 @@ public class ObsHealer implements ObsRestarter {
     private final TimeSource time;
     private final Deque<Long> recentNanos = new ArrayDeque<>();
 
+    /**
+     * Latches the hourly-cap refusal so it warns once per episode. The FSM keeps asking while a
+     * match waits to record (every render probe), so a GPU that stays dead would otherwise warn
+     * every few seconds until the hour frees up. Re-armed as soon as the window has room again.
+     */
+    private boolean capRefusalLogged;
+
     @Autowired
     public ObsHealer(AppPaths paths, TimeSource time) {
         this(new ObsLayout(paths.obsDir()).obs64(), ObsHealer::killByExecutable, time);
@@ -78,15 +85,24 @@ public class ObsHealer implements ObsRestarter {
         }
         Long last = recentNanos.peekLast();
         if (last != null && now - last < MIN_INTERVAL_MS * 1_000_000L) {
-            log.info("Not restarting OBS ({}): it was restarted {}s ago", reason,
+            // Routine while the last restart's OBS comes up and is judged: callers ask again
+            // every few seconds, and the restart that started the cooldown was already logged.
+            log.debug("Not restarting OBS ({}): it was restarted {}s ago", reason,
                     (now - last) / 1_000_000_000L);
             return false;
         }
         if (recentNanos.size() >= MAX_PER_WINDOW) {
-            log.warn("Not restarting OBS ({}): already restarted {} times this hour", reason,
-                    recentNanos.size());
+            if (capRefusalLogged) {
+                log.debug("Not restarting OBS ({}): still at {} restarts this hour", reason,
+                        recentNanos.size());
+            } else {
+                capRefusalLogged = true;
+                log.warn("Not restarting OBS ({}): already restarted {} times this hour; leaving"
+                        + " it alone until the hour frees up", reason, recentNanos.size());
+            }
             return false;
         }
+        capRefusalLogged = false;
         recentNanos.addLast(now);
         int killed = processes.killAll(obsExecutable, EXIT_WAIT_MS);
         if (killed == 0) {

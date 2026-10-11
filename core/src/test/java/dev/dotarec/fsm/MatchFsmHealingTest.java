@@ -5,6 +5,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.dotarec.bridge.EventPublisher;
 import dev.dotarec.clip.ClipService;
@@ -29,6 +33,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.slf4j.LoggerFactory;
 
 /**
  * Self-healing: an OBS that lost its graphics device (a GPU driver update while it runs) still
@@ -40,11 +45,13 @@ class MatchFsmHealingTest {
     /** Records restart requests; the "restart" itself is the test flipping the fake OBS healthy. */
     static final class FakeRestarter implements ObsRestarter {
         final List<String> reasons = new ArrayList<>();
+        /** False models ObsHealer refusing (cooldown or hourly cap): nothing is restarted. */
+        boolean succeeds = true;
 
         @Override
         public boolean restartObs(String reason) {
             reasons.add(reason);
-            return true;
+            return succeeds;
         }
     }
 
@@ -122,6 +129,7 @@ class MatchFsmHealingTest {
 
     @Test
     void renderProbe_isThrottled_acrossTheFrameFeed() {
+        restarter.succeeds = false; // no restart happened, so the broken verdict stands
         obs.renderBroken = true;
         fsm.onFrame(playing());
         obs.renderBroken = false; // healthy again, but the last probe is still fresh
@@ -130,6 +138,55 @@ class MatchFsmHealingTest {
 
         advanceSeconds(MatchFsm.RENDER_PROBE_INTERVAL_MS / 1000);
         fsm.onFrame(playing());
+        assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
+    }
+
+    @Test
+    void brokenRenderer_logsAndAsksForARestartOncePerProbe_notOnEveryFrame() {
+        // ObsHealer refuses (a GPU that stays dead hits its cap), so the verdict stays broken.
+        restarter.succeeds = false;
+        obs.renderBroken = true;
+        Logger fsmLog = (Logger) LoggerFactory.getLogger(MatchFsm.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        fsmLog.addAppender(appender);
+        try {
+            // Four seconds of the ~10Hz feed: all inside one probe window.
+            for (int i = 0; i < 40; i++) {
+                fsm.onFrame(playing());
+                nanos.addAndGet(100_000_000L);
+            }
+            assertThat(obs.renderProbes).isEqualTo(1);
+            assertThat(restarter.reasons).hasSize(1);
+
+            advanceSeconds(1);
+            fsm.onFrame(playing());
+            assertThat(obs.renderProbes).isEqualTo(2);
+            assertThat(restarter.reasons).as("one restart request per probe").hasSize(2);
+
+            assertThat(appender.list)
+                    .filteredOn(e -> e.getLevel() == Level.WARN)
+                    .as("a broken episode warns once; later probes log at debug")
+                    .hasSize(1);
+            assertThat(fsm.getState()).isEqualTo(MatchState.IDLE);
+            assertThat(obs.startCalls).isZero();
+        } finally {
+            fsmLog.detachAppender(appender);
+            appender.stop();
+        }
+    }
+
+    @Test
+    void successfulRestart_letsTheFreshObsBeProbedRightAway() {
+        obs.renderBroken = true;
+        fsm.onFrame(playing());
+        assertThat(restarter.reasons).hasSize(1);
+
+        // Still inside the probe window: the verdict described the OBS that was just ended, so the
+        // fresh one is probed instead of waiting out the window on a stale "broken".
+        obsRestarted();
+        fsm.onFrame(playing());
+        assertThat(obs.renderProbes).isEqualTo(2);
         assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
     }
 
