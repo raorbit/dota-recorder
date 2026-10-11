@@ -113,4 +113,25 @@ class ObsHealerTest {
         running = 0;
         assertThat(healer().restartObs("test")).isFalse();
     }
+
+    @Test
+    void aCallThatEndsNothing_spendsNoCooldownOrBudget() {
+        ObsHealer healer = healer();
+        // Electron is mid-relaunch: no OBS process to end, so nothing was restarted.
+        running = 0;
+        for (int i = 0; i < ObsHealer.MAX_PER_WINDOW + 1; i++) {
+            assertThat(healer.restartObs("nothing running")).isFalse();
+        }
+
+        running = 1;
+        assertThat(healer.restartObs("real"))
+                .as("no cooldown from the no-op calls")
+                .isTrue();
+        for (int i = 2; i <= ObsHealer.MAX_PER_WINDOW; i++) {
+            advanceSeconds(ObsHealer.MIN_INTERVAL_MS / 1000);
+            assertThat(healer.restartObs("real " + i))
+                    .as("the no-op calls used none of the hourly budget")
+                    .isTrue();
+        }
+    }
 }

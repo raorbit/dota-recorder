@@ -103,13 +103,15 @@ public class ObsHealer implements ObsRestarter {
             return false;
         }
         capRefusalLogged = false;
-        recentNanos.addLast(now);
         int killed = processes.killAll(obsExecutable, EXIT_WAIT_MS);
         if (killed == 0) {
+            // Nothing was ended (e.g. Electron is mid-relaunch), so nothing was spent: no cooldown
+            // starts and the hourly budget is untouched, leaving the next real restart free to run.
             log.warn("OBS needs a restart ({}) but no process is running {}", reason,
                     obsExecutable);
             return false;
         }
+        recentNanos.addLast(now);
         log.warn("Restarted OBS: {}", reason);
         return true;
     }
