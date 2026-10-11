@@ -1,17 +1,22 @@
 package dev.dotarec.obs;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import dev.dotarec.config.TimeSource;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Locale;
+import java.util.concurrent.TimeUnit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.slf4j.LoggerFactory;
 
 class ObsHealerTest {
@@ -99,6 +104,45 @@ class ObsHealerTest {
             healerLog.detachAppender(appender);
             appender.stop();
         }
+    }
+
+    @Test
+    void canonical_ignoresCaseAndDotSegments(@TempDir Path dir) throws Exception {
+        Path exe = Files.createFile(dir.resolve("obs64.exe"));
+        String messy = dir.resolve("sub").resolve("..").resolve("OBS64.EXE").toString()
+                .toUpperCase(Locale.ROOT);
+        Files.createDirectory(dir.resolve("sub"));
+
+        assertThat(ObsHealer.canonical(messy)).isEqualTo(ObsHealer.canonical(exe.toString()));
+    }
+
+    @Test
+    void canonical_seesThroughAJunction(@TempDir Path dir) throws Exception {
+        // %LOCALAPPDATA% moved to another drive behind a junction: our configured path and the
+        // path Windows reports for the running OBS must still match.
+        assumeTrue(System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win"),
+                "junctions are Windows-only");
+        Path real = Files.createDirectories(dir.resolve("real").resolve("bin"));
+        Path exe = Files.createFile(real.resolve("obs64.exe"));
+        Path link = dir.resolve("link");
+        Process mklink = new ProcessBuilder("cmd", "/c", "mklink", "/J", link.toString(),
+                dir.resolve("real").toString()).redirectErrorStream(true).start();
+        assumeTrue(mklink.waitFor(10, TimeUnit.SECONDS) && mklink.exitValue() == 0,
+                "could not create a junction here");
+        try {
+            String viaJunction = link.resolve("bin").resolve("obs64.exe").toString();
+            assertThat(ObsHealer.canonical(viaJunction))
+                    .isEqualTo(ObsHealer.canonical(exe.toString()));
+        } finally {
+            // Remove the link itself, never what it points at.
+            new ProcessBuilder("cmd", "/c", "rmdir", link.toString()).start()
+                    .waitFor(10, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
+    void canonical_ofAnInvalidPath_isNull() {
+        assertThat(ObsHealer.canonical("C:/bad" + (char) 0 + "path")).isNull();
     }
 
     private static List<ILoggingEvent> capWarnings(ListAppender<ILoggingEvent> appender) {

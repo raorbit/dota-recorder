@@ -3,6 +3,8 @@ package dev.dotarec.obs;
 import dev.dotarec.config.AppPaths;
 import dev.dotarec.config.TimeSource;
 import dev.dotarec.obs.setup.ObsLayout;
+import java.io.IOException;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.Deque;
@@ -117,11 +119,18 @@ public class ObsHealer implements ObsRestarter {
     }
 
     private static int killByExecutable(Path exe, long waitMs) {
-        String target = normalize(exe.toString());
+        String target = canonical(exe.toString());
+        String exeName = fileName(exe.toString());
+        if (target == null || exeName == null) {
+            return 0;
+        }
         int[] killed = {0};
         ProcessHandle.allProcesses()
                 .filter(ph -> ph.info().command()
-                        .map(c -> normalize(c).equals(target))
+                        // Cheap name check first: resolving a real path touches the disk, and
+                        // only obs64.exe candidates are worth it.
+                        .filter(c -> exeName.equals(fileName(c)))
+                        .map(c -> target.equals(canonical(c)))
                         .orElse(false))
                 .forEach(ph -> {
                     if (ph.destroyForcibly()) {
@@ -136,7 +145,35 @@ public class ObsHealer implements ObsRestarter {
         return killed[0];
     }
 
-    private static String normalize(String path) {
-        return Path.of(path).toAbsolutePath().normalize().toString().toLowerCase(Locale.ROOT);
+    /**
+     * The path as the file system resolves it (junctions, symlinks and 8.3 short names expanded by
+     * {@link Path#toRealPath}), lower-cased because Windows paths are case-insensitive. A purely
+     * lexical comparison misses our OBS whenever %LOCALAPPDATA% sits behind a junction (a common
+     * way to move AppData to another drive), since our configured path and the path Windows
+     * reports for the running image can then name the same file differently. Falls back to the
+     * lexical form when the file can't be resolved, and to null for a string that isn't a valid
+     * path. Package-visible for tests.
+     */
+    static String canonical(String path) {
+        try {
+            Path p = Path.of(path);
+            try {
+                p = p.toRealPath();
+            } catch (IOException | SecurityException e) {
+                p = p.toAbsolutePath().normalize();
+            }
+            return p.toString().toLowerCase(Locale.ROOT);
+        } catch (InvalidPathException e) {
+            return null;
+        }
+    }
+
+    private static String fileName(String path) {
+        try {
+            Path name = Path.of(path).getFileName();
+            return name == null ? null : name.toString().toLowerCase(Locale.ROOT);
+        } catch (InvalidPathException e) {
+            return null;
+        }
     }
 }
