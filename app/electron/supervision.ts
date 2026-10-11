@@ -36,6 +36,11 @@ export interface SupervisionDeps {
  * An OBS that ran this long after its last relaunch before exiting was healthy, so its relaunch budget
  * starts over. Without this the budget never refilled: two OBS restarts in a days-long tray session
  * (the core restarts a wedged OBS on purpose, at most every few minutes) left OBS down for good.
+ *
+ * Measured on a monotonic clock (the controller's default `now` is `performance.now()`), never wall
+ * time: an NTP correction or manual clock change in a days-long session would otherwise either make a
+ * fast crash loop look stable (a forward step: unbounded relaunches) or push the elapsed time negative
+ * (a backward step: the budget never refills).
  */
 export const OBS_STABLE_MS = 2 * 60_000;
 
@@ -58,10 +63,15 @@ export class SupervisionController {
   private obsRelaunchPending = false;
   private lastObsRelaunchAt = Number.NEGATIVE_INFINITY;
 
+  /**
+   * @param now monotonic milliseconds, only ever compared against itself (see {@link OBS_STABLE_MS});
+   *   tests inject a fake clock. The default is wrapped rather than passed as `performance.now`
+   *   because Node rejects that method called without its `performance` receiver (ERR_INVALID_THIS).
+   */
   constructor(
     private readonly deps: SupervisionDeps,
     private readonly maxRestarts = 2,
-    private readonly now: () => number = Date.now,
+    private readonly now: () => number = () => performance.now(),
   ) {}
 
   /**

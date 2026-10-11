@@ -337,6 +337,30 @@ describe('SupervisionController — OBS crash & launch', () => {
     expect(deps.startObs).toHaveBeenCalledTimes(6);
   });
 
+  it('times stability on a monotonic clock, so a wall-clock jump cannot hide a crash loop', async () => {
+    // The default clock (no `now` injected): an NTP correction stepping the wall clock forward an hour
+    // between each crash must not make a fast crash loop look stable. Timed on Date.now this refilled
+    // the budget on every crash and relaunched OBS without bound.
+    let wall = Date.now();
+    const dateNow = vi.spyOn(Date, 'now').mockImplementation(() => (wall += 60 * 60_000));
+    try {
+      const deps = makeDeps();
+      const controller = new SupervisionController(deps, 2);
+
+      controller.handleObsCrash(exit);
+      await flush();
+      controller.handleObsCrash(exit);
+      await flush();
+      controller.handleObsCrash(exit); // still a crash loop: budget exhausted
+      await flush();
+
+      expect(deps.startObs).toHaveBeenCalledTimes(2);
+      expect(deps.log).toHaveBeenCalledWith(expect.stringContaining('exceeded restart attempts'));
+    } finally {
+      dateNow.mockRestore();
+    }
+  });
+
   it('serializes launches: a second launch while one is in flight is skipped', async () => {
     const pending = deferred<void>();
     const deps = makeDeps({ startObs: vi.fn(() => pending.promise) });
