@@ -2,6 +2,8 @@ package dev.dotarec.bridge;
 
 import dev.dotarec.config.SettingsStore;
 import dev.dotarec.config.StorageRoots;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpRange;
 import org.springframework.http.HttpStatus;
@@ -40,6 +42,8 @@ import java.util.Locale;
  * is served exactly (the clamp is a no-op).
  */
 final class VideoStreamSupport {
+
+    private static final Logger log = LoggerFactory.getLogger(VideoStreamSupport.class);
 
     /**
      * Maximum bytes served per 206 response. Bounds how long a writer thread is held (and thus how
@@ -139,7 +143,12 @@ final class VideoStreamSupport {
                 .body(out -> copyRange(file, start, regionLen, out));
     }
 
-    /** Streams {@code count} bytes of {@code file} starting at {@code start} to {@code out}, chunked. */
+    /**
+     * Streams {@code count} bytes of {@code file} starting at {@code start} to {@code out}, chunked.
+     * A client that disconnects mid-stream (the {@code <video>} dropping a range on seek or close) ends
+     * the copy quietly with a DEBUG line. Only the write is classified: a failure reading the file
+     * always propagates.
+     */
     private static void copyRange(Path file, long start, long count, OutputStream out)
             throws IOException {
         try (InputStream in = Files.newInputStream(file)) {
@@ -151,7 +160,16 @@ final class VideoStreamSupport {
                 if (n < 0) {
                     break;
                 }
-                out.write(buf, 0, n);
+                try {
+                    out.write(buf, 0, n);
+                } catch (IOException e) {
+                    if (!ClientAbort.isClientAbort(e)) {
+                        throw e;
+                    }
+                    log.debug("Client disconnected from {} after {} of {} bytes: {}",
+                            file, count - remaining, count, ClientAbort.describe(e));
+                    return;
+                }
                 remaining -= n;
             }
         }

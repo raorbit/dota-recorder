@@ -1,14 +1,24 @@
 package dev.dotarec.bridge;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.OutputStream;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
+import org.apache.catalina.connector.ClientAbortException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpRange;
 import org.springframework.http.HttpStatus;
@@ -20,7 +30,8 @@ import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBo
  * {@code Range: bytes=N-}; serving that to EOF would stream a VOD's whole multi-GB remainder in one
  * stalling response and tie up connections until they time out (the playback-freeze bug). The stream
  * clamps each 206 to one window; the windowed overload lets us assert that with a tiny cap instead of
- * a multi-megabyte fixture.
+ * a multi-megabyte fixture. The copy's failure handling is pinned too: a client that drops the request
+ * ends it with one DEBUG line, while any other write failure or a file read failure still propagates.
  */
 class VideoStreamSupportTest {
 
@@ -88,7 +99,89 @@ class VideoStreamSupportTest {
         assertThat(readBody(resp)).isEqualTo(Arrays.copyOfRange(data, 980, 1000));
     }
 
+    @Test
+    void clientAbortMidStream_endsQuietlyWithOneDebugLine() throws Exception {
+        Path file = writeFile("vod.mp4", bytes(200_000));
+        ResponseEntity<StreamingResponseBody> resp =
+                VideoStreamSupport.stream(file, new HttpHeaders(), 1 << 20);
+        // The first 64KB chunk goes out, then the <video> drops the request: the shape Tomcat throws.
+        OutputStream out = failingAfter(65_536, new ClientAbortException(
+                new IOException("An established connection was aborted by the software in your host machine")));
+
+        List<ILoggingEvent> events = captureLogs(() -> resp.getBody().writeTo(out));
+
+        assertThat(events).hasSize(1);
+        ILoggingEvent event = events.get(0);
+        assertThat(event.getLevel()).isEqualTo(Level.DEBUG);
+        assertThat(event.getThrowableProxy()).isNull();
+        assertThat(event.getFormattedMessage())
+                .contains("after 65536 of 200000 bytes")
+                .contains("An established connection was aborted");
+    }
+
+    @Test
+    void otherWriteFailure_propagates() throws Exception {
+        Path file = writeFile("vod.mp4", bytes(1000));
+        ResponseEntity<StreamingResponseBody> resp = VideoStreamSupport.stream(file, new HttpHeaders());
+        IOException failure = new IOException("There is not enough space on the disk");
+
+        assertThatThrownBy(() -> resp.getBody().writeTo(failingAfter(0, failure))).isSameAs(failure);
+    }
+
+    @Test
+    void fileReadFailure_propagates() throws Exception {
+        Path file = writeFile("vod.mp4", bytes(1000));
+        ResponseEntity<StreamingResponseBody> resp = VideoStreamSupport.stream(file, new HttpHeaders());
+        // Retention sweeps the file between the response being built and the body being written.
+        Files.delete(file);
+
+        assertThatThrownBy(() -> resp.getBody().writeTo(new ByteArrayOutputStream()))
+                .isInstanceOf(NoSuchFileException.class);
+    }
+
     // ── helpers ─────────────────────────────────────────────────────────────
+
+    /** An output stream that accepts {@code okBytes}, then throws {@code failure} on the next write. */
+    private static OutputStream failingAfter(int okBytes, IOException failure) {
+        return new OutputStream() {
+            private int written;
+
+            @Override
+            public void write(int b) throws IOException {
+                write(new byte[] {(byte) b}, 0, 1);
+            }
+
+            @Override
+            public void write(byte[] b, int off, int len) throws IOException {
+                if (written + len > okBytes) {
+                    throw failure;
+                }
+                written += len;
+            }
+        };
+    }
+
+    /** Runs {@code body} with VideoStreamSupport logging at DEBUG and returns what it logged. */
+    private static List<ILoggingEvent> captureLogs(ThrowingRunnable body) throws Exception {
+        Logger logger = (Logger) LoggerFactory.getLogger(VideoStreamSupport.class);
+        Level previous = logger.getLevel();
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        logger.setLevel(Level.DEBUG);
+        try {
+            body.run();
+        } finally {
+            logger.setLevel(previous);
+            logger.detachAppender(appender);
+            appender.stop();
+        }
+        return appender.list;
+    }
+
+    private interface ThrowingRunnable {
+        void run() throws Exception;
+    }
 
     private Path writeFile(String name, byte[] data) throws Exception {
         Path p = dir.resolve(name);
