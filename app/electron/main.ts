@@ -15,6 +15,7 @@ import { ObsDemandController, OBS_DEMAND_POLL_MS, type ObsDemandReading } from '
 import { ObsSupervisor } from './obs-supervisor';
 import { SupervisionController } from './supervision';
 import { pathIsAccessible, revealablePath } from './reveal-path-guard';
+import { RotatingLog } from './rotating-log';
 import {
   applyLaunchAtLogin,
   getAutoUpdate,
@@ -43,10 +44,15 @@ const DEV_SERVER_URL = 'http://localhost:5173';
 // bridge, so a web page in the user's browser can't read/mutate the loopback API.
 const bridgeToken = randomBytes(32).toString('hex');
 
+// electron.log, size-capped: it rolls into electron.log.1-.3 at 10 MB, and an uncapped log from an
+// older version is rotated away on the first write (see rotating-log.ts). Created on first use.
+let electronLog: RotatingLog | null = null;
+
 /** Append a line to electron.log (best-effort) and mirror to the console. */
 function logLine(line: string): void {
   try {
-    fs.appendFileSync(electronLogPath(), `${new Date().toISOString()} ${line}\n`);
+    electronLog ??= new RotatingLog(electronLogPath());
+    electronLog.append(`${new Date().toISOString()} ${line}\n`);
   } catch {
     /* logging must never break the app. */
   }
