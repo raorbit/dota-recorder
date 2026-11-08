@@ -25,9 +25,9 @@
     "verify:release": "node scripts/verify-release.mjs"
   },
   "devDependencies": {
-    "concurrently": "^9.1.2",
+    "concurrently": "^9.2.5",
     "cross-env": "^7.0.3",
-    "electron": "^42.4.0",
+    "electron": "^42.11.18",
     "electron-builder": "^26.15.3",
     "eslint": "^9.39.4",
     "eslint-config-prettier": "^9.1.2",
