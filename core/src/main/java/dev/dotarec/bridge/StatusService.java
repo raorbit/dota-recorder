@@ -4,6 +4,7 @@ import dev.dotarec.fsm.MatchFsm;
 import dev.dotarec.gsi.GsiHeartbeat;
 import dev.dotarec.obs.ObsDemand;
 import dev.dotarec.obs.ObsHealth;
+import dev.dotarec.retention.LowDiskState;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 
@@ -21,6 +22,7 @@ public class StatusService {
     private final ObsHealth obsHealth;
     private final MatchFsm matchFsm;
     private final ObsDemand obsDemand;
+    private final LowDiskState lowDiskState;
 
     // @Lazy breaks the construction cycle StatusService -> MatchFsm -> EventPublisher ->
     // StatusService. MatchFsm is only dereferenced at runtime in snapshot(), so a lazy proxy is
@@ -29,11 +31,13 @@ public class StatusService {
             GsiHeartbeat gsiHeartbeat,
             ObsHealth obsHealth,
             @Lazy MatchFsm matchFsm,
-            ObsDemand obsDemand) {
+            ObsDemand obsDemand,
+            LowDiskState lowDiskState) {
         this.gsiHeartbeat = gsiHeartbeat;
         this.obsHealth = obsHealth;
         this.matchFsm = matchFsm;
         this.obsDemand = obsDemand;
+        this.lowDiskState = lowDiskState;
     }
 
     /** Builds a point-in-time snapshot of recorder status. */
@@ -55,7 +59,9 @@ public class StatusService {
         // activeMatchId stays null until match persistence/lifecycle lands in a later PR.
         StatusSnapshot.FsmStatus fsm =
                 new StatusSnapshot.FsmStatus(matchFsm.getState().name(), null);
+        StatusSnapshot.StorageStatus storage =
+                new StatusSnapshot.StorageStatus(lowDiskState.current());
 
-        return new StatusSnapshot(gsi, obs, fsm);
+        return new StatusSnapshot(gsi, obs, fsm, storage);
     }
 }

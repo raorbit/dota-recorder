@@ -1067,6 +1067,40 @@ class RetentionSweeperTest {
     }
 
     @Test
+    void freeSpaceCheckRecordsAndClearsTheLowDiskState() throws Exception {
+        long gib = 1024L * 1024 * 1024;
+        LowDiskState state = new LowDiskState();
+        AtomicLong free = new AtomicLong(gib);
+        RetentionSweeper.UsableSpaceProbe probe = dir -> free.get();
+        RetentionSweeper checked = new RetentionSweeper(
+                matches, clips, settings, events, new StorageMaintenanceLock(),
+                dir -> 100L * gib, probe, Files::size, () -> 12_345L, state);
+
+        // Low: the observation is recorded (with the check's wall clock) AND the frame still goes out.
+        checked.checkFreeSpaceWarning();
+        assertThat(state.current()).isNotNull();
+        assertThat(state.current().freeBytes()).isEqualTo(gib);
+        assertThat(state.current().thresholdBytes()).isEqualTo(5L * gib);
+        assertThat(state.current().message()).contains("Low disk space");
+        assertThat(state.current().observedAtMs()).isEqualTo(12_345L);
+        verify(events).publish(eq("error"), any());
+
+        // A probe failure leaves the last observation in place: unknown is not healthy.
+        RetentionSweeper failing = new RetentionSweeper(
+                matches, clips, settings, events, new StorageMaintenanceLock(),
+                dir -> 100L * gib, dir -> { throw new java.io.IOException("drive asleep"); },
+                Files::size, () -> 99_999L, state);
+        assertThat(failing.checkFreeSpaceWarning()).isNull();
+        assertThat(state.current()).isNotNull();
+        assertThat(state.current().observedAtMs()).isEqualTo(12_345L);
+
+        // Healthy again: cleared, so /status stops reporting it.
+        free.set(50L * gib);
+        assertThat(checked.checkFreeSpaceWarning()).isNull();
+        assertThat(state.current()).isNull();
+    }
+
+    @Test
     void freeSpaceCheckNeverThrowsAndReturnsNullWhenHealthy() {
         // The temp video drive has plenty of space in CI; the check must not throw and (almost
         // always) reports healthy. We only assert it doesn't blow up and returns a String-or-null.
