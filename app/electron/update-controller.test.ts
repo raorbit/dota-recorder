@@ -14,12 +14,21 @@ interface Scheduled {
   fn: () => void;
   ms: number;
   cancelled: boolean;
+  // Set once the harness has fired it: a real timer is spent after firing, so a fired task is no
+  // longer "live" even though nothing cancelled it.
+  fired: boolean;
 }
+
+// Idle-install cadence used by every harness: a 100 ms idle check, a 1000 ms post-download grace,
+// two consecutive idle checks.
+const IDLE_CHECK_MS = 100;
+const GRACE_MS = 1000;
 
 function harness(opts?: {
   busy?: boolean;
   reason?: BusyReason;
   enabled?: boolean;
+  idle?: boolean;
 }): {
   controller: UpdateController;
   deps: {
@@ -28,14 +37,21 @@ function harness(opts?: {
   states: UpdateState[];
   tasks: Scheduled[];
   fireLast: () => void;
+  fireIdleCheck: () => Promise<void>;
+  /** Idle-check ticks armed and neither cancelled nor fired yet. */
+  liveIdleChecks: () => number;
   setBusy: (b: boolean) => void;
   setEnabled: (e: boolean) => void;
+  setIdle: (i: boolean) => void;
+  advance: (ms: number) => void;
 } {
   const states: UpdateState[] = [];
   const tasks: Scheduled[] = [];
   let busy = opts?.busy ?? false;
   const reason: BusyReason = opts?.reason ?? 'recording';
   let enabled = opts?.enabled ?? true;
+  let idle = opts?.idle ?? false;
+  let now = 1_000_000;
 
   const deps = {
     triggerCheck: vi.fn(),
@@ -43,6 +59,7 @@ function harness(opts?: {
     // Mirror the real gate: a busy result carries a reason ('recording' by default; pass
     // reason:'unreachable' to simulate a down core), an idle result carries none.
     isBusy: vi.fn(async () => (busy ? { busy: true, reason } : { busy: false })),
+    isIdleForInstall: vi.fn(async () => idle),
     doInstall: vi.fn(),
     emit: vi.fn((s: UpdateState) => {
       states.push(s);
@@ -50,12 +67,13 @@ function harness(opts?: {
     log: vi.fn(),
     isEnabled: vi.fn(() => enabled),
     schedule: vi.fn((fn: () => void, ms: number): Cancel => {
-      const task: Scheduled = { fn, ms, cancelled: false };
+      const task: Scheduled = { fn, ms, cancelled: false, fired: false };
       tasks.push(task);
       return () => {
         task.cancelled = true;
       };
     }),
+    now: vi.fn(() => now),
   } as unknown as {
     [K in keyof UpdateControllerDeps]: ReturnType<typeof vi.fn> & UpdateControllerDeps[K];
   };
@@ -64,6 +82,9 @@ function harness(opts?: {
     firstCheckMs: 1000,
     periodicMs: 5000,
     busyRetryMs: 2000,
+    idleCheckMs: IDLE_CHECK_MS,
+    autoInstallGraceMs: GRACE_MS,
+    autoInstallIdleChecks: 2,
   });
 
   return {
@@ -72,14 +93,36 @@ function harness(opts?: {
     states,
     tasks,
     fireLast: () => {
-      const live = [...tasks].reverse().find((t) => !t.cancelled);
-      if (live) live.fn();
+      const live = [...tasks].reverse().find((t) => !t.cancelled && !t.fired);
+      if (live) {
+        live.fired = true;
+        live.fn();
+      }
     },
+    // Fire the live idle-check tick (the only task armed at IDLE_CHECK_MS) and let its awaits settle.
+    fireIdleCheck: async () => {
+      const live = [...tasks]
+        .reverse()
+        .find((t) => !t.cancelled && !t.fired && t.ms === IDLE_CHECK_MS);
+      if (live) {
+        live.fired = true;
+        live.fn();
+      }
+      await flush();
+    },
+    liveIdleChecks: () =>
+      tasks.filter((t) => t.ms === IDLE_CHECK_MS && !t.cancelled && !t.fired).length,
     setBusy: (b) => {
       busy = b;
     },
     setEnabled: (e) => {
       enabled = e;
+    },
+    setIdle: (i) => {
+      idle = i;
+    },
+    advance: (ms) => {
+      now += ms;
     },
   };
 }
@@ -201,6 +244,115 @@ describe('UpdateController', () => {
     h.controller.onUpdateDownloaded('4.0.0');
     await h.controller.installNow();
     expect(h.deps.doInstall).toHaveBeenCalledTimes(1);
+    expect(h.deps.doInstall).toHaveBeenCalledWith('manual');
+  });
+
+  describe('unattended install while idle in the tray', () => {
+    it('arms an idle check on download and waits out the grace period without asking', async () => {
+      const h = harness({ idle: true });
+      h.controller.onUpdateDownloaded('5.0.0');
+      expect(h.liveIdleChecks()).toBe(1);
+      h.advance(GRACE_MS - 1);
+      await h.fireIdleCheck();
+      expect(h.deps.isIdleForInstall).not.toHaveBeenCalled();
+      expect(h.deps.doInstall).not.toHaveBeenCalled();
+      // Re-armed for the next tick.
+      expect(h.liveIdleChecks()).toBe(1);
+    });
+
+    it('installs unattended after two consecutive idle checks past the grace period', async () => {
+      const h = harness({ idle: true });
+      h.controller.onUpdateDownloaded('5.0.0');
+      h.advance(GRACE_MS);
+      await h.fireIdleCheck();
+      expect(h.deps.doInstall).not.toHaveBeenCalled(); // one idle check is not a quiet spell yet
+      await h.fireIdleCheck();
+      expect(h.deps.doInstall).toHaveBeenCalledTimes(1);
+      expect(h.deps.doInstall).toHaveBeenCalledWith('auto');
+      expect(h.deps.log).toHaveBeenCalledWith(expect.stringContaining('unattended'));
+      // Nothing left ticking once the install is committed.
+      expect(h.liveIdleChecks()).toBe(0);
+    });
+
+    it('a non-idle check resets the streak', async () => {
+      const h = harness({ idle: true });
+      h.controller.onUpdateDownloaded('5.0.0');
+      h.advance(GRACE_MS);
+      await h.fireIdleCheck(); // idle (1)
+      h.setIdle(false);
+      await h.fireIdleCheck(); // Dota launched: streak back to 0
+      h.setIdle(true);
+      await h.fireIdleCheck(); // idle (1)
+      expect(h.deps.doInstall).not.toHaveBeenCalled();
+      await h.fireIdleCheck(); // idle (2)
+      expect(h.deps.doInstall).toHaveBeenCalledWith('auto');
+    });
+
+    it('never installs unattended while the pref is off, and resumes when it is turned on', async () => {
+      const h = harness({ idle: true, enabled: false });
+      h.controller.onUpdateDownloaded('5.0.0');
+      h.advance(GRACE_MS);
+      await h.fireIdleCheck();
+      await h.fireIdleCheck();
+      await h.fireIdleCheck();
+      expect(h.deps.isIdleForInstall).not.toHaveBeenCalled();
+      expect(h.deps.doInstall).not.toHaveBeenCalled();
+      h.setEnabled(true);
+      await h.fireIdleCheck();
+      await h.fireIdleCheck();
+      expect(h.deps.doInstall).toHaveBeenCalledWith('auto');
+    });
+
+    it('treats a rejected idle probe as not idle', async () => {
+      const h = harness({ idle: true });
+      h.controller.onUpdateDownloaded('5.0.0');
+      h.advance(GRACE_MS);
+      await h.fireIdleCheck();
+      h.deps.isIdleForInstall.mockRejectedValueOnce(new Error('boom'));
+      await h.fireIdleCheck(); // streak reset by the rejection
+      await h.fireIdleCheck();
+      expect(h.deps.doInstall).not.toHaveBeenCalled();
+      await h.fireIdleCheck();
+      expect(h.deps.doInstall).toHaveBeenCalledTimes(1);
+    });
+
+    it('holds back quietly when the recording gate turns busy at the last moment', async () => {
+      const h = harness({ idle: true });
+      h.controller.onUpdateDownloaded('5.0.0');
+      h.advance(GRACE_MS);
+      await h.fireIdleCheck();
+      h.setBusy(true); // a match armed between the idle probe and the gate
+      await h.fireIdleCheck();
+      expect(h.deps.doInstall).not.toHaveBeenCalled();
+      // No deferral copy for an install nobody asked for, and the watch keeps going.
+      expect(h.controller.getState()).toEqual({ status: 'downloaded', version: '5.0.0' });
+      expect(h.liveIdleChecks()).toBe(1);
+      h.setBusy(false);
+      await h.fireIdleCheck();
+      await h.fireIdleCheck();
+      expect(h.deps.doInstall).toHaveBeenCalledWith('auto');
+    });
+
+    it('resumes the watch after an install that did not quit', async () => {
+      const h = harness({ idle: true });
+      h.controller.onUpdateDownloaded('5.0.0');
+      h.advance(GRACE_MS);
+      await h.fireIdleCheck();
+      await h.fireIdleCheck();
+      expect(h.deps.doInstall).toHaveBeenCalledTimes(1);
+      h.controller.onInstallAborted('installer missing');
+      await h.fireIdleCheck();
+      await h.fireIdleCheck();
+      expect(h.deps.doInstall).toHaveBeenCalledTimes(2);
+    });
+
+    it('a manual install stops the watch', async () => {
+      const h = harness({ idle: true });
+      h.controller.onUpdateDownloaded('5.0.0');
+      await h.controller.installNow();
+      expect(h.deps.doInstall).toHaveBeenCalledWith('manual');
+      expect(h.liveIdleChecks()).toBe(0);
+    });
   });
 
   it('surfaces errors', () => {

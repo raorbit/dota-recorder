@@ -22,6 +22,9 @@ export interface BusyResult {
   readonly reason?: BusyReason;
 }
 
+/** Who asked for the install: the Settings button, or the idle-in-the-tray policy. */
+export type InstallMode = 'manual' | 'auto';
+
 export interface UpdateControllerDeps {
   /** Fire electron-updater's checkForUpdates. Results arrive via the on*() callbacks. */
   triggerCheck(): void;
@@ -35,10 +38,17 @@ export interface UpdateControllerDeps {
    */
   isBusy(): Promise<BusyResult>;
   /**
+   * Whether the app is idle enough to install UNATTENDED: no match arming/recording/stopping, OBS
+   * not wanted (Dota closed, no GSI frames, no preview open), the window closed to the tray, and no
+   * shutdown underway. MUST fail-safe to false on any error, and never reject.
+   */
+  isIdleForInstall(): Promise<boolean>;
+  /**
    * Tear down the supervisors and quitAndInstall. The process exits; this never returns
    * normally. Only ever called after the gate reports not busy (isBusy() resolves {busy: false}).
+   * `auto` marks an unattended install, so main can make the relaunch start in the tray.
    */
-  doInstall(): void;
+  doInstall(mode: InstallMode): void;
   /** Push the latest state to the renderer and cache it for getState(). */
   emit(state: UpdateState): void;
   /** Append a line to the electron log. */
@@ -47,6 +57,8 @@ export interface UpdateControllerDeps {
   isEnabled(): boolean;
   /** Schedule fn after `ms`, returning a cancel handle (injected so tests control time). */
   schedule(fn: () => void, ms: number): Cancel;
+  /** Wall-clock ms (injected so tests control the post-download grace). */
+  now(): number;
 }
 
 export interface UpdateControllerOptions {
@@ -56,6 +68,12 @@ export interface UpdateControllerOptions {
   readonly periodicMs?: number;
   /** Retry delay when a download is deferred because a match is recording (default 5 min). */
   readonly busyRetryMs?: number;
+  /** How often a downloaded update re-checks whether the app is idle in the tray (default 1 min). */
+  readonly idleCheckMs?: number;
+  /** How long a downloaded update must have waited before it may install unattended (default 10 min). */
+  readonly autoInstallGraceMs?: number;
+  /** Consecutive idle checks required before an unattended install (default 2). */
+  readonly autoInstallIdleChecks?: number;
 }
 
 const MIN = 60_000;
@@ -66,9 +84,11 @@ const MIN = 60_000;
  * with `recording` flagged when a download/install is deferred by the recording gate.
  *
  * Download and install are BOTH gated on "not recording" (fail-safe to busy). A downloaded
- * update waits for the user to click "Restart to update"; it is never installed automatically
- * on quit (autoInstallOnAppQuit stays false in the adapter), so a background quit never
- * interrupts a match.
+ * update installs either on the user's "Restart to update" click, or UNATTENDED once the app has
+ * been idle in the tray — no match, Dota closed, window closed — for a couple of consecutive
+ * checks after a grace period (the installed app once sat on a stale version for weeks with the
+ * next one staged, because nothing ever clicked). It is never installed on a background quit
+ * (autoInstallOnAppQuit stays false in the adapter), so a quit never interrupts a match.
  */
 export class UpdateController {
   private snapshot: UpdateState = { status: 'idle' };
@@ -82,11 +102,19 @@ export class UpdateController {
   private installing = false;
   private cancelCheck: Cancel | null = null;
   private cancelRetry: Cancel | null = null;
+  private cancelIdleCheck: Cancel | null = null;
   private started = false;
+  // Unattended-install bookkeeping: when the current update finished downloading, and how many
+  // idle checks in a row have passed since the last non-idle one.
+  private downloadedAt: number | null = null;
+  private idleStreak = 0;
 
   private readonly firstCheckMs: number;
   private readonly periodicMs: number;
   private readonly busyRetryMs: number;
+  private readonly idleCheckMs: number;
+  private readonly autoInstallGraceMs: number;
+  private readonly autoInstallIdleChecks: number;
 
   constructor(
     private readonly deps: UpdateControllerDeps,
@@ -95,6 +123,9 @@ export class UpdateController {
     this.firstCheckMs = opts.firstCheckMs ?? 2 * MIN;
     this.periodicMs = opts.periodicMs ?? 4 * 60 * MIN;
     this.busyRetryMs = opts.busyRetryMs ?? 5 * MIN;
+    this.idleCheckMs = opts.idleCheckMs ?? MIN;
+    this.autoInstallGraceMs = opts.autoInstallGraceMs ?? 10 * MIN;
+    this.autoInstallIdleChecks = opts.autoInstallIdleChecks ?? 2;
   }
 
   /** The last emitted state (what the renderer polls via updates:getState). */
@@ -129,7 +160,11 @@ export class UpdateController {
    * gate first: while a match is recording it refuses and re-emits with recording:true so the
    * UI shows the deferral copy. Otherwise it hands off to doInstall(), which exits the process.
    */
-  async installNow(): Promise<void> {
+  installNow(): Promise<void> {
+    return this.install('manual');
+  }
+
+  private async install(mode: InstallMode): Promise<void> {
     if (this.installing) return;
     if (this.snapshot.status !== 'downloaded') return;
     // Latch synchronously BEFORE the await so two near-simultaneous clicks can't both pass the
@@ -149,6 +184,13 @@ export class UpdateController {
     if (result.busy) {
       // Not installing after all — release the latch so the user can retry once the gate clears.
       this.installing = false;
+      if (mode === 'auto') {
+        // The idle checks said idle moments ago; something started since (Dota launched). Nobody
+        // asked for this install, so no deferral copy in the UI: just keep watching for idleness.
+        this.deps.log('[updater] unattended install held back: the recorder became busy');
+        this.idleStreak = 0;
+        return;
+      }
       const unreachable = result.reason === 'unreachable';
       this.deps.log(
         unreachable
@@ -158,14 +200,19 @@ export class UpdateController {
       // Flag WHY it's deferred so the UI shows truthful copy: a core that is down/hung must not be
       // reported as "a match is recording". Fail-safe is unchanged — either way we do NOT install.
       this.setDeferred(unreachable);
-      // Poll the gate so the flag clears once it does, rather than sticking forever. We do NOT
-      // auto-install (Option 2 is user-confirmed): the UI returns to a plain "Restart to update".
+      // Poll the gate so the flag clears once it does, rather than sticking forever: the UI returns
+      // to a plain "Restart to update" (and the idle-install policy keeps running on its own clock).
       this.clearRetry();
       this.cancelRetry = this.deps.schedule(() => void this.clearInstallDeferral(), this.busyRetryMs);
       return;
     }
-    this.deps.log('[updater] installing downloaded update');
-    this.deps.doInstall();
+    this.clearIdleCheck();
+    this.deps.log(
+      mode === 'auto'
+        ? '[updater] idle in the tray; installing the downloaded update unattended'
+        : '[updater] installing downloaded update',
+    );
+    this.deps.doInstall(mode);
   }
 
   /**
@@ -173,6 +220,7 @@ export class UpdateController {
    * without exiting — a missing/invalid staged installer). Releases the install latch so the user can
    * retry, and re-emits the plain 'downloaded' snapshot: the installer is still staged, so the update
    * stays installable rather than the app sitting as a torn-down zombie with the Restart button dead.
+   * The idle-install watch resumes too, so a transient failure doesn't strand the update forever.
    */
   onInstallAborted(message: string): void {
     this.installing = false;
@@ -183,6 +231,8 @@ export class UpdateController {
         ...(this.snapshot.version !== undefined ? { version: this.snapshot.version } : {}),
         ...(this.snapshot.notesUrl !== undefined ? { notesUrl: this.snapshot.notesUrl } : {}),
       });
+      this.idleStreak = 0;
+      this.armIdleCheck();
     }
   }
 
@@ -262,6 +312,10 @@ export class UpdateController {
       // Carry the notes URL forward from the 'available' snapshot when we have it.
       ...(this.snapshot.notesUrl !== undefined ? { notesUrl: this.snapshot.notesUrl } : {}),
     });
+    // Start watching for a quiet moment to install unattended.
+    this.downloadedAt = this.deps.now();
+    this.idleStreak = 0;
+    this.armIdleCheck();
   }
 
   onError(message: string): void {
@@ -320,6 +374,53 @@ export class UpdateController {
       ...(this.snapshot.notesUrl !== undefined ? { notesUrl: this.snapshot.notesUrl } : {}),
     });
     this.deps.triggerDownload();
+  }
+
+  /**
+   * One tick of the unattended-install watch, every idleCheckMs while an update is downloaded.
+   * Installs once the update has waited out the grace period AND the app has been idle in the tray
+   * for autoInstallIdleChecks consecutive ticks (a Dota launch between ticks resets the streak). A
+   * disabled pref pauses the policy without disarming it, so re-enabling resumes on the next tick.
+   */
+  private async idleCheck(): Promise<void> {
+    this.cancelIdleCheck = null;
+    if (this.snapshot.status !== 'downloaded' || this.installing) return;
+    if (!this.deps.isEnabled()) {
+      this.idleStreak = 0;
+      this.armIdleCheck();
+      return;
+    }
+    const waited = this.deps.now() - (this.downloadedAt ?? this.deps.now());
+    if (waited < this.autoInstallGraceMs) {
+      this.armIdleCheck();
+      return;
+    }
+    let idle = false;
+    try {
+      idle = await this.deps.isIdleForInstall();
+    } catch {
+      idle = false; // contracted never to reject; an unknown state is not idle
+    }
+    // The state may have moved during the await (a manual install, an error).
+    if (this.snapshot.status !== 'downloaded' || this.installing) return;
+    this.idleStreak = idle ? this.idleStreak + 1 : 0;
+    if (this.idleStreak < this.autoInstallIdleChecks) {
+      this.armIdleCheck();
+      return;
+    }
+    await this.install('auto');
+    // Still here with the latch released: the gate held the install back. Keep watching.
+    if (!this.installing && this.snapshot.status === 'downloaded') this.armIdleCheck();
+  }
+
+  private armIdleCheck(): void {
+    this.clearIdleCheck();
+    this.cancelIdleCheck = this.deps.schedule(() => void this.idleCheck(), this.idleCheckMs);
+  }
+
+  private clearIdleCheck(): void {
+    this.cancelIdleCheck?.();
+    this.cancelIdleCheck = null;
   }
 
   /** Arm a check after `ms`; on fire it (conditionally) checks then re-arms at the periodic cadence. */
