@@ -1,5 +1,7 @@
 package dev.dotarec.bridge;
 
+import dev.dotarec.retention.LowDiskState;
+
 /**
  * Immutable snapshot of live recorder status, serialized to JSON for the {@code GET /status} REST
  * endpoint and pushed over the {@code /ws} WebSocket as the {@code status} envelope payload.
@@ -14,9 +16,11 @@ package dev.dotarec.bridge;
  *   <li>{@code obs} -- sourced from {@code ObsHealth}; all false until the OBS PR lands.</li>
  *   <li>{@code fsm} -- sourced from {@code MatchFsm}; {@code activeMatchId} is null until match
  *       persistence lands.</li>
+ *   <li>{@code storage} -- sourced from {@code LowDiskState}; {@code lowDisk} is null while the
+ *       video drive is healthy.</li>
  * </ul>
  */
-public record StatusSnapshot(GsiStatus gsi, ObsStatus obs, FsmStatus fsm) {
+public record StatusSnapshot(GsiStatus gsi, ObsStatus obs, FsmStatus fsm, StorageStatus storage) {
 
     /** GSI feed liveness. {@code lastFrameAgoMs} is null before any frame has been received. */
     public record GsiStatus(boolean connected, Long lastFrameAgoMs) {}
@@ -38,4 +42,12 @@ public record StatusSnapshot(GsiStatus gsi, ObsStatus obs, FsmStatus fsm) {
 
     /** FSM state name and the active match id (null when no match is in flight). */
     public record FsmStatus(String state, Long activeMatchId) {}
+
+    /**
+     * Storage health. {@code lowDisk} is the latest low-disk observation from the hourly
+     * free-space check, or null while the video drive is healthy. Carried here (not only as a
+     * one-off {@code error} frame) so a window re-created from the tray shows the banner at once and
+     * the shell can raise its own low-disk notification without a WebSocket of its own.
+     */
+    public record StorageStatus(LowDiskState.LowDisk lowDisk) {}
 }

@@ -111,6 +111,7 @@ public class RetentionSweeper {
     private final UsableSpaceProbe usableSpace;
     private final FileSizeProbe fileSize;
     private final MillisClock clock;
+    private final LowDiskState lowDiskState;
 
     /**
      * Miss registry backing the confirmed-missing rule: row key
@@ -137,10 +138,14 @@ public class RetentionSweeper {
             ClipRepository clips,
             SettingsStore settings,
             EventPublisher events,
-            StorageMaintenanceLock maintenanceLock) {
+            StorageMaintenanceLock maintenanceLock,
+            LowDiskState lowDiskState) {
         this(matches, clips, settings, events, maintenanceLock,
                 dir -> Files.getFileStore(dir).getTotalSpace(),
-                dir -> Files.getFileStore(dir).getUsableSpace());
+                dir -> Files.getFileStore(dir).getUsableSpace(),
+                Files::size,
+                System::currentTimeMillis,
+                lowDiskState);
     }
 
     /**
@@ -204,6 +209,22 @@ public class RetentionSweeper {
             UsableSpaceProbe usableSpace,
             FileSizeProbe fileSize,
             MillisClock clock) {
+        this(matches, clips, settings, events, maintenanceLock, totalSpace, usableSpace, fileSize,
+                clock, new LowDiskState());
+    }
+
+    /** Test seam: additionally inject the {@link LowDiskState} the free-space check publishes to. */
+    RetentionSweeper(
+            MatchRepository matches,
+            ClipRepository clips,
+            SettingsStore settings,
+            EventPublisher events,
+            StorageMaintenanceLock maintenanceLock,
+            TotalSpaceProbe totalSpace,
+            UsableSpaceProbe usableSpace,
+            FileSizeProbe fileSize,
+            MillisClock clock,
+            LowDiskState lowDiskState) {
         this.matches = matches;
         this.clips = clips;
         this.settings = settings;
@@ -213,6 +234,7 @@ public class RetentionSweeper {
         this.usableSpace = usableSpace;
         this.fileSize = fileSize;
         this.clock = clock;
+        this.lowDiskState = lowDiskState;
     }
 
     /**
@@ -479,8 +501,9 @@ public class RetentionSweeper {
     /**
      * Free-space check, run on every scheduled sweep pass. Computes free bytes on the video
      * directory's filesystem and, if below the low-disk threshold, publishes a {@code {scope:"disk"}}
-     * error frame and returns a warning. Returns null when disk is healthy. NEVER blocks recording --
-     * it only warns.
+     * error frame, records the observation in {@link LowDiskState} (so {@code GET /status} carries
+     * it) and returns a warning. A healthy check clears that state and returns null; a failed probe
+     * leaves it unchanged. NEVER blocks recording -- it only warns.
      *
      * @return a warning string when low on disk, or null when healthy / unknown
      */
@@ -495,10 +518,13 @@ public class RetentionSweeper {
             return null;
         }
         if (free >= LOW_DISK_THRESHOLD_BYTES) {
+            lowDiskState.clear();
             return null;
         }
         String warning = "Low disk space: " + free + " bytes free on the video drive (under "
                 + LOW_DISK_THRESHOLD_BYTES + " bytes). Recording continues; old VODs will be pruned.";
+        lowDiskState.set(
+                new LowDiskState.LowDisk(free, LOW_DISK_THRESHOLD_BYTES, warning, clock.millis()));
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("scope", "disk");
         payload.put("freeBytes", free);
