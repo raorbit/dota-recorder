@@ -5,10 +5,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import dev.dotarec.config.FfmpegLocator;
+import java.awt.image.BufferedImage;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Optional;
+import javax.imageio.ImageIO;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -66,7 +68,7 @@ class ClipperTest {
         // Generate a tiny 3s test clip with ffmpeg's lavfi (color video + sine audio) so the cut has a
         // real container/codecs to work on -- no fixture file checked into the repo, no network.
         Path source = dir.resolve("source.mp4");
-        generateTestInput(ffmpegExe, source);
+        generateTestInput(ffmpegExe, source, "160x120");
         assumeTrue(Files.isRegularFile(source) && fileSize(source) > 0L,
                 "could not generate ffmpeg test input; skipping");
 
@@ -84,6 +86,33 @@ class ClipperTest {
         assertThat(thumbOut).isEqualTo(thumb);
         assertThat(Files.isRegularFile(thumb)).isTrue();
         assertThat(fileSize(thumb)).isPositive();
+        // A source narrower than the cap keeps its size: the scale filter never upscales.
+        BufferedImage small = ImageIO.read(thumb.toFile());
+        assertThat(small.getWidth()).isEqualTo(160);
+        assertThat(small.getHeight()).isEqualTo(120);
+    }
+
+    @Test
+    void thumbnail_withRealFfmpeg_downscalesAWideSourceToTheWidthCap(@TempDir Path dir)
+            throws IOException {
+        Path ffmpegExe = locateFfmpeg();
+        assumeTrue(ffmpegExe != null, "ffmpeg not available on PATH or bundled; skipping");
+        Clipper clipper = new Clipper(new FfmpegLocator(ffmpegExe.toString()));
+
+        // A 16:9 source wider than the cap, like a real 1080p VOD (kept small so the test stays quick).
+        Path source = dir.resolve("wide.mp4");
+        generateTestInput(ffmpegExe, source, "960x540");
+        assumeTrue(Files.isRegularFile(source) && fileSize(source) > 0L,
+                "could not generate ffmpeg test input; skipping");
+
+        Path thumb = dir.resolve("thumb.jpg");
+        clipper.thumbnail(source, 0.5, thumb);
+
+        // The renderer draws clip thumbs at ~30-44 px, so a full-size frame (~8 MB decoded at 1080p)
+        // was pure waste; the grab is capped at THUMBNAIL_MAX_WIDTH with the aspect ratio kept.
+        BufferedImage image = ImageIO.read(thumb.toFile());
+        assertThat(image.getWidth()).isEqualTo(Clipper.THUMBNAIL_MAX_WIDTH);
+        assertThat(image.getHeight()).isEqualTo(270);
     }
 
     /**
@@ -136,11 +165,15 @@ class ClipperTest {
         return Optional.empty();
     }
 
-    /** Render a 3-second test clip (testsrc video + sine audio) so the cut has real codecs to copy. */
-    private static void generateTestInput(Path ffmpegExe, Path output) throws IOException {
+    /**
+     * Render a 3-second test clip (testsrc video at {@code size}, e.g. "160x120", + sine audio) so
+     * the cut has real codecs to copy.
+     */
+    private static void generateTestInput(Path ffmpegExe, Path output, String size)
+            throws IOException {
         java.util.List<String> cmd = java.util.List.of(
                 ffmpegExe.toString(), "-y",
-                "-f", "lavfi", "-i", "testsrc=duration=3:size=160x120:rate=15",
+                "-f", "lavfi", "-i", "testsrc=duration=3:size=" + size + ":rate=15",
                 "-f", "lavfi", "-i", "sine=frequency=440:duration=3",
                 "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-shortest",
