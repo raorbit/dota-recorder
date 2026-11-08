@@ -9,6 +9,14 @@ server:
   # bridge is loopback-only and app-internal — there is no untrusted client to leak details to.
   error:
     include-message: always
+  tomcat:
+    threads:
+      # One loopback client (the renderer) plus the shell's status poll. Tomcat's defaults keep 10
+      # idle threads and allow 200; the VOD/clip streams run on the MVC async pool (MvcAsyncConfig),
+      # not on these. The GSI connector has its own cap in GsiConnectorConfig: these properties
+      # only ever reach the primary connector.
+      max: 16
+      min-spare: 2
 
 spring:
   application:

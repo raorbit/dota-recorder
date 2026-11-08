@@ -6,12 +6,18 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import org.apache.catalina.connector.Connector;
+import org.apache.coyote.AbstractProtocol;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.SpringBootConfiguration;
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
 import org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
+import org.springframework.boot.web.embedded.tomcat.TomcatWebServer;
+import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
 import org.springframework.context.annotation.Import;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -19,6 +25,7 @@ import org.springframework.test.util.TestSocketUtils;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
 
 /**
  * Boots the REAL embedded Tomcat with BOTH connectors -- the bridge (a random {@code server.port})
@@ -89,10 +96,52 @@ class BridgeConnectorIntegrationTest {
         assertThat(status(bridgePort, "GET", "/probe", TOKEN)).isEqualTo(200);
     }
 
+    @Autowired private ServletWebServerApplicationContext context;
+
+    @Test
+    void bothConnectorsRunSmallThreadPools() {
+        // One loopback client each. The bridge pool comes from server.tomcat.threads.* in
+        // application.yml; the GSI connector's from GsiConnectorConfig, because Spring's properties
+        // never reach an additional connector. Tomcat's own defaults would be 200 max / 10 idle on each.
+        AbstractProtocol<?> bridge = protocolOnPort(bridgePort);
+        assertThat(bridge.getMaxThreads()).isEqualTo(16);
+        assertThat(bridge.getMinSpareThreads()).isEqualTo(2);
+
+        AbstractProtocol<?> gsi = protocolOnPort(gsiPort);
+        assertThat(gsi.getMaxThreads()).isEqualTo(GsiConnectorConfig.MAX_THREADS);
+        assertThat(gsi.getMinSpareThreads()).isEqualTo(GsiConnectorConfig.MIN_SPARE_THREADS);
+    }
+
+    @Test
+    void streamingResponsesRunOnTheBoundedMvcAsyncPool() throws Exception {
+        // A StreamingResponseBody is written on the MVC async executor. Without MvcAsyncConfig that
+        // is Spring's thread-per-response SimpleAsyncTaskExecutor ("MvcAsync-N" threads).
+        HttpRequest request =
+                HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + bridgePort + "/stream-thread"))
+                        .header(BridgeAuthFilter.TOKEN_HEADER, TOKEN)
+                        .GET()
+                        .build();
+        HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
+        assertThat(response.statusCode()).isEqualTo(200);
+        assertThat(response.body()).startsWith(MvcAsyncConfig.THREAD_NAME_PREFIX);
+    }
+
+    /** The protocol handler of the connector bound to {@code port} (the bridge's is random). */
+    private AbstractProtocol<?> protocolOnPort(int port) {
+        TomcatWebServer server = (TomcatWebServer) context.getWebServer();
+        for (Connector connector : server.getTomcat().getService().findConnectors()) {
+            if (connector.getLocalPort() == port || connector.getPort() == port) {
+                return (AbstractProtocol<?>) connector.getProtocolHandler();
+            }
+        }
+        throw new AssertionError("no Tomcat connector is bound to port " + port);
+    }
+
     @SpringBootConfiguration
     @EnableAutoConfiguration(exclude = DataSourceAutoConfiguration.class)
     @Import({
         GsiConnectorConfig.class,
+        MvcAsyncConfig.class,
         BridgeAuthFilter.class,
         GsiConnectorScopeFilter.class,
         BridgeConnectorIntegrationTest.ProbeController.class
@@ -110,6 +159,12 @@ class BridgeConnectorIntegrationTest {
         @PostMapping("/gsi")
         String gsi() {
             return "ok";
+        }
+
+        /** Reports the thread a streaming body is written on (the MVC async executor). */
+        @GetMapping("/stream-thread")
+        StreamingResponseBody streamThread() {
+            return out -> out.write(Thread.currentThread().getName().getBytes(StandardCharsets.UTF_8));
         }
     }
 }
