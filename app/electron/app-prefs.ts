@@ -10,8 +10,10 @@ import * as path from 'node:path';
 export interface AppPrefs {
   // Start the app automatically when the user signs in to Windows (hidden in the tray).
   readonly launchAtLogin: boolean;
-  // Download app updates in the background and offer a one-click "Restart to update".
-  // Defaults ON (unlike launchAtLogin) so users stay current without opting in.
+  // Download app updates in the background, offer a one-click "Restart to update", and install a
+  // downloaded update on its own once the app has sat idle in the tray for a while (no match, Dota
+  // closed, window closed). Defaults ON (unlike launchAtLogin) so users stay current without
+  // opting in — the installed app once sat on a stale version for weeks with the next one staged.
   readonly autoUpdate: boolean;
 }
 

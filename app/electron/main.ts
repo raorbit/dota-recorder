@@ -28,6 +28,11 @@ import { ObsSupervisor } from './obs-supervisor';
 import { SupervisionController } from './supervision';
 import { pathIsAccessible, revealablePath } from './reveal-path-guard';
 import { RotatingLog } from './rotating-log';
+import {
+  clearRelaunchHiddenMarker,
+  consumeRelaunchHiddenMarker,
+  writeRelaunchHiddenMarker,
+} from './relaunch-marker';
 import { parseStatusBody, toObsDemandReading, type StatusReading } from './status-reading';
 import { restorableBounds, type Rect } from './window-bounds';
 import {
@@ -46,7 +51,7 @@ import {
   logDir,
   packagedIndexHtml,
 } from './paths';
-import { UpdateController, type BusyResult } from './update-controller';
+import { UpdateController, type BusyResult, type InstallMode } from './update-controller';
 import { initUpdater, releaseNotesUrl, type UpdaterHandle } from './updater';
 import type { UpdateState } from './bridge-contract';
 
@@ -110,8 +115,10 @@ const INSTALL_QUIT_GRACE_MS = 10_000;
 // One-time "we're still in the tray" hint, shown the first time the window is hidden so
 // closing the window doesn't look like the app vanished.
 let trayHintShown = false;
-// Auto-start launches (login item) carry --hidden so the app boots straight to the tray.
-const startHidden = process.argv.includes(HIDDEN_LAUNCH_ARG);
+// Auto-start launches (login item) carry --hidden so the app boots straight to the tray. So does the
+// relaunch after an unattended update (the installer restarts the app; a short-lived marker file
+// says the install happened idle in the tray, so nobody asked for a window) — see bootstrap().
+let startHidden = process.argv.includes(HIDDEN_LAUNCH_ARG);
 
 // Crash-supervision policy — bounded restart, re-entrancy / launch guards, OBS teardown on a core
 // crash — lives in SupervisionController so it can be unit-tested without Electron. Here we just wire
@@ -189,6 +196,12 @@ async function bootstrap(): Promise<void> {
   app.setAppUserModelId(isDev ? process.execPath : 'dev.dotarec.recorder');
   fs.mkdirSync(logDir(), { recursive: true });
   logLine('app starting; launching core');
+  // The arguments matter here (--hidden, the installer's relaunch flags), so keep a record.
+  logLine(`argv: ${process.argv.slice(1).join(' ')}`);
+  if (consumeRelaunchHiddenMarker(app.getPath('userData'), Date.now())) {
+    startHidden = true;
+    logLine('relaunched after an unattended update; staying in the tray');
+  }
   registerPrefsIpc();
   registerWindowIpc();
   // Reconcile the OS login item with the stored pref on every launch (packaged only),
@@ -236,7 +249,8 @@ function initAutoUpdate(): void {
     triggerCheck: () => updaterHandle?.check(),
     triggerDownload: () => updaterHandle?.download(),
     isBusy: isRecordingBusy,
-    doInstall: () => void installUpdateNow(),
+    isIdleForInstall,
+    doInstall: (mode) => void installUpdateNow(mode),
     emit: (state) => {
       latestUpdateState = state;
       sendToRenderer('updates:state', state);
@@ -247,6 +261,7 @@ function initAutoUpdate(): void {
       const timer = setTimeout(fn, ms);
       return () => clearTimeout(timer);
     },
+    now: () => Date.now(),
   });
   updateController.start();
 }
@@ -716,24 +731,41 @@ function showToast(kind: BackgroundNotificationKind, title: string, body: string
 // hidden; now that it is destroyed, the main process — always alive — is their single owner.
 const backgroundNotifier = new BackgroundNotifier({ notify: showToast, now: () => Date.now() });
 
-/**
- * One GET /status reading for the main process, shared by the OBS demand poll and the background
- * notifier so there is one fetch per tick. Null when the core is unreachable or the body says
- * nothing usable: the demand poll then leaves OBS as it is, and the notifier resets its orphan streak.
- */
-async function pollStatus(): Promise<StatusReading | null> {
-  let reading: StatusReading | null = null;
+/** GET /status, parsed; null when the core is unreachable or the body says nothing usable. */
+async function fetchStatusReading(): Promise<StatusReading | null> {
   try {
     const res = await fetch(`${BRIDGE_BASE}/status`, {
       signal: AbortSignal.timeout(1_500),
       headers: { [BRIDGE_TOKEN_HEADER]: bridgeToken },
     });
-    if (res.ok) reading = parseStatusBody(await res.json());
+    return res.ok ? parseStatusBody(await res.json()) : null;
   } catch {
-    reading = null;
+    return null;
   }
+}
+
+/**
+ * The periodic /status reading for the main process, shared by the OBS demand poll and the
+ * background notifier so there is one fetch per tick. On null the demand poll leaves OBS as it is,
+ * and the notifier resets its orphan streak.
+ */
+async function pollStatus(): Promise<StatusReading | null> {
+  const reading = await fetchStatusReading();
   backgroundNotifier.onStatus(reading);
   return reading;
+}
+
+/**
+ * The unattended-install gate for a downloaded update: idle means nothing is arming, recording or
+ * stopping, OBS is not wanted (Dota closed, no GSI frames for 30 s, no preview open), the window is
+ * closed to the tray, and no shutdown is underway. Fail-safe to false: an unreachable core, or any
+ * doubt, keeps the update waiting for a quieter moment or for the user's own click.
+ */
+async function isIdleForInstall(): Promise<boolean> {
+  if (shuttingDown || isQuitting || mainWindow !== null) return false;
+  const reading = await fetchStatusReading();
+  if (reading === null) return false;
+  return reading.fsmState === 'IDLE' && !reading.recording && !reading.wanted;
 }
 
 /**
@@ -754,8 +786,11 @@ async function readObsDemandReading(): Promise<ObsDemandReading | null> {
  * lets the quit proceed rather than re-running shutdown() — otherwise the two deadlock. shuttingDown
  * is set too so crash supervision treats the teardown as intentional, not a crash.
  */
-async function installUpdateNow(): Promise<void> {
-  logLine('[updater] installing update: stopping supervisors then quitAndInstall');
+async function installUpdateNow(mode: InstallMode): Promise<void> {
+  logLine(`[updater] installing update (${mode}): stopping supervisors then quitAndInstall`);
+  // An unattended install happened with the window closed to the tray, so the installer's relaunch
+  // should come back to the tray too, not pop a window onto whatever the user is doing.
+  if (mode === 'auto') writeRelaunchHiddenMarker(app.getPath('userData'), Date.now());
   isQuitting = true;
   shuttingDown = true;
   await stopSupervisors();
@@ -783,6 +818,8 @@ async function installUpdateNow(): Promise<void> {
 async function recoverFromFailedInstall(): Promise<void> {
   if (!supervisorsStopped) return; // a real quit already proceeded, or recovery already ran
   logLine('[updater] quitAndInstall did not exit within the grace period; recovering supervisors');
+  // No relaunch is coming, so the next launch (whenever it is) must not start hidden.
+  clearRelaunchHiddenMarker(app.getPath('userData'));
   supervisorsStopped = false;
   shuttingDown = false;
   isQuitting = false;
