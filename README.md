@@ -157,8 +157,11 @@ and the match database stays in `%APPDATA%\dota-recorder`.
 - A GPU/CPU that can record (the app probes for a hardware encoder, falling back to
   x264 — CPU-only encoding costs real FPS on weaker machines)
 
-Footprint: the whole stack (UI, JVM core, bundled OBS) idles around 600 MB of RAM on the
-dev machine, and the installer is ~340 MB.
+Footprint: closed to the tray with Dota not running, the app is just the Electron shell and the
+JVM core — the window is destroyed when you close it and the bundled OBS runs only while Dota
+does — around 200 MB of RAM shortly after launch on the dev machine and roughly half that once
+Windows trims the idle pages. The installer is ~340 MB. `scripts/measure-footprint.ps1` prints
+the per-process breakdown of a running app.
 
 > **Streaming with your own OBS?** This app runs its own background OBS instance that
 > Game-Captures Dota. Ports and config never clash with your install (the managed OBS
