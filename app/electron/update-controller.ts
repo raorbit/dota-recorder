@@ -108,6 +108,9 @@ export class UpdateController {
   // idle checks in a row have passed since the last non-idle one.
   private downloadedAt: number | null = null;
   private idleStreak = 0;
+  // The update whose installer is staged on disk, so a check that finds the same version leaves it
+  // alone, a newer one supersedes it, and a failed replacement download falls back to it.
+  private staged: { readonly version: string; readonly notesUrl?: string } | null = null;
 
   private readonly firstCheckMs: number;
   private readonly periodicMs: number;
@@ -144,13 +147,17 @@ export class UpdateController {
    * Manual check (Settings "Check for updates"): always runs, even when auto-update is
    * disabled, so the user can see whether an update exists. Returns the snapshot after the
    * check starts (status 'checking'); the real result lands via the on*() callbacks + emit.
+   *
+   * A DOWNLOADED update is checked again on purpose. Checks used to stop once an update was
+   * staged, so the staged installer went stale: 0.1.17 sat downloaded for weeks while 0.1.18
+   * shipped, and "Restart to update" then moved the app up one version with another download
+   * waiting behind it. Now a newer release replaces the staged one (see onUpdateAvailable), and
+   * the 'downloaded' state stays put during the check so the Restart button never blinks away.
    */
   check(): UpdateState {
-    // Don't disturb an in-progress download or a ready-to-install update with a fresh check.
-    if (this.snapshot.status === 'downloading' || this.snapshot.status === 'downloaded') {
-      return this.snapshot;
-    }
-    this.set({ status: 'checking' });
+    // Don't disturb an in-progress download with a fresh check.
+    if (this.snapshot.status === 'downloading') return this.snapshot;
+    if (this.snapshot.status !== 'downloaded') this.set({ status: 'checking' });
     this.deps.triggerCheck();
     return this.snapshot;
   }
@@ -281,11 +288,32 @@ export class UpdateController {
   // --- electron-updater event sinks (called by the adapter in updater.ts) ---
 
   onCheckingForUpdate(): void {
+    // A re-check of a staged update keeps its 'downloaded' state (see check()).
+    if (this.snapshot.status === 'downloaded') return;
     this.set({ status: 'checking' });
   }
 
   onUpdateAvailable(version: string, notesUrl: string): void {
-    this.deps.log(`[updater] update available: ${version}`);
+    if (this.snapshot.status === 'downloaded' && this.staged !== null) {
+      // A re-check of a staged update. The same version: nothing to do (electron-updater reports
+      // "available" for anything newer than the running app, staged or not). A newer one: the staged
+      // installer is stale, so download the newer one over it — unless auto-download is off, in which
+      // case the staged installer stays the one the Restart button installs.
+      if (version === this.staged.version) {
+        this.deps.log(`[updater] ${version} is still the latest; the staged installer stands`);
+        return;
+      }
+      if (!this.deps.isEnabled()) {
+        this.deps.log(
+          `[updater] ${version} is newer than the staged ${this.staged.version}; auto-update is off, keeping the staged one`,
+        );
+        return;
+      }
+      this.deps.log(`[updater] ${version} supersedes the staged ${this.staged.version}; downloading it`);
+      this.clearIdleCheck();
+    } else {
+      this.deps.log(`[updater] update available: ${version}`);
+    }
     this.set({ status: 'available', version, notesUrl });
     // Auto-download only when enabled; a disabled pref leaves it at 'available' so the UI can
     // surface it without pulling ~320 MB in the background.
@@ -293,6 +321,9 @@ export class UpdateController {
   }
 
   onUpdateNotAvailable(): void {
+    // Can't happen while an update is staged (the feed said it was newer than the running app),
+    // short of a release being pulled; the staged installer stays installable either way.
+    if (this.snapshot.status === 'downloaded') return;
     this.set({ status: 'not-available' });
   }
 
@@ -306,12 +337,12 @@ export class UpdateController {
     this.downloading = false;
     this.clearRetry();
     this.deps.log(`[updater] update downloaded: ${version}`);
-    this.set({
-      status: 'downloaded',
-      version,
-      // Carry the notes URL forward from the 'available' snapshot when we have it.
-      ...(this.snapshot.notesUrl !== undefined ? { notesUrl: this.snapshot.notesUrl } : {}),
-    });
+    // Carry the notes URL forward from the 'available' snapshot when we have it.
+    this.staged =
+      this.snapshot.notesUrl !== undefined
+        ? { version, notesUrl: this.snapshot.notesUrl }
+        : { version };
+    this.set(this.stagedSnapshot());
     // Start watching for a quiet moment to install unattended.
     this.downloadedAt = this.deps.now();
     this.idleStreak = 0;
@@ -326,7 +357,27 @@ export class UpdateController {
     // would hide the "Restart to update" affordance and the sidebar dot even though the installer is
     // still on disk. Keep the downloaded state; the error is logged and recoverable via a manual check.
     if (this.snapshot.status === 'downloaded') return;
+    if (this.staged !== null) {
+      // The check or download of a NEWER release failed; the previously staged installer is still
+      // on disk, so go back to offering (and, when idle, installing) that one.
+      this.deps.log(`[updater] keeping the staged ${this.staged.version} installable`);
+      this.set(this.stagedSnapshot());
+      this.idleStreak = 0;
+      this.armIdleCheck();
+      return;
+    }
     this.set({ status: 'error', error: message });
+  }
+
+  /** The plain 'downloaded' snapshot for the staged installer (no deferral flags). */
+  private stagedSnapshot(): UpdateState {
+    const staged = this.staged;
+    if (staged === null) return { status: 'downloaded' };
+    return {
+      status: 'downloaded',
+      version: staged.version,
+      ...(staged.notesUrl !== undefined ? { notesUrl: staged.notesUrl } : {}),
+    };
   }
 
   // --- internals ---
