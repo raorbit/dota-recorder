@@ -22,6 +22,16 @@ public class GsiConnectorConfig
 
     private static final String LOOPBACK = "127.0.0.1";
 
+    /**
+     * Thread cap for the GSI connector. Dota posts its frames one at a time from a single process,
+     * so Tomcat's defaults (200 max, 10 kept idle) are pure overhead here. Spring's
+     * {@code server.tomcat.threads.*} only reaches the primary connector; an additional connector
+     * keeps its own executor, so it is capped directly. Package-visible for the connector test.
+     */
+    static final int MAX_THREADS = 4;
+
+    static final int MIN_SPARE_THREADS = 1;
+
     private final int gsiPort;
 
     public GsiConnectorConfig(@Value("${app.gsi.port:3223}") int gsiPort) {
@@ -40,6 +50,8 @@ public class GsiConnectorConfig
         // Bind this connector to loopback only. setProperty("address", ...)
         // delegates to the HTTP protocol handler's bind address.
         connector.setProperty("address", LOOPBACK);
+        connector.setProperty("maxThreads", Integer.toString(MAX_THREADS));
+        connector.setProperty("minSpareThreads", Integer.toString(MIN_SPARE_THREADS));
         return connector;
     }
 }
