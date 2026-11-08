@@ -31,14 +31,6 @@ import type { Bucket } from './buckets';
 import type { UpdateState } from '../../electron/bridge-contract';
 import { mergeLibraryLoad } from '../lib/library-load';
 import {
-  isOrphanedRecording,
-  stepOrphanNotify,
-  shouldNotifyDisk,
-  INITIAL_ORPHAN_NOTIFY_STATE,
-  ORPHAN_NOTIFY_DELAY_MS,
-  type OrphanNotifyState,
-} from '../lib/system-notify';
-import {
   applyMatchesDeleted,
   applyMatchVideosDeleted,
   applyRecordingsDeleted,
@@ -71,9 +63,10 @@ export interface LibraryState {
   readonly counts: BucketCounts;
   readonly status: Status | null;
   readonly loadState: LoadState;
-  // The latest low-disk warning the core pushed (core "error" frame, scope "disk"), or null when none
-  // is outstanding. Backs a visible banner; the wiring also fires a debounced OS notification. Set by
-  // the socket subscription in startLibrary; cleared via setDiskWarning(null) when a banner is dismissed.
+  // The latest low-disk warning: pushed by the core's "error" frame (scope "disk") and seeded from
+  // GET /status (storage.lowDisk) on mount/reconnect, or null when none is outstanding. Backs the
+  // in-app banner only; the OS notification is the Electron main process's (it outlives the window).
+  // Cleared via setDiskWarning(null) when the banner is dismissed.
   readonly diskWarning: DiskWarning | null;
   // Latest app-update snapshot pushed by the Electron main process (electron-updater), or null
   // outside Electron / before the first push. Drives the Settings update row + the Sidebar
@@ -337,40 +330,18 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
   };
 });
 
-// Best-effort desktop notification for the storage-observability events. No-op when the Notification
-// API is absent (unit tests / a stripped runtime); requests permission once while it is still default.
-// Reaches the user even while the window is hidden to the tray — Electron keeps the renderer alive on
-// hide (main.ts hides, never destroys, on window close), so the notification still fires.
-function notify(title: string, body: string, tag: string): void {
-  if (typeof Notification === 'undefined') return;
-  const fire = (): void => {
-    try {
-      new Notification(title, { body, tag });
-    } catch {
-      /* some runtimes throw on construction; best-effort only */
-    }
-  };
-  if (Notification.permission === 'granted') {
-    fire();
-  } else if (Notification.permission === 'default') {
-    void Notification.requestPermission()
-      .then((perm) => {
-        if (perm === 'granted') fire();
-      })
-      .catch(() => {});
-  }
-}
-
 /**
  * Wires the library store to live data: kicks off the initial load, primes the
  * status from a one-shot GET /status, and subscribes to the StatusSocket. The
  * socket drives the live status card and triggers a list refresh when the core
  * pushes a `match.recorded` / `match.enriched` / `retention.swept` frame; a
- * low-disk `error` frame surfaces a banner + a debounced OS notification.
+ * low-disk `error` frame surfaces the banner.
  *
  * On reconnect it reconciles (a silent library refetch + status re-prime) so
- * events missed while the socket was down are picked up. It also fires a one-shot
- * notification when OBS is left recording an FSM-orphaned output for >60s.
+ * events missed while the socket was down are picked up.
+ *
+ * OS notifications (an orphaned recording, low disk) are NOT raised here: a window
+ * closed to the tray is destroyed, so the Electron main process owns them.
  *
  * Returns a teardown function that closes the socket and detaches listeners.
  */
@@ -379,11 +350,15 @@ export function startLibrary(): () => void {
 
   void store.load();
 
-  // Prime status from a one-shot GET /status so the card is not blank before the first WS frame.
+  // Prime status from a one-shot GET /status so the card is not blank before the first WS frame. The
+  // same snapshot seeds the low-disk banner: the core's hourly check may have warned long before this
+  // window existed, and its one-off `error` frame is gone, so /status carries the latest observation.
+  // Mount/reconnect only, never per frame, so a dismissed banner doesn't come back every 5 s.
   const primeStatus = async (): Promise<void> => {
     try {
       const snapshot = await fetchStatus();
       useLibraryStore.getState().setStatus(toStatus(snapshot));
+      useLibraryStore.getState().setDiskWarning(snapshot.storage?.lowDisk ?? null);
     } catch {
       // Core not up yet; the socket will fill this in once it connects.
     }
@@ -403,47 +378,14 @@ export function startLibrary(): () => void {
 
   const socket = new StatusSocket();
 
-  // Orphaned-recording notification: fire a single OS notification once OBS has been recording an
-  // output the FSM no longer tracks for longer than the debounce window (so a self-healing blip
-  // doesn't trip it), and reset the one-shot when the condition clears. Re-evaluated on every status
-  // frame; a timer re-checks the threshold crossing even if no new frame arrives in the meantime.
-  let orphanState: OrphanNotifyState = INITIAL_ORPHAN_NOTIFY_STATE;
-  let orphanTimer: ReturnType<typeof setTimeout> | null = null;
-  const clearOrphanTimer = (): void => {
-    if (orphanTimer !== null) {
-      clearTimeout(orphanTimer);
-      orphanTimer = null;
-    }
-  };
-  const evaluateOrphan = (): void => {
-    const active = isOrphanedRecording(useLibraryStore.getState().status);
-    const { next, fire } = stepOrphanNotify(orphanState, active, Date.now());
-    orphanState = next;
-    if (fire) {
-      notify(
-        'OBS is still recording',
-        'A recording is running that the recorder has lost track of. Open Dota 2 Recorder to stop it.',
-        'dotarec-orphan',
-      );
-    }
-    clearOrphanTimer();
-    if (active && !next.notified && next.since !== null) {
-      const remaining = Math.max(0, next.since + ORPHAN_NOTIFY_DELAY_MS - Date.now());
-      orphanTimer = setTimeout(evaluateOrphan, remaining);
-    }
-  };
-
   const offStatus = socket.onStatus((status) => {
     useLibraryStore.getState().setStatus(status);
-    evaluateOrphan();
   });
 
   const offConn = socket.onConnectionChange((connected) => {
     if (!connected) {
-      // On drop, clear status so the card reads "unknown" rather than going stale; the orphan streak
-      // resets too (status now null -> not an orphan).
+      // On drop, clear status so the card reads "unknown" rather than going stale.
       useLibraryStore.getState().setStatus(null);
-      evaluateOrphan();
       return;
     }
     // Reconnect (or first connect): reconcile so events missed while the socket was down are picked
@@ -453,16 +395,9 @@ export function startLibrary(): () => void {
     void primeStatus();
   });
 
-  // Low-disk warnings: surface a banner (store state) and fire a debounced OS notification. The banner
-  // updates every frame; only the notification is rate-limited so repeated pre-record checks don't spam.
-  let lastDiskNotifyAt: number | null = null;
+  // Low-disk warnings: surface the banner (store state). The OS notification is the main process's.
   const offDisk = socket.onDiskWarning((warning) => {
     useLibraryStore.getState().setDiskWarning(warning);
-    const now = Date.now();
-    if (shouldNotifyDisk(lastDiskNotifyAt, now)) {
-      lastDiskNotifyAt = now;
-      notify('Low disk space', warning.message, 'dotarec-disk');
-    }
   });
 
   // Beyond `status` frames, the socket forwards library-mutating events (match.recorded /
@@ -502,7 +437,6 @@ export function startLibrary(): () => void {
     off();
     offClips();
     offUpdate?.();
-    clearOrphanTimer();
     if (reloadTimer !== null) clearTimeout(reloadTimer);
     socket.close();
   };

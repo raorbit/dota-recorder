@@ -89,6 +89,17 @@ export interface StatusSnapshot {
     readonly state: string;
     readonly activeMatchId: number | null;
   };
+  // Storage health: the core's latest low-disk observation, or null while the video drive is
+  // healthy. Optional only for a core predating it; the parser fills it in.
+  readonly storage?: {
+    readonly lowDisk: LowDiskStatus | null;
+  };
+}
+
+// A low-disk observation as /status carries it: the warning fields plus the wall-clock time of the
+// hourly check that made it. Seeds the banner for a window created after the `error` frame went out.
+export interface LowDiskStatus extends DiskWarning {
+  readonly observedAtMs: number;
 }
 
 // Flattened live status delivered to onStatus() listeners. Derived from a
@@ -674,8 +685,9 @@ export type StateListener = (connected: boolean) => void;
 export type MatchEventListener = (evt: { type: string; payload: unknown }) => void;
 
 // A low-disk warning frame — the core publishes it as a `{ type: "error" }` envelope with
-// `scope: "disk"` (see RetentionSweeper.checkFreeSpaceWarning). The renderer surfaces it as a
-// banner and a debounced OS notification. Keep the fields in sync with the core payload.
+// `scope: "disk"` (see RetentionSweeper.checkFreeSpaceWarning). The renderer surfaces it as the
+// in-app banner; the OS notification is the Electron main process's, which reads the same
+// observation from /status. Keep the fields in sync with the core payload.
 export interface DiskWarning {
   readonly freeBytes: number;
   readonly thresholdBytes: number;
@@ -783,7 +795,20 @@ function parseStatusSnapshot(payload: unknown): StatusSnapshot | null {
       wanted,
     },
     fsm: { state: fsm.state, activeMatchId: fsm.activeMatchId ?? null },
+    // storage is optional on the wire (an older core omits it); a missing or malformed lowDisk reads
+    // as healthy rather than rejecting the frame.
+    storage: { lowDisk: parseLowDiskStatus(payload.storage) },
   };
+}
+
+// storage.lowDisk from a /status body: the DiskWarning fields plus observedAtMs, or null when the
+// drive is healthy / the field is absent or malformed.
+function parseLowDiskStatus(storage: unknown): LowDiskStatus | null {
+  if (!isRecord(storage) || !isRecord(storage.lowDisk)) return null;
+  const warning = parseDiskWarning({ ...storage.lowDisk, scope: 'disk' });
+  const { observedAtMs } = storage.lowDisk;
+  if (warning === null || typeof observedAtMs !== 'number') return null;
+  return { ...warning, observedAtMs };
 }
 
 // Validate a clip.* frame just enough to route it AND to survive what its listeners dereference.
