@@ -26,7 +26,10 @@ export function App(): React.JSX.Element {
   const selectedMatchId = useLibraryStore((s) => s.selectedMatchId);
   const selectedClipId = useLibraryStore((s) => s.selectedClipId);
   const clipPlayToken = useLibraryStore((s) => s.clipPlayToken);
-  const status = useLibraryStore((s) => s.status);
+  // Only the Settings view reads the raw snapshot (the GSI panel shows frame age), so select it only
+  // there: the core pushes a status frame every 5 s, and subscribing to it at this level re-rendered
+  // the whole tree — player, filter row, every table row — on each heartbeat, all day, for nothing.
+  const snapshot = useLibraryStore((s) => (view === 'settings' ? (s.status?.snapshot ?? null) : null));
 
   // Boot the store: initial REST load + StatusSocket subscription. Teardown on
   // unmount closes the socket and detaches listeners.
@@ -64,7 +67,7 @@ export function App(): React.JSX.Element {
               <MatchTable />
             </>
           ) : (
-            <SettingsView tab={settingsTab} snapshot={status?.snapshot ?? null} />
+            <SettingsView tab={settingsTab} snapshot={snapshot} />
           )}
         </main>
       </div>
