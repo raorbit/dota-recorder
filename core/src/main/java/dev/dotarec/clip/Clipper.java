@@ -52,6 +52,12 @@ public class Clipper {
      */
     private static final long MAX_TIMEOUT_MS = TimeUnit.MINUTES.toMillis(30);
 
+    /**
+     * Thumbnail width cap in pixels. Wide enough for any size the UI shows a clip thumb at (it is
+     * drawn at ~30-44 px) with room for HiDPI; a narrower source is never upscaled.
+     */
+    static final int THUMBNAIL_MAX_WIDTH = 480;
+
     private final FfmpegLocator ffmpeg;
 
     public Clipper(FfmpegLocator ffmpeg) {
@@ -138,6 +144,13 @@ public class Clipper {
         cmd.add(source.toString());
         cmd.add("-frames:v");
         cmd.add("1");
+        // Thumbnail-sized, not source-sized: the renderer shows these at ~30-44 px wide, yet a full
+        // 1080p grab decodes to ~8 MB per <img>, one per clip row and one per clip of the open match.
+        // The width is capped (a narrower source is left alone, never upscaled); the height follows
+        // the aspect ratio in even pixels. The quotes keep the comma inside min() out of ffmpeg's
+        // option separator; no shell is involved, so they reach the filter parser verbatim.
+        cmd.add("-vf");
+        cmd.add("scale=w='min(" + THUMBNAIL_MAX_WIDTH + ",iw)':h=-2");
         cmd.add("-q:v");
         cmd.add("3");
         cmd.add(output.toString());
