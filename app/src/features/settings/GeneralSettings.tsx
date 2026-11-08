@@ -29,7 +29,12 @@ function updateSummary(u: UpdateState | null, autoOn: boolean): { title: string;
     case 'downloading':
       return { title: `Downloading update… ${u.percent ?? 0}%`, desc: 'You can keep using the app.' };
     case 'downloaded':
-      return { title: `Update ready — v${u.version ?? ''}`, desc: 'Restart to finish installing.' };
+      return {
+        title: `Update ready — v${u.version ?? ''}`,
+        desc: autoOn
+          ? 'Restart to finish installing, or leave it: it installs on its own once the app has sat idle in the tray for a while.'
+          : 'Restart to finish installing.',
+      };
     case 'error':
       return { title: 'Update check failed', desc: u.error ?? 'Something went wrong.' };
     case 'not-available':
@@ -135,8 +140,9 @@ export function GeneralSettings(): React.JSX.Element {
         <div className="gen-row-text">
           <div className="gen-row-title">Automatic updates</div>
           <p className="gen-row-desc">
-            Download new versions in the background and install them with one click. Updates never
-            interrupt a match — they wait until you're not recording.
+            Download new versions in the background and install them with one click, or on their
+            own while the app sits idle in the tray (no match, Dota closed, window closed). Updates
+            never interrupt a match — they wait until you're not recording.
           </p>
         </div>
         <button
