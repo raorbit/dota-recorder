@@ -144,8 +144,18 @@ tasks.register<Exec>("jlinkImage") {
             "--add-modules",
             "java.se,jdk.unsupported,jdk.crypto.ec,jdk.crypto.cryptoki,jdk.zipfs,jdk.management",
             "--strip-debug", "--no-header-files", "--no-man-pages", "--compress", "2",
+            // Ship a class-data-sharing archive (bin/server/classes.jsa on Windows): without it the
+            // trimmed image has none at all and every JDK class is parsed and verified on each boot.
+            // The JVM picks it up by default (-Xshare:auto). Mostly a startup win; the archive is
+            // relocated under ASLR on Windows, so the metaspace it saves is modest.
+            "--generate-cds-archive",
             "--output", imageDir.get().asFile.absolutePath,
         )
+    }
+    doLast {
+        // jlink also emits classes_nocoops.jsa (12 MB), the variant for heaps above 32 GB where
+        // compressed oops are off. The core runs with -Xmx256m, so it can never be used; drop it.
+        delete(fileTree(imageDir) { include("**/classes_nocoops.jsa") })
     }
 }
 
