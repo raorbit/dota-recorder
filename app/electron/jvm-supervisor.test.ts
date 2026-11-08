@@ -62,6 +62,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
 });
 
 const flush = (ms = 0): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -80,12 +81,37 @@ describe('JvmSupervisor', () => {
     expect(args).toContain(`-Dapp.parent-pid=${process.pid}`);
   });
 
-  it('caps the JVM heap so ergonomics do not size it from host RAM', async () => {
+  it('runs the core on footprint-tuned JVM flags (small heap, Serial GC, C1 only)', async () => {
     const sup = new JvmSupervisor({ onLog: () => {} });
     await sup.start();
     const args = spawnMock.mock.calls[0][1] as string[];
-    expect(args).toContain('-Xms64m');
+    // The heap cap keeps ergonomics from sizing the heap off host RAM; the rest trims GC and JIT
+    // overhead for an idle sidecar. Each flag is pinned so a drive-by edit can't silently drop one.
+    expect(args).toContain('-Xms32m');
     expect(args).toContain('-Xmx256m');
+    expect(args).toContain('-XX:+UseSerialGC');
+    expect(args).toContain('-XX:TieredStopAtLevel=1');
+    expect(args).toContain('-XX:ReservedCodeCacheSize=64m');
+    // Flags precede the jar: anything after `-jar <jar>` would be a program argument, not a JVM one.
+    expect(args.indexOf('-XX:+UseSerialGC')).toBeLessThan(args.indexOf('-jar'));
+  });
+
+  it('appends DOTAREC_JVM_OPTS entries before -jar, and none when it is unset', async () => {
+    vi.stubEnv('DOTAREC_JVM_OPTS', ' -XX:NativeMemoryTracking=summary   -Xlog:gc ');
+    const sup = new JvmSupervisor({ onLog: () => {} });
+    await sup.start();
+    const args = spawnMock.mock.calls[0][1] as string[];
+    expect(args).toContain('-XX:NativeMemoryTracking=summary');
+    expect(args).toContain('-Xlog:gc');
+    expect(args.indexOf('-Xlog:gc')).toBeLessThan(args.indexOf('-jar'));
+    expect(args).not.toContain(''); // stray whitespace never becomes an empty argument
+
+    vi.stubEnv('DOTAREC_JVM_OPTS', '');
+    const plain = new JvmSupervisor({ onLog: () => {} });
+    await plain.start();
+    const plainArgs = spawnMock.mock.calls[1][1] as string[];
+    expect(plainArgs).not.toContain('');
+    expect(plainArgs.some((a) => a.startsWith('-XX:NativeMemoryTracking'))).toBe(false);
   });
 
   it('threads the bundled ffmpeg path into the core (system property + env) when present', async () => {
