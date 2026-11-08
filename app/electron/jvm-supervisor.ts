@@ -28,6 +28,16 @@ import {
 // must stay identical to FfmpegLocator.FFMPEG_PATH_ENV in the core.
 const FFMPEG_PATH_ENV = 'DOTAREC_FFMPEG_PATH';
 
+// Extra JVM options, whitespace-separated, appended after the fixed flags below. A diagnostics
+// hook: a footprint run (-XX:NativeMemoryTracking=summary, -Xlog:gc) or a flag experiment needs no
+// code edit. Unset in normal use.
+export const JVM_OPTS_ENV = 'DOTAREC_JVM_OPTS';
+
+/** Splits a DOTAREC_JVM_OPTS value into argv entries; unset or blank yields none. */
+export function extraJvmOpts(value: string | undefined): string[] {
+  return (value ?? '').split(/\s+/).filter((opt) => opt.length > 0);
+}
+
 export interface SupervisorOptions {
   /** Total time to wait for /health before giving up. */
   readonly healthTimeoutMs?: number;
@@ -114,11 +124,29 @@ export class JvmSupervisor {
     // Omitted in dev when no bundled ffmpeg is present (the core falls back to "ffmpeg" on PATH).
     const ffmpeg = ffmpegPath();
     const jvmArgs = [
-      // Cap the heap: without this, JVM ergonomics size it from HOST RAM (max 1/4, initial 1/64 —
-      // 16 GB / 1 GB on a 64 GB machine), so the core commits ~1 GB of heap it never touches and
-      // shows an alarming Commit size in Task Manager. Real heap need is well under 100 MB.
-      '-Xms64m',
+      // Footprint-tuned JVM. The core is an event-driven sidecar (a couple of GSI frames a second,
+      // SQLite writes, obs-websocket commands), so the throughput-oriented defaults buy nothing and
+      // cost memory: on them an idle core sat at ~56 MB working set / ~312 MB commit with 75 threads
+      // (G1 with 8 parallel + 2 concurrent workers, C2 with 4 compiler threads and a 240 MB
+      // code-cache reservation, 49 MB of it in use).
+      //  - Serial GC: on a 32–256 MB heap G1's worker threads, remembered sets and card tables are
+      //    pure overhead; Serial also hands heap back after a full GC. Its worst case, a full
+      //    collection of a 256 MB old gen, pauses ~100–300 ms, which nothing here notices (markers
+      //    are wall-clock anchored; OBS does the recording).
+      //  - -Xmx256m caps the heap: ergonomics would otherwise size it from HOST RAM (1/4 max, 1/64
+      //    initial — 16 GB / 1 GB on a 64 GB box) and show an alarming Commit size in Task Manager.
+      //    Real heap need is well under 100 MB; -Xms32m lets it grow on demand from a small floor.
+      //  - Min/MaxHeapFreeRatio 20/40 (defaults 40/70): shrink back after a transient spike.
+      //  - TieredStopAtLevel=1 (C1 only): no profiled-tier duplicates, no C2 compile arenas, one
+      //    compiler thread instead of four. ReservedCodeCacheSize matches a C1-only cache.
+      '-XX:+UseSerialGC',
+      '-Xms32m',
       '-Xmx256m',
+      '-XX:MinHeapFreeRatio=20',
+      '-XX:MaxHeapFreeRatio=40',
+      '-XX:TieredStopAtLevel=1',
+      '-XX:ReservedCodeCacheSize=64m',
+      ...extraJvmOpts(process.env[JVM_OPTS_ENV]),
       `-Dapp.obs.dir=${obsDir()}`,
       ...(source ? [`-Dapp.obs.source-dir=${source}`] : []),
       `-Dapp.obs.version=${obsVersion()}`,
