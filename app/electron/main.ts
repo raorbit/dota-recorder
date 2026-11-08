@@ -4,11 +4,23 @@
 // TODO(plan Step 1+): surface a loud, actionable error window when the core fails
 // to start or crashes mid-session ("core stopped - recordings paused") instead of
 // the bare dialog used here.
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell, Tray } from 'electron';
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  Menu,
+  nativeImage,
+  Notification,
+  screen,
+  shell,
+  Tray,
+} from 'electron';
 import { randomBytes } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { BackgroundNotifier, type BackgroundNotificationKind } from './background-notifier';
 import { JvmSupervisor } from './jvm-supervisor';
 import { isAllowedNavigation, type AllowedNavigation } from './navigation-guard';
 import { ObsDemandController, OBS_DEMAND_POLL_MS, type ObsDemandReading } from './obs-demand';
@@ -16,6 +28,8 @@ import { ObsSupervisor } from './obs-supervisor';
 import { SupervisionController } from './supervision';
 import { pathIsAccessible, revealablePath } from './reveal-path-guard';
 import { RotatingLog } from './rotating-log';
+import { parseStatusBody, toObsDemandReading, type StatusReading } from './status-reading';
+import { restorableBounds, type Rect } from './window-bounds';
 import {
   applyLaunchAtLogin,
   getAutoUpdate,
@@ -70,9 +84,19 @@ let shuttingDown = false;
 // before-quit's preventDefault (shutdown() early-returns on shuttingDown, so nothing ever
 // calls app.exit()).
 let supervisorsStopped = false;
-// True once a REAL quit is underway (tray Quit / menu Quit / before-quit), so the
-// window 'close' handler knows to actually close instead of hiding to the tray.
+// True once a REAL quit is underway (tray Quit / menu Quit / before-quit), so the window 'close'
+// handler skips the tray hint and showWindow() stops re-creating the window.
 let isQuitting = false;
+// Window lifecycle. Closing the window DESTROYS it — the renderer process, its GPU memory and the
+// audio service go with it — and the app lives on in the tray, which re-creates the window on
+// demand. These remember enough to bring it back where it was, and to honour a show asked for
+// before the core was healthy (a second instance at boot) or before the window had painted.
+let coreReady = false;
+let showPending = false;
+let windowReady = false;
+let showOnReady = false;
+let savedBounds: Rect | null = null;
+let savedMaximized = false;
 // Auto-update policy + electron-updater handle, wired in initAutoUpdate() (packaged only).
 // null in dev / before init. latestUpdateState is the last pushed snapshot, served to the
 // renderer's one-shot updates:getState poll.
@@ -105,7 +129,7 @@ const supervision = new SupervisionController({
 // OBS runs only while the core wants it (Dota running, a match recording, the preview open), so an
 // idle OBS isn't rendering and holding audio devices all day. Polled from bootstrap on.
 const obsDemand = new ObsDemandController({
-  readStatus: readObsDemand,
+  readStatus: readObsDemandReading,
   isObsRunning: () => obsSupervisor?.isRunning() === true,
   isObsLaunching: () => supervision.isObsLaunching(),
   canLaunch: () => !supervision.hasObsGivenUp(),
@@ -129,10 +153,9 @@ if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   app.on('second-instance', () => {
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.focus();
-    }
+    // A second launch (Start menu, taskbar) means "show me the app": bring the window back from the
+    // tray, re-creating it if it was closed.
+    showWindow();
   });
 
   app.whenReady().then(bootstrap).catch(fatal);
@@ -145,32 +168,44 @@ if (!app.requestSingleInstanceLock()) {
       // deadlock the install).
       return;
     }
-    // Mark a real quit so the window 'close' handler stops hiding to the tray, then
-    // defer the actual exit until the JVM/OBS are stopped so we never orphan them.
+    // Mark a real quit so the window 'close' handler skips the tray hint, then defer the actual
+    // exit until the JVM/OBS are stopped so we never orphan them.
     isQuitting = true;
     event.preventDefault();
     void shutdown();
   });
 
   app.on('window-all-closed', () => {
-    // Do NOT quit here: closing the window hides it to the tray, where the app keeps
-    // auto-recording. The only real exit is the tray menu (or File -> Quit), which
-    // sets isQuitting and goes through before-quit -> shutdown.
+    // Do NOT quit here: closing the window destroys it, and the app keeps auto-recording from the
+    // tray with no window at all. The only real exit is the tray menu (or File -> Quit), which sets
+    // isQuitting and goes through before-quit -> shutdown.
   });
 }
 
 async function bootstrap(): Promise<void> {
+  // Windows ties toasts (Notification) to an AppUserModelID: use the appId electron-builder stamps
+  // on the installed Start-menu shortcut, so main-process notifications show and group with the app.
+  // Dev has no such shortcut; the executable path is the documented stand-in there.
+  app.setAppUserModelId(isDev ? process.execPath : 'dev.dotarec.recorder');
   fs.mkdirSync(logDir(), { recursive: true });
   logLine('app starting; launching core');
   registerPrefsIpc();
+  registerWindowIpc();
   // Reconcile the OS login item with the stored pref on every launch (packaged only),
   // so a pref set in a prior session still applies if it ever drifts.
   applyLaunchAtLogin();
   await supervisor.start();
-  logLine('core healthy; opening window');
-  createWindow();
+  coreReady = true;
+  // Auto-started at login the app sits in the tray with NO window — no renderer process until the
+  // tray icon is clicked. A show asked for during startup (a second instance) still wins.
+  if (startHidden && !showPending) {
+    logLine('core healthy; staying in the tray (launched at login)');
+  } else {
+    logLine('core healthy; opening window');
+    createWindow({ show: true });
+  }
+  showPending = false;
   createTray();
-  if (startHidden) logLine('started hidden in tray (launched at login)');
   // OBS launches in the background whenever the core wants it, so a slow or failed OBS never
   // blocks the UI; the status card reflects OBS connectivity from /status.
   void obsDemand.tick();
@@ -204,7 +239,7 @@ function initAutoUpdate(): void {
     doInstall: () => void installUpdateNow(),
     emit: (state) => {
       latestUpdateState = state;
-      mainWindow?.webContents.send('updates:state', state);
+      sendToRenderer('updates:state', state);
     },
     log: logLine,
     isEnabled: () => getAutoUpdate(),
@@ -214,6 +249,50 @@ function initAutoUpdate(): void {
     },
   });
   updateController.start();
+}
+
+/** Push to the renderer when a live window exists (none while closed to the tray; it primes on mount). */
+function sendToRenderer(channel: string, payload: unknown): void {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload);
+}
+
+/**
+ * Window controls for the frameless window's custom title bar (WindowFrame) and the native folder
+ * picker. Registered once; each resolves ITS window from the calling webContents, so a handler can
+ * never act on a stale instance after the window has been re-created from the tray.
+ */
+function registerWindowIpc(): void {
+  const windowOf = (event: Electron.IpcMainInvokeEvent): BrowserWindow | null =>
+    BrowserWindow.fromWebContents(event.sender);
+  ipcMain.removeHandler('window:minimize');
+  ipcMain.handle('window:minimize', (event) => {
+    windowOf(event)?.minimize();
+  });
+  ipcMain.removeHandler('window:maximizeToggle');
+  ipcMain.handle('window:maximizeToggle', (event) => {
+    const win = windowOf(event);
+    if (!win) return;
+    if (win.isMaximized()) win.unmaximize();
+    else win.maximize();
+  });
+  // Close destroys the window; the app stays in the tray (see createWindow's 'close' handler).
+  ipcMain.removeHandler('window:close');
+  ipcMain.handle('window:close', (event) => {
+    windowOf(event)?.close();
+  });
+  // Native folder picker for the recording output-folder Browse button. Renderer-driven over IPC
+  // because the renderer is sandboxed and can't open dialogs itself; parented to the window so it's
+  // modal (which also means the window can't be closed from its own title bar while it is open).
+  ipcMain.removeHandler('dialog:selectFolder');
+  ipcMain.handle('dialog:selectFolder', async (event): Promise<string | null> => {
+    const win = windowOf(event);
+    if (!win) return null;
+    const result = await dialog.showOpenDialog(win, {
+      title: 'Choose recording folder',
+      properties: ['openDirectory', 'createDirectory'],
+    });
+    return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0];
+  });
 }
 
 /** Renderer-driven get/set for the app-level prefs (currently launch-at-login). */
@@ -317,10 +396,24 @@ function createTrayIcon(): Electron.NativeImage {
   return nativeImage.createFromBitmap(buf, { width: size, height: size });
 }
 
-/** Bring the window back from the tray (re-creating it if it was destroyed). */
+/**
+ * Bring the window back from the tray, re-creating it if it was closed. Safe at any time: during a
+ * shutdown it does nothing; before the core is healthy it records the wish for bootstrap; a window
+ * still loading shows itself once painted (a tray double-click fires click first, so the second call
+ * lands before ready-to-show and must not flash an unpainted window).
+ */
 function showWindow(): void {
+  if (shuttingDown || isQuitting) return;
+  if (!coreReady) {
+    showPending = true;
+    return;
+  }
   if (!mainWindow) {
-    createWindow();
+    createWindow({ show: true });
+    return;
+  }
+  if (!windowReady) {
+    showOnReady = true;
     return;
   }
   if (mainWindow.isMinimized()) mainWindow.restore();
@@ -456,10 +549,22 @@ async function pollLaunchArgs(maxRetries = 30): Promise<{
   throw new Error('Core did not provide OBS launch args within timeout');
 }
 
-function createWindow(): void {
-  mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 820,
+/**
+ * Create the browser window. There is at most one, and a window closed to the tray is destroyed, so
+ * this runs again on the next tray click — at the bounds the last one had, when those still land on
+ * a display. `show` says whether to show it once it has painted.
+ */
+function createWindow(opts: { readonly show: boolean }): void {
+  const bounds = restorableBounds(
+    savedBounds,
+    savedBounds ? screen.getDisplayMatching(savedBounds).workArea : null,
+  );
+  windowReady = false;
+  showOnReady = opts.show;
+  const win = new BrowserWindow({
+    width: bounds?.width ?? 1280,
+    height: bounds?.height ?? 820,
+    ...(bounds ? { x: bounds.x, y: bounds.y } : {}),
     minWidth: 1024,
     minHeight: 640,
     backgroundColor: '#0e0f12',
@@ -472,56 +577,40 @@ function createWindow(): void {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      // Nothing typed here needs spell-checking (a search box, paths, an account id); skipping it
+      // keeps the spellcheck service and its dictionaries out of the renderer.
+      spellcheck: false,
       // Hand the per-launch bridge token to the (sandboxed) preload via process.argv.
       additionalArguments: [`${BRIDGE_TOKEN_ARG_PREFIX}${bridgeToken}`],
     },
   });
+  mainWindow = win;
 
-  // Stay hidden when auto-started at login (the app sits in the tray); otherwise show.
-  mainWindow.once('ready-to-show', () => {
-    if (!startHidden) mainWindow?.show();
+  // Show only once painted (no white flash). showOnReady also carries a show asked for while the
+  // window was still loading. maximize() shows a hidden window itself, hence the branch.
+  win.once('ready-to-show', () => {
+    windowReady = true;
+    if (!showOnReady) return;
+    showOnReady = false;
+    if (savedMaximized) win.maximize();
+    else win.show();
+    win.focus();
   });
-  // Closing the window hides it to the tray (keeps recording) unless a real quit is
-  // underway. The first hide shows a one-time tray hint so the app doesn't seem to vanish.
-  mainWindow.on('close', (event) => {
-    if (!isQuitting) {
-      event.preventDefault();
-      mainWindow?.hide();
-      showTrayHint();
+  // Closing DESTROYS the window: the renderer process, its GPU memory and the audio service go with
+  // it, and the app keeps recording from the tray (window-all-closed is a no-op). Remember where it
+  // was for the next createWindow, and show the one-time tray hint so the app doesn't seem to vanish.
+  win.on('close', () => {
+    if (!win.isDestroyed()) {
+      savedMaximized = win.isMaximized();
+      savedBounds = win.getNormalBounds();
     }
+    if (!isQuitting) showTrayHint();
   });
-  mainWindow.on('closed', () => {
-    mainWindow = null;
-  });
-
-  // Native folder picker for the recording output-folder Browse button. Renderer-driven over
-  // IPC because the renderer is sandboxed and can't open dialogs itself. Registered with handle()
-  // (idempotent re-register on window re-create) and parented to the window so it's modal.
-  // Window controls for the frameless window's custom title bar. Close routes
-  // through window.close() so the hide-to-tray close handler above still applies.
-  ipcMain.removeHandler('window:minimize');
-  ipcMain.handle('window:minimize', () => {
-    mainWindow?.minimize();
-  });
-  ipcMain.removeHandler('window:maximizeToggle');
-  ipcMain.handle('window:maximizeToggle', () => {
-    if (!mainWindow) return;
-    if (mainWindow.isMaximized()) mainWindow.unmaximize();
-    else mainWindow.maximize();
-  });
-  ipcMain.removeHandler('window:close');
-  ipcMain.handle('window:close', () => {
-    mainWindow?.close();
-  });
-
-  ipcMain.removeHandler('dialog:selectFolder');
-  ipcMain.handle('dialog:selectFolder', async (): Promise<string | null> => {
-    if (!mainWindow) return null;
-    const result = await dialog.showOpenDialog(mainWindow, {
-      title: 'Choose recording folder',
-      properties: ['openDirectory', 'createDirectory'],
-    });
-    return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0];
+  win.on('closed', () => {
+    if (mainWindow === win) {
+      mainWindow = null;
+      windowReady = false;
+    }
   });
 
   // Lock the window to its own bundled content: deny popups and block any navigation away from the
@@ -531,8 +620,8 @@ function createWindow(): void {
   const allowedNav: AllowedNavigation = isDev
     ? { devServerUrl: DEV_SERVER_URL }
     : { packagedIndexUrl: pathToFileURL(packagedIndexHtml()).href };
-  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  mainWindow.webContents.on('will-navigate', (event, url) => {
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  win.webContents.on('will-navigate', (event, url) => {
     if (!isAllowedNavigation(url, allowedNav)) {
       event.preventDefault();
       logLine(`blocked navigation to ${url}`);
@@ -540,9 +629,9 @@ function createWindow(): void {
   });
 
   if (isDev) {
-    void mainWindow.loadURL(DEV_SERVER_URL);
+    void win.loadURL(DEV_SERVER_URL);
   } else {
-    void mainWindow.loadFile(packagedIndexHtml());
+    void win.loadFile(packagedIndexHtml());
   }
 }
 
@@ -601,30 +690,60 @@ async function isRecordingBusy(): Promise<BusyResult> {
   }
 }
 
+// Main-process toasts (Electron Notification): one live per kind, replaced rather than stacked, and
+// clicking one brings the window back. Always logged, so the log shows what the user was told.
+const liveToasts = new Map<BackgroundNotificationKind, Notification>();
+
+function showToast(kind: BackgroundNotificationKind, title: string, body: string): void {
+  logLine(`[notify] ${title}: ${body}`);
+  if (!Notification.isSupported()) return;
+  try {
+    liveToasts.get(kind)?.close();
+    const toast = new Notification({ title, body });
+    toast.on('click', showWindow);
+    toast.on('close', () => {
+      if (liveToasts.get(kind) === toast) liveToasts.delete(kind);
+    });
+    liveToasts.set(kind, toast);
+    toast.show();
+  } catch (err) {
+    logLine(`[notify] could not show a notification: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+// The orphaned-recording and low-disk notifications, fed by the same /status poll that drives OBS
+// demand (every OBS_DEMAND_POLL_MS). They lived in the renderer while a closed window was only
+// hidden; now that it is destroyed, the main process — always alive — is their single owner.
+const backgroundNotifier = new BackgroundNotifier({ notify: showToast, now: () => Date.now() });
+
 /**
- * One reading for the OBS demand poll from GET /status. `wanted` missing (a core predating on-demand
- * OBS) reads as wanted, so a mismatched core keeps the old always-on behavior; any failure is null,
- * which leaves OBS as it is.
+ * One GET /status reading for the main process, shared by the OBS demand poll and the background
+ * notifier so there is one fetch per tick. Null when the core is unreachable or the body says
+ * nothing usable: the demand poll then leaves OBS as it is, and the notifier resets its orphan streak.
  */
-async function readObsDemand(): Promise<ObsDemandReading | null> {
+async function pollStatus(): Promise<StatusReading | null> {
+  let reading: StatusReading | null = null;
   try {
     const res = await fetch(`${BRIDGE_BASE}/status`, {
       signal: AbortSignal.timeout(1_500),
       headers: { [BRIDGE_TOKEN_HEADER]: bridgeToken },
     });
-    if (!res.ok) return null;
-    const body = (await res.json()) as {
-      obs?: { wanted?: boolean; recording?: boolean };
-      fsm?: { state?: string };
-    };
-    if (typeof body.fsm?.state !== 'string') return null;
-    return {
-      wanted: body.obs?.wanted !== false,
-      busy: body.obs?.recording === true || body.fsm.state !== 'IDLE',
-    };
+    if (res.ok) reading = parseStatusBody(await res.json());
   } catch {
-    return null;
+    reading = null;
   }
+  backgroundNotifier.onStatus(reading);
+  return reading;
+}
+
+/**
+ * The OBS demand poll's view of /status. `wanted` missing (a core predating on-demand OBS) reads as
+ * wanted, so a mismatched core keeps the old always-on behavior; any failure is null, which leaves
+ * OBS as it is.
+ */
+async function readObsDemandReading(): Promise<ObsDemandReading | null> {
+  const reading = await pollStatus();
+  return reading === null ? null : toObsDemandReading(reading);
 }
 
 /**
