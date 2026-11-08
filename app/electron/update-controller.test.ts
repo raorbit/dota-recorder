@@ -166,16 +166,83 @@ describe('UpdateController', () => {
     expect(states.at(-1)).toEqual({ status: 'checking' });
   });
 
-  it('check() does not disturb an in-flight download or a ready update', () => {
+  it('check() does not disturb an in-flight download', async () => {
     const { controller, deps } = harness();
     controller.onUpdateAvailable('1.2.0', 'url'); // enabled+idle -> begins download path
-    // Force into downloading via a progress event is not valid until download starts; instead
-    // drive the terminal states directly:
-    controller.onUpdateDownloaded('1.2.0');
+    await flush();
+    expect(controller.getState().status).toBe('downloading');
     deps.triggerCheck.mockClear();
     const s = controller.check();
     expect(deps.triggerCheck).not.toHaveBeenCalled();
-    expect(s.status).toBe('downloaded');
+    expect(s.status).toBe('downloading');
+  });
+
+  describe('a staged update keeps getting checked against the feed', () => {
+    it('re-checks while downloaded without disturbing the Restart button', () => {
+      const h = harness();
+      h.controller.onUpdateDownloaded('1.2.0');
+      h.deps.triggerCheck.mockClear();
+      h.states.length = 0;
+      // Manual and periodic checks both run now; neither emits 'checking' over 'downloaded'.
+      expect(h.controller.check().status).toBe('downloaded');
+      h.controller.onCheckingForUpdate();
+      expect(h.deps.triggerCheck).toHaveBeenCalledTimes(1);
+      expect(h.states).toHaveLength(0);
+      // The feed still says 1.2.0: the staged installer stands, nothing is re-downloaded.
+      h.controller.onUpdateAvailable('1.2.0', 'url');
+      expect(h.deps.triggerDownload).not.toHaveBeenCalled();
+      expect(h.controller.getState()).toEqual({ status: 'downloaded', version: '1.2.0' });
+      // Even a bogus not-available can't take the staged installer away.
+      h.controller.onUpdateNotAvailable();
+      expect(h.controller.getState().status).toBe('downloaded');
+    });
+
+    it('the periodic check keeps running after a download', () => {
+      const h = harness();
+      h.controller.start();
+      h.controller.onUpdateDownloaded('1.2.0');
+      h.deps.triggerCheck.mockClear();
+      // Fire the armed update check (1000 ms, firstCheckMs), not the idle tick armed after it.
+      const check = h.tasks.find((t) => t.ms === 1000 && !t.cancelled && !t.fired);
+      expect(check).toBeDefined();
+      check!.fired = true;
+      check!.fn();
+      expect(h.deps.triggerCheck).toHaveBeenCalledTimes(1);
+      expect(h.controller.getState().status).toBe('downloaded');
+    });
+
+    it('downloads a newer release over the staged one and installs the newer one', async () => {
+      const h = harness({ idle: true });
+      h.controller.onUpdateDownloaded('1.2.0');
+      h.controller.onUpdateAvailable('1.3.0', 'url13');
+      await flush();
+      expect(h.deps.triggerDownload).toHaveBeenCalledTimes(1);
+      expect(h.controller.getState()).toMatchObject({ status: 'downloading', version: '1.3.0' });
+      expect(h.liveIdleChecks()).toBe(0); // the old installer's idle watch is off while replacing it
+      h.controller.onUpdateDownloaded('1.3.0');
+      expect(h.controller.getState()).toEqual({ status: 'downloaded', version: '1.3.0', notesUrl: 'url13' });
+      expect(h.liveIdleChecks()).toBe(1); // ...and back on, with a fresh grace period
+      await h.controller.installNow();
+      expect(h.deps.doInstall).toHaveBeenCalledWith('manual');
+    });
+
+    it('falls back to the staged installer when the newer download fails', async () => {
+      const h = harness({ idle: true });
+      h.controller.onUpdateDownloaded('1.2.0');
+      h.controller.onUpdateAvailable('1.3.0', 'url13');
+      await flush();
+      h.controller.onError('network gone');
+      expect(h.controller.getState()).toEqual({ status: 'downloaded', version: '1.2.0' });
+      expect(h.liveIdleChecks()).toBe(1);
+    });
+
+    it('with auto-update off, a newer release does not displace the staged installer', () => {
+      const h = harness({ enabled: false });
+      h.controller.onUpdateDownloaded('1.2.0');
+      h.controller.onUpdateAvailable('1.3.0', 'url13');
+      expect(h.deps.triggerDownload).not.toHaveBeenCalled();
+      expect(h.controller.getState()).toEqual({ status: 'downloaded', version: '1.2.0' });
+    });
   });
 
   it('auto-downloads an available update when enabled and idle', async () => {
