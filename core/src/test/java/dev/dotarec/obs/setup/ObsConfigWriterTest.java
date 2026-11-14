@@ -137,6 +137,9 @@ class ObsConfigWriterTest {
                 .contains("Mode=Simple")
                 .contains("RecFormat2=hybrid_mp4")
                 .contains("RecEncoder=nvenc")
+                // At the default Stream quality OBS records with the STREAMING encoder, so the probed
+                // token must be written there too or OBS's own default encoder runs instead.
+                .contains("StreamEncoder=nvenc")
                 .contains("BaseCX=2560")
                 .contains("BaseCY=1440")
                 // FilePath is written with forward slashes: OBS stores it in Qt QSettings INI form
@@ -186,7 +189,10 @@ class ObsConfigWriterTest {
         writer(paths, settings, "", "0").configure();
 
         Path ini = new ObsLayout(paths.obsDir()).profileIni();
-        assertThat(Files.readString(ini)).contains("RecEncoder=x264");
+        assertThat(Files.readString(ini))
+                .contains("RecEncoder=x264")
+                // ...and as the streaming encoder, which OBS uses at the default Stream quality.
+                .contains("StreamEncoder=x264");
         // The manual choice is preserved (not overwritten by the probe).
         assertThat(settings.get().encoder).isEqualTo("x264");
     }
