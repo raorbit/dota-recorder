@@ -2,6 +2,8 @@ package dev.dotarec.bridge;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 
 import dev.dotarec.config.AppPaths;
 import dev.dotarec.config.SettingsStore;
@@ -15,6 +17,7 @@ import dev.dotarec.data.TestDb;
 import dev.dotarec.retention.StorageMaintenanceLock;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 import javax.sql.DataSource;
@@ -183,6 +186,20 @@ class MatchControllerDeleteTest {
         // real move; here it proves the handler unlinked the re-read paths, not the probe's paths).
         assertThat(Files.exists(staleVod)).isTrue();
         assertThat(Files.exists(staleThumb)).isTrue();
+    }
+
+    @Test
+    void delete_isAnnounced_soAViewWhoseRequestGaveUpStillDropsTheRow() throws Exception {
+        // The delete waits for the maintenance lock, which an archive pass can hold for minutes;
+        // the renderer's request times out first, and only this frame tells it the delete landed.
+        EventPublisher events = mock(EventPublisher.class);
+        MatchController c = new MatchController(repo, markers, new PauseRepository(ds), clips,
+                settings, new StorageMaintenanceLock(), events);
+        long id = insert(writeFile("match.mp4", new byte[] {1}).toString(), null);
+
+        c.delete(id);
+
+        verify(events).publish("match.deleted", Map.of("id", id, "outcome", "deleted"));
     }
 
     @Test

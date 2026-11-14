@@ -18,7 +18,7 @@ import { heroDisplayName } from '../data/heroes';
 import { clipLabel } from '../lib/clip-format';
 import { markerSeekTarget, shouldShowVodOverlay } from '../lib/marker-overlay';
 import { SPACE_OWNING_TARGETS, shouldSpaceTogglePlayback } from '../lib/playback-hotkeys';
-import { shouldShowNoVideoPlaceholder, retentionAffectsMatch } from '../lib/video-availability';
+import { shouldShowNoVideoPlaceholder, libraryEventRemovesVod } from '../lib/video-availability';
 import { useLibraryStore } from '../store/library';
 import { PopupMenu } from './PopupMenu';
 import './video-player.css';
@@ -293,12 +293,13 @@ export function VideoPlayer({
         });
     };
 
-    // A retention pass may prune THIS match's VOD while it's open. On retention.swept, if the payload
-    // pruned this match, refresh full-VOD availability from the server rather than trusting the
-    // videoPath cached at selection time — the file may now be gone, so the stale videoUrl would 404.
+    // A retention pass (or a delete) may take THIS match's VOD while it's open. On a retention.swept
+    // that pruned it or a match.deleted for it, refresh full-VOD availability from the server rather
+    // than trusting the videoPath cached at selection time — the file may now be gone, so the stale
+    // videoUrl would 404.
     const offEvents = socket.onEvent((evt) => {
       if (cancelled) return;
-      if (evt.type !== 'retention.swept' || !retentionAffectsMatch(evt.payload, id)) return;
+      if (!libraryEventRemovesVod(evt, id)) return;
       refreshVideoUrl();
     });
 

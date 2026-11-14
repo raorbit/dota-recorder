@@ -16,7 +16,12 @@ describe('classifyWsFrame', () => {
   });
 
   it('routes the match.* frames to the library-event channel', () => {
-    for (const type of ['match.recorded', 'match.enriched', 'match.enrichFailed']) {
+    for (const type of [
+      'match.recorded',
+      'match.enriched',
+      'match.enrichFailed',
+      'match.deleted',
+    ]) {
       expect(classifyWsFrame({ type, payload: { id: 1 } })?.kind).toBe('libraryEvent');
     }
   });

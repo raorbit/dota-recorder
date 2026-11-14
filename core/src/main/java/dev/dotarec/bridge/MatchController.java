@@ -69,17 +69,27 @@ public class MatchController {
     private final ClipRepository clips;
     private final SettingsStore settings;
     private final StorageMaintenanceLock maintenanceLock;
+    /** Announces a finished delete; null in tests that don't observe it. */
+    private final EventPublisher events;
 
     @Autowired
     public MatchController(MatchRepository matches, MarkerRepository markers, PauseRepository pauses,
                            ClipRepository clips, SettingsStore settings,
-                           StorageMaintenanceLock maintenanceLock) {
+                           StorageMaintenanceLock maintenanceLock, EventPublisher events) {
         this.matches = matches;
         this.markers = markers;
         this.pauses = pauses;
         this.clips = clips;
         this.settings = settings;
         this.maintenanceLock = maintenanceLock;
+        this.events = events;
+    }
+
+    /** Test constructor: a shared maintenance lock, no event publisher. */
+    public MatchController(MatchRepository matches, MarkerRepository markers, PauseRepository pauses,
+                           ClipRepository clips, SettingsStore settings,
+                           StorageMaintenanceLock maintenanceLock) {
+        this(matches, markers, pauses, clips, settings, maintenanceLock, null);
     }
 
     /**
@@ -191,6 +201,11 @@ public class MatchController {
      * stranding the archived .mp4/thumb for {@code CrashRecoveryRunner} to re-import as a phantom match.
      * Under the lock the row's CURRENT paths are RE-READ (by id) immediately before unlinking, so the
      * files removed are always the row's present locations even if the archiver just repointed them.
+     *
+     * <p>That wait can outlast the renderer's request: the archiver holds the lock through a whole
+     * pass of cross-drive copies. The delete still completes after the request gave up, so it is
+     * announced as a {@code match.deleted} frame ({@code {id, outcome}}) for every open view to
+     * reload on; without it the row stayed listed until some unrelated reload.
      */
     @DeleteMapping("/matches/{id}")
     public DeleteOutcome delete(@PathVariable long id) {
@@ -221,7 +236,11 @@ public class MatchController {
         } finally {
             maintenanceLock.unlock();
         }
-        return new DeleteOutcome(stubbed ? "stubbed" : "deleted");
+        String outcome = stubbed ? "stubbed" : "deleted";
+        if (events != null) {
+            events.publish("match.deleted", Map.of("id", id, "outcome", outcome));
+        }
+        return new DeleteOutcome(outcome);
     }
 
     /**
