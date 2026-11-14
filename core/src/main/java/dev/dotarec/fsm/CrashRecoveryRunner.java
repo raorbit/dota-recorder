@@ -708,6 +708,9 @@ public class CrashRecoveryRunner implements ApplicationRunner {
         try (Stream<Path> stream = Files.list(thumbDir)) {
             return stream.filter(Files::isRegularFile)
                     .filter(p -> p.getFileName().toString().startsWith(prefix))
+                    // A ".partial" is the archiver's copy still in flight, cut short if the app died
+                    // mid-copy, so it is never the thumb.
+                    .filter(p -> !p.getFileName().toString().endsWith(".partial"))
                     // Files.list is unordered; sort by name so a same-owner multi-match (a leftover from
                     // a prior interrupted move alongside the current thumb) resolves deterministically.
                     .sorted(java.util.Comparator.comparing(p -> p.getFileName().toString()))

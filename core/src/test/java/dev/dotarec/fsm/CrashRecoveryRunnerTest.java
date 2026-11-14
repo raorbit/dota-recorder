@@ -488,6 +488,28 @@ class CrashRecoveryRunnerTest {
     }
 
     @Test
+    void relinkNeverTakesAnInterruptedThumbnailCopy() throws Exception {
+        Path archiveDir = configureArchive("hdd");
+        String recordingBytes = "bytes";
+        long id =
+                insertMatch(
+                        videoDir.resolve("gone.mp4").toString(), null, (long) recordingBytes.length());
+        Path stranded = archiveDir.resolve(id + "-gone.mp4");
+        Files.writeString(stranded, recordingBytes);
+        // An archive move cut short leaves its thumbnail copy as "<id>-gone.jpg.partial", and here it
+        // is the only id-prefixed thumb: re-linking the row to it would show a truncated image.
+        Path partialThumb =
+                Files.createDirectories(archiveDir.resolve("thumbs")).resolve(id + "-gone.jpg.partial");
+        Files.writeString(partialThumb, "cut");
+
+        runner.run(null);
+
+        MatchSummary row = matches.findById(id).orElseThrow();
+        assertThat(row.videoPath()).isEqualTo(stranded.toString());
+        assertThat(row.thumbPath()).isNotEqualTo(partialThumb.toString());
+    }
+
+    @Test
     void doesNotRelinkIdPrefixedArchiveFileWithMismatchedBasename() throws Exception {
         Path archiveDir = configureArchive("hdd");
         // The row LOST its video (missing path), which used to make ANY "<id>-..." file its new VOD. A
