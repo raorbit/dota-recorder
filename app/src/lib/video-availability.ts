@@ -23,6 +23,27 @@ export function retentionAffectsMatch(payload: unknown, matchId: number): boolea
   return Array.isArray(ids) && ids.includes(matchId);
 }
 
+// The parts of a media element releaseStaleMedia drives (the player's <video>).
+export interface ReleasableMedia {
+  readonly currentSrc: string;
+  pause(): void;
+  removeAttribute(name: string): void;
+  load(): void;
+}
+
+// Stops and empties a media element whose source went away. When the player's source becomes
+// undefined React only drops the src attribute, and a media element keeps playing what it already
+// loaded: selecting a recording with no video (or the open one being deleted or swept) left the
+// previous VOD playing, sound and all, behind the "recording removed" placeholder. Returns whether
+// there was anything to release.
+export function releaseStaleMedia(media: ReleasableMedia | null, src: string | undefined): boolean {
+  if (media === null || src !== undefined || media.currentSrc === '') return false;
+  media.pause();
+  media.removeAttribute('src');
+  media.load();
+  return true;
+}
+
 // Whether a library event took the given match's VOD away: a retention.swept that pruned it, or a
 // match.deleted for it (a delete that may have finished after the request that asked for it gave up).
 // The open player then re-derives full-VOD availability instead of streaming a file that is gone.

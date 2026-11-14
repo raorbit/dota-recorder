@@ -18,7 +18,11 @@ import { heroDisplayName } from '../data/heroes';
 import { clipLabel } from '../lib/clip-format';
 import { markerSeekTarget, shouldShowVodOverlay } from '../lib/marker-overlay';
 import { SPACE_OWNING_TARGETS, shouldSpaceTogglePlayback } from '../lib/playback-hotkeys';
-import { shouldShowNoVideoPlaceholder, libraryEventRemovesVod } from '../lib/video-availability';
+import {
+  shouldShowNoVideoPlaceholder,
+  libraryEventRemovesVod,
+  releaseStaleMedia,
+} from '../lib/video-availability';
 import { useLibraryStore } from '../store/library';
 import { PopupMenu } from './PopupMenu';
 import './video-player.css';
@@ -711,6 +715,16 @@ export function VideoPlayer({
   // The src the media element loads: a playing clip's stream when one is selected,
   // else the full match VOD (or nothing on a no-file row).
   const playSrc = activeClipId !== null ? clipStreamUrl(activeClipId) : (videoUrl ?? undefined);
+
+  // No source any more (a no-video row selected, or the open VOD deleted/swept): stop the element
+  // too, or the previous recording keeps playing behind the placeholder and drives the scrub bar.
+  useEffect(() => {
+    if (!releaseStaleMedia(videoRef.current, playSrc)) return;
+    setPlaying(false);
+    setProgress(0);
+    setCurrentTimeS(0);
+    setMediaDurationS(null);
+  }, [playSrc]);
 
   return (
     <div className="vp-stage" ref={stageRef}>

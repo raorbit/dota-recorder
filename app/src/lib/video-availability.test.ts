@@ -3,6 +3,8 @@ import {
   shouldShowNoVideoPlaceholder,
   retentionAffectsMatch,
   libraryEventRemovesVod,
+  releaseStaleMedia,
+  type ReleasableMedia,
 } from './video-availability';
 
 describe('shouldShowNoVideoPlaceholder', () => {
@@ -65,5 +67,36 @@ describe('libraryEventRemovesVod', () => {
     expect(libraryEventRemovesVod({ type: 'match.enriched', payload: { id: 2 } }, 2)).toBe(false);
     expect(libraryEventRemovesVod({ type: 'match.deleted', payload: null }, 2)).toBe(false);
     expect(libraryEventRemovesVod({ type: 'match.deleted', payload: { id: '2' } }, 2)).toBe(false);
+  });
+});
+
+describe('releaseStaleMedia', () => {
+  function media(currentSrc: string): ReleasableMedia & { calls: string[] } {
+    const calls: string[] = [];
+    return {
+      currentSrc,
+      calls,
+      pause: () => calls.push('pause'),
+      removeAttribute: (name) => calls.push(`remove ${name}`),
+      load: () => calls.push('load'),
+    };
+  }
+
+  it('stops and empties an element still holding the previous recording once the source is gone', () => {
+    const v = media('http://127.0.0.1:3224/matches/1/video/stream');
+    expect(releaseStaleMedia(v, undefined)).toBe(true);
+    expect(v.calls).toEqual(['pause', 'remove src', 'load']);
+  });
+
+  it('leaves an element alone while it has a source, or when it holds nothing', () => {
+    const playing = media('http://127.0.0.1:3224/matches/1/video/stream');
+    expect(releaseStaleMedia(playing, 'http://127.0.0.1:3224/matches/2/video/stream')).toBe(false);
+    expect(playing.calls).toEqual([]);
+
+    const empty = media('');
+    expect(releaseStaleMedia(empty, undefined)).toBe(false);
+    expect(empty.calls).toEqual([]);
+
+    expect(releaseStaleMedia(null, undefined)).toBe(false);
   });
 });
