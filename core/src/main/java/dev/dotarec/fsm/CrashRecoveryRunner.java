@@ -2,6 +2,7 @@ package dev.dotarec.fsm;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.dotarec.config.AppPaths;
 import dev.dotarec.config.SettingsStore;
 import dev.dotarec.config.StorageRoots;
 import dev.dotarec.data.ClipRepository;
@@ -31,6 +32,7 @@ import java.util.stream.Stream;
 import javax.sql.DataSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.core.annotation.Order;
@@ -82,7 +84,28 @@ public class CrashRecoveryRunner implements ApplicationRunner {
     private final ObjectMapper mapper;
     private final SettingsStore settings;
     private final StorageMaintenanceLock maintenanceLock;
+    private final OrphanAdoptionFloors adoptionFloors;
 
+    @Autowired
+    public CrashRecoveryRunner(
+            RecordingSessionRepository journal,
+            MatchRepository matches,
+            ClipRepository clips,
+            MarkerRepository markers,
+            PauseRepository pauses,
+            DataSource dataSource,
+            ObjectMapper mapper,
+            SettingsStore settings,
+            StorageMaintenanceLock maintenanceLock,
+            AppPaths paths) {
+        this(journal, matches, clips, markers, pauses, dataSource, mapper, settings, maintenanceLock,
+                new OrphanAdoptionFloors(paths.dataDir()));
+    }
+
+    /**
+     * For tests that only replay the journal: with no data folder to keep the adoption floors in, it
+     * adopts and links no orphan recordings.
+     */
     public CrashRecoveryRunner(
             RecordingSessionRepository journal,
             MatchRepository matches,
@@ -93,6 +116,21 @@ public class CrashRecoveryRunner implements ApplicationRunner {
             ObjectMapper mapper,
             SettingsStore settings,
             StorageMaintenanceLock maintenanceLock) {
+        this(journal, matches, clips, markers, pauses, dataSource, mapper, settings, maintenanceLock,
+                new OrphanAdoptionFloors(null));
+    }
+
+    private CrashRecoveryRunner(
+            RecordingSessionRepository journal,
+            MatchRepository matches,
+            ClipRepository clips,
+            MarkerRepository markers,
+            PauseRepository pauses,
+            DataSource dataSource,
+            ObjectMapper mapper,
+            SettingsStore settings,
+            StorageMaintenanceLock maintenanceLock,
+            OrphanAdoptionFloors adoptionFloors) {
         this.journal = journal;
         this.matches = matches;
         this.clips = clips;
@@ -102,6 +140,7 @@ public class CrashRecoveryRunner implements ApplicationRunner {
         this.mapper = mapper;
         this.settings = settings;
         this.maintenanceLock = maintenanceLock;
+        this.adoptionFloors = adoptionFloors;
     }
 
     @Override
@@ -115,26 +154,30 @@ public class CrashRecoveryRunner implements ApplicationRunner {
         // scan) is taken with no move/sweep in flight and cannot go stale mid-decision.
         maintenanceLock.lock();
         try {
+            // Before anything is linked or adopted, so a root new to this scan (the first boot after
+            // the upgrade, or a newly chosen folder) adopts nothing it already held.
+            OrphanAdoptionFloors.Snapshot floors =
+                    adoptionFloors.prepare(scanRoots(), System.currentTimeMillis());
             List<RecordingSessionRow> unfinished = journal.findUnfinished();
             if (unfinished.isEmpty()) {
-                reconcileOrphanVods();
+                reconcileOrphanVods(floors);
                 return;
             }
             log.warn("Recovering {} unfinished recording session(s)", unfinished.size());
             for (RecordingSessionRow session : unfinished) {
                 try {
-                    recover(session);
+                    recover(session, floors);
                 } catch (RuntimeException e) {
                     log.error("Failed to recover recording session {}: {}", session.sessionId(), e.toString(), e);
                 }
             }
-            reconcileOrphanVods();
+            reconcileOrphanVods(floors);
         } finally {
             maintenanceLock.unlock();
         }
     }
 
-    private void recover(RecordingSessionRow session) {
+    private void recover(RecordingSessionRow session, OrphanAdoptionFloors.Snapshot floors) {
         List<RecordingEventRow> events = journal.findEvents(session.sessionId());
         long recoveredAt = System.currentTimeMillis();
         // Elapsed from the record-confirmed wall anchor to the last journal update (never negative).
@@ -150,7 +193,7 @@ public class CrashRecoveryRunner implements ApplicationRunner {
             // OBS reveals the recording path only on StopRecord, so a crash mid-recording leaves the
             // journal with no path. Claim the leftover .mp4 for this recovered match rather than
             // letting the orphan scan import it as a detached, video-only row.
-            videoPath = linkOrphanVideo(session);
+            videoPath = linkOrphanVideo(session, floors);
         }
         Long fileSizeBytes = fileSizeOrNull(videoPath);
 
@@ -296,19 +339,32 @@ public class CrashRecoveryRunner implements ApplicationRunner {
         }
     }
 
-    private void reconcileOrphanVods() {
+    private void reconcileOrphanVods(OrphanAdoptionFloors.Snapshot floors) {
         Set<String> referenced = referencedVideoPaths();
         // Active drive: an unreferenced recording here is a crash that lost its journaled path; adopt it
         // as a standalone gsi_only row (its OBS name carries no match id to tie it back to). Adoption is
-        // provenance-gated (recorder-produced basenames only) so a user's own videos are never claimed.
-        scanOrphans(videoDir(), referenced, this::importOrphanVod);
+        // provenance-gated (recorder-produced basenames only, written since the folder's adoption
+        // floor) so a user's own videos are never claimed.
+        Path videoDir = videoDir();
+        OrphanAdoptionFloors.Floor videoFloor = floors.of(videoDir);
+        scanOrphans(videoDir, referenced, path -> importOrphanVod(path, videoFloor));
         // Archive drives: an unreferenced recording here is the residue of an interrupted cross-store
         // move (copied across, but the row's repoint or the source delete didn't finish before a crash).
         // The destination name is {@code <matchId>-...}, so we recover the ORIGINAL row rather than
         // splitting off a duplicate — re-link it if the row lost its file, else drop the redundant copy.
         for (Path dir : archiveDirs()) {
-            scanOrphans(dir, referenced, this::recoverArchiveLeftover);
+            OrphanAdoptionFloors.Floor archiveFloor = floors.of(dir);
+            scanOrphans(dir, referenced, path -> recoverArchiveLeftover(path, archiveFloor));
         }
+    }
+
+    /** Every root the orphan scan reads: the active video folder and each archive drive. */
+    private List<Path> scanRoots() {
+        List<Path> roots = new ArrayList<>();
+        roots.add(videoDir());
+        roots.addAll(archiveDirs());
+        roots.removeIf(java.util.Objects::isNull);
+        return roots;
     }
 
     /**
@@ -350,8 +406,12 @@ public class CrashRecoveryRunner implements ApplicationRunner {
      *       attributed, fall back to the provenance-gated import, exactly as the active-drive scan
      *       does.</li>
      * </ul>
+     *
+     * <p>Only that import is held to the adoption floor: the re-link and the delete need the file to
+     * carry its row's id and basename and match its size, which a user's file doesn't, and the
+     * archiver keeps a recording's original modification time, which can predate the floor.
      */
-    private void recoverArchiveLeftover(Path file) {
+    private void recoverArchiveLeftover(Path file, OrphanAdoptionFloors.Floor floor) {
         try {
             String fileName = file.getFileName().toString();
             // Clip leftovers carry a "clip-<clipId>-" prefix (a separate id space from match files); route
@@ -414,7 +474,7 @@ public class CrashRecoveryRunner implements ApplicationRunner {
                     }
                 }
             }
-            importOrphanVod(file);
+            importOrphanVod(file, floor);
         } catch (Exception e) {
             // One bad leftover must not abort the rest of the scan.
             log.warn("Could not recover archive leftover {}: {}", file, e.toString());
@@ -726,21 +786,27 @@ public class CrashRecoveryRunner implements ApplicationRunner {
      * with GSI ingest/OBS, so when the crash was within the ±5-min window a recording armed by the
      * CURRENT boot (path unknown until StopRecord, so unreferenced) could otherwise be captured and
      * attached to the old journal, stealing the live file from {@code MatchFsm}.
+     *
+     * <p>A link makes the file a match's video as surely as an import does, so it takes the same
+     * basename gate and adoption floor: a window of minutes can still hold the user's own recording.
      */
-    private String linkOrphanVideo(RecordingSessionRow session) {
+    private String linkOrphanVideo(RecordingSessionRow session, OrphanAdoptionFloors.Snapshot floors) {
         Path videoDir = videoDir();
         if (videoDir == null || !Files.isDirectory(videoDir)) {
             return null;
         }
+        OrphanAdoptionFloors.Floor floor = floors.of(videoDir);
         Set<String> referenced = referencedVideoPaths();
         long fromMs = session.recordStartedWallMs() - LINK_WINDOW_GRACE_MS;
         long toMs = session.updatedAt() + LINK_WINDOW_GRACE_MS;
         try (Stream<Path> stream = Files.list(videoDir)) {
             return stream.filter(Files::isRegularFile)
                     .filter(this::isRecordingFile)
+                    .filter(CrashRecoveryRunner::hasRecorderProvenance)
                     .filter(path -> !referenced.contains(normalize(path)))
                     .filter(path -> withinWindow(path, fromMs, toMs))
                     .filter(path -> lastModifiedMs(path) < bootWallMs)
+                    .filter(path -> floor.admits(lastModifiedMs(path)))
                     .max(java.util.Comparator.comparingLong(CrashRecoveryRunner::lastModifiedMs))
                     .map(Path::toString)
                     .orElse(null);
@@ -766,7 +832,7 @@ public class CrashRecoveryRunner implements ApplicationRunner {
         }
     }
 
-    private void importOrphanVod(Path path) {
+    private void importOrphanVod(Path path, OrphanAdoptionFloors.Floor floor) {
         try {
             // Provenance gate: adopt only basenames this recorder writes. videoDir/archive roots are
             // user-configurable, so an arbitrary-named unreferenced .mp4 here may simply be the user's
@@ -781,6 +847,13 @@ public class CrashRecoveryRunner implements ApplicationRunner {
                 return;
             }
             long playedAt = Files.getLastModifiedTime(path).toMillis();
+            // Adoption floor: OBS's default name is also what the user's own OBS writes, so the name
+            // alone isn't provenance. Only what was written since a scan first read this folder.
+            if (!floor.admits(playedAt)) {
+                log.debug("Leaving unreferenced file {} untouched (older than its folder's adoption floor)",
+                        path);
+                return;
+            }
             // Quiescence guard: a recording that armed during recovery is a live .mp4 OBS is still
             // writing (its journal row has a null path, so it looks unreferenced). Adopting it would
             // steal the in-flight file from MatchFsm. A live file has a fresh mtime; skip it and let the
@@ -844,7 +917,9 @@ public class CrashRecoveryRunner implements ApplicationRunner {
      * renderer writes {@code <matchId>-clip-<clipId>.mp4} (archived as
      * {@code clip-<clipId>-<matchId>-clip-<clipId>.mp4}). Anything else is a foreign file: adopting
      * it would create a row whose "VOD" is the user's own video, which retention would then delete
-     * oldest-first — so foreign names are never imported (and never deleted), only debug-logged.
+     * oldest-first — so foreign names are never imported (and never deleted), only debug-logged. The
+     * OBS name is what the user's own OBS writes too, so a match here is necessary but not enough:
+     * adoption is also held to the folder's {@link OrphanAdoptionFloors adoption floor}.
      */
     private static final Pattern RECORDER_BASENAME =
             Pattern.compile(
