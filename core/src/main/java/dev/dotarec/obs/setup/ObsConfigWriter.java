@@ -347,6 +347,9 @@ public class ObsConfigWriter {
         // exactly once from the map (quoteReplacement so a value's $/\ are not treated as $-group refs).
         Map<String, String> tokens = new LinkedHashMap<>();
         tokens.put("REC_PATH", recPathIni);
+        // The template writes the encoder as BOTH RecEncoder and StreamEncoder: at RecQuality=Stream
+        // (the default) OBS records with the streaming encoder and never reads RecEncoder, so without
+        // StreamEncoder the probe or the user's pick was ignored and OBS's default encoder ran.
         tokens.put("REC_ENCODER", encoder);
         tokens.put("BASE_CX", Integer.toString(res[0]));
         tokens.put("BASE_CY", Integer.toString(res[1]));
