@@ -1,5 +1,6 @@
 package dev.dotarec.obs;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -17,8 +18,56 @@ class ObsConnectionSchedulerTest {
     private final ObsHealth health = new ObsHealth();
     private final ObsDemand demand = mock(ObsDemand.class);
     private final EventPublisher publisher = mock(EventPublisher.class);
+    private boolean obsProcessRunning = true;
+    private int processScans;
     private final ObsConnectionScheduler scheduler =
-            new ObsConnectionScheduler(obs, health, demand, publisher);
+            new ObsConnectionScheduler(
+                    obs,
+                    health,
+                    demand,
+                    publisher,
+                    () -> {
+                        processScans++;
+                        return obsProcessRunning;
+                    });
+
+    @Test
+    void anObsThatExitedMidRecording_noLongerCountsAsRecording() {
+        // OBS crashed mid-match (no OUTPUT_STOPPED), and its relaunch died before the websocket
+        // came up, so no reconnect re-syncs the flag. Left set, it kept OBS wanted and the app busy
+        // forever, and Electron never refilled the spent relaunch budget.
+        health.setRecording(true);
+        obsProcessRunning = false;
+
+        scheduler.tryConnectAndConfigure();
+
+        assertThat(health.isRecording()).isFalse();
+    }
+
+    @Test
+    void aDroppedSocketToAnObsThatStillRuns_keepsTheRecordingFlag() {
+        // A websocket blip: OBS keeps recording, and the reconnect re-syncs the flag.
+        health.setRecording(true);
+        obsProcessRunning = true;
+
+        scheduler.tryConnectAndConfigure();
+
+        assertThat(health.isRecording()).isTrue();
+    }
+
+    @Test
+    void theProcessTableIsScannedOnlyForAFlagThatOutlivedTheConnection() {
+        health.setConnected(true);
+        health.setRecording(true);
+        when(obs.ensureConnected()).thenReturn(true);
+        scheduler.tryConnectAndConfigure(); // connected: the flag is OBS's own answer
+
+        health.setConnected(false);
+        health.setRecording(false);
+        scheduler.tryConnectAndConfigure(); // nothing to clear
+
+        assertThat(processScans).isZero();
+    }
 
     @Test
     void configuresSceneOnConnectEdgeNotEveryTick() throws Exception {
