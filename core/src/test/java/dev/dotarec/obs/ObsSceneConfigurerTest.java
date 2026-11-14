@@ -363,7 +363,7 @@ class ObsSceneConfigurerTest {
         when(created.isSuccessful()).thenReturn(true);
         when(controller.createInput(any(), any(), any(), any(), any(), anyLong())).thenReturn(created);
 
-        configurer.reconcileAudioInputs(controller, true);
+        assertThat(configurer.reconcileAudioInputs(controller, true)).isTrue();
 
         verify(controller)
                 .createInput(
@@ -374,6 +374,27 @@ class ObsSceneConfigurerTest {
                         any(),
                         anyLong());
         verify(controller, never()).removeInput(any(), anyLong());
+    }
+
+    @Test
+    void reconcileAudioInputs_reportsNotAppliedWhenTheInputListFails(@TempDir Path dir) {
+        ObsSceneConfigurer configurer = configurerWithOneOutputSource(dir);
+        OBSRemoteController controller = mock(OBSRemoteController.class);
+        when(controller.getInputList(any(), anyLong())).thenReturn(null); // timed out
+
+        assertThat(configurer.reconcileAudioInputs(controller, true)).isFalse();
+        verify(controller, never()).createInput(any(), any(), any(), any(), any(), anyLong());
+    }
+
+    @Test
+    void reconcileAudioInputs_reportsNotAppliedWhenACaptureFailsToCreate(@TempDir Path dir) {
+        ObsSceneConfigurer configurer = configurerWithOneOutputSource(dir);
+        OBSRemoteController controller = obsListing();
+        CreateInputResponse failed = mock(CreateInputResponse.class);
+        when(failed.isSuccessful()).thenReturn(false);
+        when(controller.createInput(any(), any(), any(), any(), any(), anyLong())).thenReturn(failed);
+
+        assertThat(configurer.reconcileAudioInputs(controller, true)).isFalse();
     }
 
     private static ObsSceneConfigurer configurerWithOneOutputSource(Path dir) {

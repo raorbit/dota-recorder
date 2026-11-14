@@ -146,8 +146,9 @@ public class ObsController implements ObsRecorder, MatchFsm.RecordStatusProbe {
 
     /**
      * The audio state applied to the current connection, or null when not applied yet (a fresh
-     * connection, or an apply that couldn't run). Lets {@link #attachAudio()} stay a no-op on the
-     * ~10Hz start retries. Guarded by {@code this}.
+     * connection, or an apply that couldn't run or failed part-way). Lets {@link #attachAudio()} stay
+     * a no-op on the ~10Hz start retries once the captures are in place, and retry until they are.
+     * Guarded by {@code this}.
      */
     private Boolean audioApplied;
 
@@ -180,8 +181,7 @@ public class ObsController implements ObsRecorder, MatchFsm.RecordStatusProbe {
         // Between matches the captures are detached; an edit then only needs persisting, and the next
         // attach applies it.
         boolean attach = audioWanted;
-        sceneConfigurer.reconcileAudioInputs(c, attach);
-        audioApplied = attach;
+        audioApplied = sceneConfigurer.reconcileAudioInputs(c, attach) ? attach : null;
     }
 
     /**
@@ -194,8 +194,7 @@ public class ObsController implements ObsRecorder, MatchFsm.RecordStatusProbe {
             return;
         }
         boolean attach = audioWanted;
-        sceneConfigurer.ensureSceneReady(c, attach);
-        audioApplied = attach;
+        audioApplied = sceneConfigurer.ensureSceneReady(c, attach) ? attach : null;
     }
 
     @Override
@@ -209,7 +208,12 @@ public class ObsController implements ObsRecorder, MatchFsm.RecordStatusProbe {
         if (c == null) {
             return; // the next connect's scene setup attaches it
         }
-        sceneConfigurer.reconcileAudioInputs(c, true);
+        if (!sceneConfigurer.reconcileAudioInputs(c, true)) {
+            // Left unapplied so the next start retry reconciles again: marked applied, the retries
+            // would no-op and the readiness gate would hold the match unrecorded.
+            audioApplied = null;
+            return;
+        }
         audioApplied = Boolean.TRUE;
         log.info("Attached audio captures for recording");
     }
@@ -226,7 +230,10 @@ public class ObsController implements ObsRecorder, MatchFsm.RecordStatusProbe {
             audioApplied = null; // the next connect's scene setup leaves it detached
             return;
         }
-        sceneConfigurer.reconcileAudioInputs(c, false);
+        if (!sceneConfigurer.reconcileAudioInputs(c, false)) {
+            audioApplied = null; // unknown; the next attach reconciles from scratch
+            return;
+        }
         audioApplied = Boolean.FALSE;
         log.info("Released audio captures; no match is recording");
     }
