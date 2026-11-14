@@ -1,5 +1,6 @@
 package dev.dotarec.config;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import java.io.IOException;
@@ -235,7 +236,14 @@ public class SettingsStore {
 
     public SettingsStore(AppPaths paths) {
         this.file = paths.dataDir().resolve(FILE_NAME);
-        this.mapper = new ObjectMapper().enable(SerializationFeature.INDENT_OUTPUT);
+        // Unknown keys are ignored, not fatal: a settings.json written by a newer build (or the Go
+        // remake, which adds keys of its own) must keep its values here. A strict mapper made
+        // readOrNull() return null for such a file, so load() fell back to fresh defaults -- a 50 GB
+        // cap and no archive drives, which the sweeper then enforced.
+        this.mapper =
+                new ObjectMapper()
+                        .enable(SerializationFeature.INDENT_OUTPUT)
+                        .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
         this.settings = load(paths);
     }
 
