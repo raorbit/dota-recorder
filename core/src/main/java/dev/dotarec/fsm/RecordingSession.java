@@ -26,8 +26,12 @@ public class RecordingSession {
     private long recordConfirmedWallMs;
     private long recordConfirmedNanos;
     private long recordStartedWallMs;
+    /** The output path OBS reported at the start, or null when it reported none. */
     private String videoPath;
     private String scene;
+
+    /** The OBS connection the recording started on ({@code ObsRecorder.connectionEpoch()}). */
+    private long obsConnectionEpoch;
 
     /** The most recent frame the tagger diffs the next one against. */
     private GsiFrame lastFrame;
@@ -133,6 +137,14 @@ public class RecordingSession {
 
     public void setVideoPath(String videoPath) {
         this.videoPath = videoPath;
+    }
+
+    public long getObsConnectionEpoch() {
+        return obsConnectionEpoch;
+    }
+
+    public void setObsConnectionEpoch(long obsConnectionEpoch) {
+        this.obsConnectionEpoch = obsConnectionEpoch;
     }
 
     public String getScene() {

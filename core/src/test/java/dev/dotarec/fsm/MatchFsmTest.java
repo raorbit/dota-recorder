@@ -83,6 +83,10 @@ class MatchFsmTest {
         boolean readyNeedsAudio;
         boolean audioAttached;
         int detachCalls;
+        /** What connectionEpoch() answers; a test bumps it to model a reconnect (a relaunched OBS). */
+        long epoch = 1L;
+        /** The path OBS reported on OUTPUT_STARTED (startedOutputPath()); null models none. */
+        String startedPath;
 
         @Override public void connect() { }
         @Override public boolean ensureConnected() { return connected; }
@@ -143,6 +147,10 @@ class MatchFsmTest {
         @Override public boolean isRecording() { return recording; }
 
         @Override public String lastStoppedOutputPath() { return lastStoppedPath; }
+
+        @Override public String startedOutputPath() { return startedPath; }
+
+        @Override public long connectionEpoch() { return epoch; }
 
         @Override public Instant recordConfirmedAt() { return confirmedAt; }
 

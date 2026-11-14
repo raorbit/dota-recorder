@@ -300,7 +300,9 @@ public class MatchFsm {
      * RECORDING against a dead output for the rest of the match, never restarting OBS. An output
      * that stopped while OBS still renders (the user stopped it in the OBS window, the disk filled)
      * is left for POST_GAME as before: a restart can't fix those, and re-arming against them would
-     * only loop junk rows.
+     * only loop junk rows. The exception is an inactive output on a newer connection than the one
+     * the recording started on: the OBS that recorded it crashed and a relaunched one took its
+     * place, so the recording is finalized and the next in-match frame records the rest.
      */
     public synchronized void superviseRecording() {
         RecordingSession s = this.session;
@@ -317,6 +319,17 @@ public class MatchFsm {
             return;
         }
         if (!status.active()) {
+            if (obs.connectionEpoch() != s.getObsConnectionEpoch()) {
+                // OBS crashed (or was ended) mid-match and a relaunched one is connected now: the
+                // output died with the old process, which never sent a STOPPED. Left RECORDING, the
+                // rest of the match went unrecorded against the idle new OBS. Keep what the old one
+                // wrote and let the next in-match frame record the rest. No restart: this OBS is
+                // already fresh, and a broken renderer still holds the next start as usual.
+                log.warn("OBS was relaunched mid-recording; keeping what the previous instance"
+                        + " recorded and recording the rest on the new one");
+                finalizeRecording();
+                return;
+            }
             if (!obs.isRenderBroken()) {
                 return;
             }
@@ -621,6 +634,8 @@ public class MatchFsm {
         s.setRecordConfirmedWallMs(anchor);
         s.setRecordConfirmedNanos(confirmedNanos);
         s.setRecordStartedWallMs(anchor);
+        s.setVideoPath(obs.startedOutputPath());
+        s.setObsConnectionEpoch(obs.connectionEpoch());
         s.observe(frame);
         s.setLastFrame(frame);
         if (GAME_IN_PROGRESS.equals(frame.gameState())) {
@@ -713,7 +728,7 @@ public class MatchFsm {
                     log.warn("Thumbnail capture failed for {}: {}", s.getSurrogateId(), e.toString());
                 }
 
-                videoPath = stopRecordingWithRetry();
+                videoPath = stopRecordingWithRetry(s.getVideoPath());
             } catch (RuntimeException e) {
                 // Defensive: stopRecordingWithRetry already swallows expected stop failures, but a
                 // seam implementation bug must still fall through to persistence.
@@ -921,7 +936,12 @@ public class MatchFsm {
         }
     }
 
-    private String stopRecordingWithRetry() {
+    /**
+     * Stops the output and returns its file. {@code startedPath} (the path OBS reported at the start,
+     * or null) names the file when OBS ended the output itself without reporting one: an OBS that
+     * crashed sends no STOPPED.
+     */
+    private String stopRecordingWithRetry(String startedPath) {
         RuntimeException firstFailure = null;
         try {
             String path = obs.stopRecording();
@@ -939,6 +959,12 @@ public class MatchFsm {
             // video from its markers.
             String stoppedPath = obs.lastStoppedOutputPath();
             if (stoppedPath == null || stoppedPath.isBlank()) {
+                if (startedPath != null && !startedPath.isBlank()) {
+                    log.warn("OBS no longer reports recording after failed StopRecord and reported"
+                            + " no stop path; keeping the file it reported at the start: {}",
+                            startedPath);
+                    return startedPath;
+                }
                 log.warn("OBS no longer reports recording after failed StopRecord and reported no"
                         + " output path; persisting without video path");
                 return null;

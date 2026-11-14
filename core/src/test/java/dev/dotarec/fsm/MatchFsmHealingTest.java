@@ -105,6 +105,19 @@ class MatchFsmHealingTest {
         obs.stopFailuresRemaining = 1;
     }
 
+    /**
+     * OBS crashed mid-recording and Electron relaunched it: the core is connected to a fresh, idle
+     * OBS. No STOPPED ever came (the reconnect reset the events anyway), and StopRecord fails
+     * against the new OBS's inactive output.
+     */
+    private void obsCrashedAndARelaunchedOneConnected() {
+        obs.epoch++;
+        obs.recording = false;
+        obs.lastStoppedPath = null;
+        obs.recordStatus = new MatchFsm.RecordOutputStatus(false, null, null);
+        obs.stopFailuresRemaining = 1;
+    }
+
     /** OBS comes back healthy after its restart. */
     private void obsRestarted() {
         obs.renderBroken = false;
@@ -281,6 +294,60 @@ class MatchFsmHealingTest {
         fsm.onFrame(frame().state(POST_GAME).matchId(MATCH).mono(nanos.get()).build());
         assertThat(matches.findAll()).hasSize(2)
                 .extracting(MatchSummary::dotaMatchId).containsOnly(MATCH);
+    }
+
+    @Test
+    void obsRelaunchedMidMatch_keepsThePartItRecorded_andRecordsTheRestOnTheNewObs() {
+        obs.startedPath = "C:\\videos\\part-1.mkv";
+        fsm.onFrame(playing());
+        advanceSeconds(300);
+        obsCrashedAndARelaunchedOneConnected();
+        fsm.superviseRecording();
+
+        assertThat(fsm.getState()).isEqualTo(MatchState.IDLE);
+        assertThat(restarter.reasons).as("the relaunched OBS is fresh; no restart").isEmpty();
+        assertThat(matches.findAll()).as("the crashed OBS's part keeps its file").singleElement()
+                .satisfies(r -> assertThat(r.videoPath()).isEqualTo("C:\\videos\\part-1.mkv"));
+
+        obs.recordStatus = null;
+        fsm.onFrame(playing());
+        assertThat(fsm.getState()).as("the next in-match frame records on the new OBS")
+                .isEqualTo(MatchState.RECORDING);
+        advanceSeconds(600);
+        fsm.onFrame(frame().state(POST_GAME).matchId(MATCH).mono(nanos.get()).build());
+        assertThat(matches.findAll()).hasSize(2)
+                .extracting(MatchSummary::dotaMatchId).containsOnly(MATCH);
+    }
+
+    @Test
+    void obsRelaunchedMidMatch_withNoStartPath_stillRecordsTheRest() {
+        // OBS reported no path at the start: the part is kept as a row, and the boot orphan scan
+        // adopts its file, as before. What changes is that the rest of the match records.
+        fsm.onFrame(playing());
+        advanceSeconds(300);
+        obsCrashedAndARelaunchedOneConnected();
+        fsm.superviseRecording();
+
+        assertThat(fsm.getState()).isEqualTo(MatchState.IDLE);
+        assertThat(matches.findAll()).singleElement()
+                .satisfies(r -> assertThat(r.videoPath()).isNull());
+
+        obs.recordStatus = null;
+        fsm.onFrame(playing());
+        assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
+    }
+
+    @Test
+    void aReconnectToAnObsThatKeptRecording_leavesTheRecordingAlone() {
+        // A websocket blip: the same OBS, still recording, on a new connection.
+        fsm.onFrame(playing());
+        advanceSeconds(300);
+        obs.epoch++;
+        obs.recordStatus = new MatchFsm.RecordOutputStatus(true, 300_000L, 50_000_000L);
+        fsm.superviseRecording();
+
+        assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
+        assertThat(matches.findAll()).isEmpty();
     }
 
     @Test

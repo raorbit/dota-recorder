@@ -52,6 +52,20 @@ class ObsEventsTest {
     }
 
     @Test
+    void started_keepsTheOutputPathItReports_untilTheNextStartOrAReset() {
+        events.onRecordStateChanged(ObsEvents.OUTPUT_STARTED, "C:\\videos\\first.mkv");
+        assertThat(events.startedOutputPath()).isEqualTo("C:\\videos\\first.mkv");
+
+        // A STARTED that reports no path must not leave the previous recording's path behind.
+        events.onRecordStateChanged(ObsEvents.OUTPUT_STARTED, null);
+        assertThat(events.startedOutputPath()).isNull();
+
+        events.onRecordStateChanged(ObsEvents.OUTPUT_STARTED, "C:\\videos\\second.mkv");
+        events.reset();
+        assertThat(events.startedOutputPath()).isNull();
+    }
+
+    @Test
     void stopped_clearsRecordingAndCapturesPath() {
         events.onRecordStateChanged(ObsEvents.OUTPUT_STARTED, null);
 
