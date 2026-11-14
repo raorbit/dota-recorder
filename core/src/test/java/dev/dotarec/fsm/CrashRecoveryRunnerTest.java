@@ -39,6 +39,7 @@ class CrashRecoveryRunnerTest {
     private Path videoDir;
     private SettingsStore settings;
     private StorageMaintenanceLock maintenanceLock;
+    private AppPaths paths;
 
     @BeforeEach
     void setUp(@TempDir Path tmp) throws Exception {
@@ -49,20 +50,20 @@ class CrashRecoveryRunnerTest {
         clips = new ClipRepository(ds);
         markers = new MarkerRepository(ds);
         pauses = new PauseRepository(ds);
-        videoDir = Files.createDirectories(tmp.resolve("video"));
-        settings =
-                new SettingsStore(
-                        new AppPaths(tmp.resolve("data").toString(), tmp.resolve("obs").toString()));
-        settings.update(
-                s -> {
-                    s.videoDir = videoDir.toString();
-                    return s;
-                });
+        paths = new AppPaths(tmp.resolve("data").toString(), tmp.resolve("obs").toString());
+        settings = new SettingsStore(paths);
+        // A recording folder the recorder has had since before any file in it: its adoption floor
+        // admits every file, so the tests below see only the other gates.
+        videoDir = chooseVideoDir("video");
+        seedAdoptionFloor(videoDir, 0L);
         maintenanceLock = new StorageMaintenanceLock();
-        runner =
-                new CrashRecoveryRunner(
-                        journal, matches, clips, markers, pauses, ds, new ObjectMapper(), settings,
-                        maintenanceLock);
+        runner = newRunner();
+    }
+
+    private CrashRecoveryRunner newRunner() {
+        return new CrashRecoveryRunner(
+                journal, matches, clips, markers, pauses, ds, new ObjectMapper(), settings,
+                maintenanceLock, paths);
     }
 
     @Test
@@ -398,7 +399,7 @@ class CrashRecoveryRunnerTest {
         // Crash mid-recording: the journal never got the video_path (OBS reveals it only on
         // StopRecord). The leftover .mp4 must attach to the recovered metadata/markers row rather
         // than import as a separate, detached gsi_only row.
-        Path video = videoDir.resolve("crashed.mp4");
+        Path video = videoDir.resolve("2026-06-28 14-30-15.mp4");
         Files.writeString(video, "partial recording bytes");
         Files.setLastModifiedTime(
                 video, java.nio.file.attribute.FileTime.fromMillis(5_000L)); // within session window
@@ -894,6 +895,250 @@ class CrashRecoveryRunnerTest {
                 .hasSize(1);
     }
 
+    // --- Adoption floors: the basename gate passes the user's own OBS recordings too ---
+
+    @Test
+    void anOldObsNamedFileInANewlyChosenVideoFolderIsNeverAdopted() throws Exception {
+        // The reviewed case: recording pointed at the folder the user's own OBS saves into. Its names
+        // pass the basename gate, and adopting them would hand years of personal recordings to
+        // retention's oldest-first delete.
+        Path videos = chooseVideoDir("Videos");
+        Path personal = writeModifiedAt(videos.resolve("2024-05-01 18-30-12.mkv"), LONG_AGO_MS);
+        Path recent = videos.resolve("2026-11-01 20-00-00 (2).mp4");
+        Files.writeString(recent, "made ten minutes before the folder was chosen");
+        makeStale(recent);
+        long before = System.currentTimeMillis();
+
+        runner.run(null);
+        newRunner().run(null); // and not on a later boot either
+
+        assertThat(matches.findAll()).isEmpty();
+        assertThat(personal).exists();
+        assertThat(recent).exists();
+        assertThat(storedFloor(videos)).isNotNull().isGreaterThanOrEqualTo(before);
+    }
+
+    @Test
+    void anOldObsNamedFileInANewlyAddedArchiveFolderIsNeverAdopted() throws Exception {
+        Path archive = chooseArchive("Videos");
+        Path personal = writeModifiedAt(archive.resolve("2024-05-01 18-30-12.mkv"), LONG_AGO_MS);
+        // Leading digits read as a match id with no row, so this goes the import path too.
+        Path prefixed = archive.resolve("12-2026-11-01 20-00-00.mp4");
+        Files.writeString(prefixed, "another personal recording");
+        makeStale(prefixed);
+
+        runner.run(null);
+        newRunner().run(null);
+
+        assertThat(matches.findAll()).isEmpty();
+        assertThat(personal).exists();
+        assertThat(prefixed).exists();
+        assertThat(storedFloor(archive)).isNotNull();
+    }
+
+    @Test
+    void anOrphanWrittenSinceTheFloorIsAdopted() throws Exception {
+        // A crash orphan written after its folder's floor is what the scan exists for, and is still
+        // adopted: from exactly the floor on, in the video folder and on an archive drive alike.
+        Path videos = chooseVideoDir("Videos");
+        Path archive = chooseArchive("hdd");
+        long floor = System.currentTimeMillis() - 60L * 60_000L; // the boot that first read both
+        seedAdoptionFloor(videos, floor);
+        seedAdoptionFloor(archive, floor);
+        Path atFloor = writeModifiedAt(videos.resolve("2026-11-14 10-00-00.mp4"), floor);
+        Path beforeFloor = writeModifiedAt(videos.resolve("2026-11-14 09-00-00.mp4"), floor - 1);
+        Path archived = writeModifiedAt(archive.resolve("2026-11-14 10-30-00.mkv"), floor + 30L * 60_000L);
+        Path archivedBefore = writeModifiedAt(archive.resolve("2026-11-14 08-00-00.mkv"), floor - 60_000L);
+
+        runner.run(null);
+
+        assertThat(matches.findAll())
+                .extracting(MatchSummary::videoPath)
+                .containsExactlyInAnyOrder(atFloor.toString(), archived.toString());
+        assertThat(matches.findAll()).allSatisfy(row -> assertThat(row.enrichmentState()).isEqualTo("gsi_only"));
+        assertThat(beforeFloor).exists();
+        assertThat(archivedBefore).exists();
+    }
+
+    @Test
+    void theFloorsFileIsTheFormatBothAppsKeep() throws Exception {
+        // The file the Go remake writes, laid out the way its json.MarshalIndent lays it out, and this
+        // app's additions read back as plain JSON.
+        Path videos = chooseVideoDir("Videos");
+        Path archive = chooseArchive("hdd");
+        long floor = System.currentTimeMillis() - 60L * 60_000L;
+        String key = new ObjectMapper().writeValueAsString(OrphanAdoptionFloors.key(videos));
+        Files.writeString(
+                floorsFile(),
+                "{\n  \"version\": 1,\n  \"floors\": {\n    " + key + ": " + floor + "\n  }\n}");
+        Path adopted = writeModifiedAt(videos.resolve("2026-11-14 10-00-00.mp4"), floor + 60_000L);
+        Path left = writeModifiedAt(videos.resolve("2026-11-14 09-00-00.mp4"), floor - 60_000L);
+
+        runner.run(null);
+
+        assertThat(matches.findAll()).extracting(MatchSummary::videoPath).containsExactly(adopted.toString());
+        assertThat(left).exists();
+        assertThat(storedFloor(videos)).isEqualTo(floor);
+        assertThat(storedFloor(archive)).isNotNull();
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(
+            strings = {
+                "not json",
+                "",
+                "null",
+                "[]",
+                "{\"version\":2,\"floors\":{}}",
+                "{\"version\":\"1\",\"floors\":{}}",
+                "{\"version\":1}",
+                "{\"version\":1,\"floors\":null}",
+                "{\"version\":1,\"floors\":{\"c:\\\\x\":1.5}}",
+                "{\"version\":1,\"floors\":{\"c:\\\\x\":1e3}}",
+                "{\"version\":1,\"floors\":{\"c:\\\\x\":null}}",
+                "{\"version\":1,\"floors\":{\"c:\\\\x\":\"0\"}}",
+                "{\"Version\":1,\"Floors\":{}}",
+                "{\"version\":1,\"floors\":{}} x",
+            })
+    void aCorruptFloorsFileAdoptsNothingOld(String content) throws Exception {
+        // videoDir is floored since the epoch, until the file breaks.
+        Path orphan = videoDir.resolve("2026-06-28 14-30-15.mp4");
+        Files.writeString(orphan, "would be adopted");
+        makeStale(orphan);
+        Files.writeString(floorsFile(), content);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> OrphanAdoptionFloors.read(floorsFile()));
+        long before = System.currentTimeMillis();
+
+        runner.run(null);
+
+        assertThat(matches.findAll()).isEmpty();
+        assertThat(orphan).exists();
+        assertThat(storedFloor(videoDir)).isNotNull().isGreaterThanOrEqualTo(before);
+    }
+
+    @Test
+    void aScanThatCannotSaveItsFloorsAdoptsNothing() throws Exception {
+        // A floor that can't be saved might not be there next boot, so a scan that couldn't save its
+        // floors adopts nothing, even from a folder whose floor it read.
+        chooseArchive("hdd"); // new, so the scan has a floor to save
+        Path orphan = videoDir.resolve("2026-06-28 14-30-15.mp4");
+        Files.writeString(orphan, "would be adopted");
+        makeStale(orphan);
+        Files.createDirectories(floorsFile().resolveSibling(OrphanAdoptionFloors.FILE_NAME + ".tmp"));
+
+        runner.run(null);
+
+        assertThat(matches.findAll()).isEmpty();
+        assertThat(orphan).exists();
+    }
+
+    @Test
+    void withoutADataFolderNothingIsAdoptedOrLinked() throws Exception {
+        Path orphan = videoDir.resolve("2026-06-28 14-30-15.mp4");
+        Files.writeString(orphan, "would be adopted");
+        makeStale(orphan);
+        Path crashed = writeModifiedAt(videoDir.resolve("2026-06-28 15-00-00.mp4"), 5_000L);
+        journal.open(crashedSessionRow());
+
+        new CrashRecoveryRunner(
+                        journal, matches, clips, markers, pauses, ds, new ObjectMapper(), settings,
+                        maintenanceLock)
+                .run(null);
+
+        assertThat(matches.findAll()).singleElement().satisfies(row -> assertThat(row.videoPath()).isNull());
+        assertThat(orphan).exists();
+        assertThat(crashed).exists();
+    }
+
+    @Test
+    void linkingRefusesANameThisRecorderDoesNotWrite() throws Exception {
+        // The link window is minutes wide around a crashed session, and the user's own recording can
+        // sit in it: a link makes a file a match's video just as an import does.
+        Path foreign = writeModifiedAt(videoDir.resolve("crashed.mp4"), 5_000L);
+        journal.open(crashedSessionRow());
+
+        runner.run(null);
+
+        assertJournalRowWithoutVideo();
+        assertThat(foreign).exists();
+    }
+
+    @Test
+    void linkingRefusesAFileOlderThanTheFloor() throws Exception {
+        Path videos = chooseVideoDir("Videos");
+        seedAdoptionFloor(videos, 5_500L);
+        Path old = writeModifiedAt(videos.resolve("2026-06-28 14-30-15.mp4"), 5_000L);
+        journal.open(crashedSessionRow());
+
+        runner.run(null);
+
+        assertJournalRowWithoutVideo();
+        assertThat(old).exists();
+    }
+
+    @Test
+    void linkingAFreshlyChosenFolderTakesNothingItAlreadyHeld() throws Exception {
+        Path held = writeModifiedAt(chooseVideoDir("Videos").resolve("2026-06-28 14-30-15.mp4"), 5_000L);
+        journal.open(crashedSessionRow());
+
+        runner.run(null);
+
+        assertJournalRowWithoutVideo();
+        assertThat(held).exists();
+    }
+
+    private static final long LONG_AGO_MS = 1_714_588_212_000L; // 2024-05-01 18:30:12 UTC
+
+    private Path floorsFile() {
+        return paths.dataDir().resolve(OrphanAdoptionFloors.FILE_NAME);
+    }
+
+    /** Root's floor read back from the file as plain JSON, the way the other app would; null if none. */
+    private Long storedFloor(Path root) throws Exception {
+        com.fasterxml.jackson.databind.JsonNode file = new ObjectMapper().readTree(floorsFile().toFile());
+        assertThat(file.get("version").intValue()).isEqualTo(1);
+        com.fasterxml.jackson.databind.JsonNode floor = file.get("floors").get(OrphanAdoptionFloors.key(root));
+        return floor == null ? null : floor.longValue();
+    }
+
+    private static Path writeModifiedAt(Path file, long modifiedMs) throws Exception {
+        Files.writeString(file, "recording bytes");
+        Files.setLastModifiedTime(file, java.nio.file.attribute.FileTime.fromMillis(modifiedMs));
+        return file;
+    }
+
+    /** A session that crashed mid-recording with no journaled path; its link window spans ~5_000ms. */
+    private RecordingSessionRow crashedSessionRow() {
+        return new RecordingSessionRow(
+                "session-crash",
+                "surrogate-crash",
+                "recording",
+                1234L,
+                "npc_dota_hero_puck",
+                1_000L,
+                1_000L,
+                6_000L,
+                "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS",
+                1,
+                1,
+                1,
+                null,
+                null,
+                900L,
+                6_000L);
+    }
+
+    private void assertJournalRowWithoutVideo() {
+        assertThat(matches.findAll())
+                .singleElement()
+                .satisfies(
+                        row -> {
+                            assertThat(row.dotaMatchId()).isEqualTo(1234L);
+                            assertThat(row.videoPath()).isNull();
+                        });
+        assertThat(journal.findUnfinished()).isEmpty();
+    }
+
     /**
      * Ages a file's last-modified time well past the orphan-import quiescence window so the scan treats
      * it as a genuine crash orphan (rather than a possibly-live recording) and adopts it. Freshly-written
@@ -906,8 +1151,37 @@ class CrashRecoveryRunnerTest {
                         System.currentTimeMillis() - 10L * 60_000L));
     }
 
-    /** Adds an archive storage location at {@code <tmp>/<name>} and returns its directory. */
+    /**
+     * Adds an archive storage location at {@code <tmp>/<name>} the recorder has had since before any
+     * file on it, and returns its directory.
+     */
     private Path configureArchive(String name) throws Exception {
+        Path archiveDir = chooseArchive(name);
+        seedAdoptionFloor(archiveDir, 0L);
+        return archiveDir;
+    }
+
+    /** Points recording at {@code <tmp>/<name>}, a folder no scan has read, so it has no floor yet. */
+    Path chooseVideoDir(String name) throws Exception {
+        Path chosen = Files.createDirectories(dir.resolve(name));
+        settings.update(
+                s -> {
+                    s.videoDir = chosen.toString();
+                    return s;
+                });
+        return chosen;
+    }
+
+    /** Records {@code root}'s adoption floor as an earlier scan would have. */
+    void seedAdoptionFloor(Path root, long fromMs) throws Exception {
+        Path file = paths.dataDir().resolve(OrphanAdoptionFloors.FILE_NAME);
+        java.util.Map<String, Long> floors = OrphanAdoptionFloors.read(file);
+        floors.put(OrphanAdoptionFloors.key(root), fromMs);
+        OrphanAdoptionFloors.write(file, floors);
+    }
+
+    /** Adds an archive storage location at {@code <tmp>/<name>} no scan has read. */
+    Path chooseArchive(String name) throws Exception {
         Path archiveDir = Files.createDirectories(dir.resolve(name));
         settings.update(
                 s -> {
