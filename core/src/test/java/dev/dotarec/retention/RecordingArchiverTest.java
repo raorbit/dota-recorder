@@ -18,6 +18,7 @@ import dev.dotarec.data.ClipRepository;
 import dev.dotarec.data.MatchRepository;
 import dev.dotarec.data.MatchRepository.NewMatch;
 import dev.dotarec.data.TestDb;
+import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
@@ -305,6 +306,92 @@ class RecordingArchiverTest {
         assertThat(row.thumbPath())
                 .isEqualTo(archive.resolve("thumbs").resolve(oldest + "-old.jpg").toString());
         assertThat(row.fileSizeBytes()).isEqualTo(2 * GIB); // bytes unchanged by a relocation
+    }
+
+    @Test
+    void crossStoreCopy_getsItsFinalNameOnlyOnceComplete() throws Exception {
+        // Only the tiny oldest VOD fits the archive's 2 GiB cap, so the forced real copy stays cheap;
+        // the large (sparse) newer one keeps the active drive over its cap and is never copied.
+        Path archive = configureArchive("hdd", 2);
+        settings.get().retentionCapGb = 1;
+        long oldest = seed(videoDir, "old.mp4", "old.jpg", 4 * 1024, 1_000L, false);
+        seed(videoDir, "new.mp4", "new.jpg", 2 * GIB, 2_000L, false);
+        Path dst = archive.resolve(oldest + "-old.mp4");
+        Path partial = archive.resolve(oldest + "-old.mp4" + RecordingArchiver.PARTIAL_SUFFIX);
+        List<Path> copiedTo = new ArrayList<>();
+        RecordingArchiver watched =
+                new RecordingArchiver(matches, clips, settings, sweeper, hugeFreeProbe()) {
+                    @Override
+                    void copyFile(Path src, Path target) throws IOException {
+                        copiedTo.add(target);
+                        if (target.getParent().equals(archive)) { // the video, not its thumbnail
+                            assertThat(dst).as("nothing carries the final name mid-copy")
+                                    .doesNotExist();
+                        }
+                        super.copyFile(src, target);
+                    }
+                };
+
+        try (MockedStatic<Files> ignored = forceCrossStoreMoves()) {
+            assertThat(watched.archive(null).movedIds()).containsExactly(oldest);
+        }
+
+        assertThat(copiedTo).contains(partial);
+        assertThat(dst).exists();
+        assertThat(Files.size(dst)).isEqualTo(4 * 1024);
+        assertThat(partial).doesNotExist();
+        assertThat(matches.findById(oldest).orElseThrow().videoPath()).isEqualTo(dst.toString());
+    }
+
+    @Test
+    void aCopyCutShort_neverLeavesAFileUnderTheFinalName() throws Exception {
+        // CopyFileEx sizes the destination to full length before it writes it, so a copy cut short
+        // leaves a full-size file with a zeroed tail. Under the final <id>-<name>, boot recovery took
+        // it for the match's archived VOD (name and size match) while the original's drive was away.
+        // Only the tiny oldest VOD fits the archive's 2 GiB cap, so the forced real copy stays cheap;
+        // the large (sparse) newer one keeps the active drive over its cap and is never copied.
+        Path archive = configureArchive("hdd", 2);
+        settings.get().retentionCapGb = 1;
+        long oldest = seed(videoDir, "old.mp4", "old.jpg", 4 * 1024, 1_000L, false);
+        seed(videoDir, "new.mp4", "new.jpg", 2 * GIB, 2_000L, false);
+        RecordingArchiver cutShort =
+                new RecordingArchiver(matches, clips, settings, sweeper, hugeFreeProbe()) {
+                    @Override
+                    void copyFile(Path src, Path target) throws IOException {
+                        try (RandomAccessFile f = new RandomAccessFile(target.toFile(), "rw")) {
+                            f.setLength(Files.size(src)); // full length, nothing written yet
+                        }
+                        throw new IOException("copy cut short");
+                    }
+                };
+
+        try (MockedStatic<Files> ignored = forceCrossStoreMoves()) {
+            assertThat(cutShort.archive(null).movedIds()).isEmpty();
+        }
+
+        assertThat(archive.resolve(oldest + "-old.mp4")).doesNotExist();
+        assertThat(videoDir.resolve("old.mp4")).exists();
+        assertThat(matches.findById(oldest).orElseThrow().videoPath())
+                .isEqualTo(videoDir.resolve("old.mp4").toString());
+    }
+
+    @Test
+    void interruptedCopiesLeftOnAnArchiveDrive_areRemoved_andNothingElse() throws Exception {
+        Path archive = configureArchive("hdd", 10);
+        Path thumbs = Files.createDirectories(archive.resolve("thumbs"));
+        Path stale = Files.writeString(archive.resolve("42-2026-11-14 20-01-02.mp4.partial"), "half");
+        Path staleClip = Files.writeString(archive.resolve("clip-7-42-clip-7.mp4.partial"), "half");
+        Path staleThumb = Files.writeString(thumbs.resolve("42-2026-11-14 20-01-02.jpg.partial"), "half");
+        Path usersOwn = Files.writeString(archive.resolve("holiday.partial"), "mine");
+        Path archived = Files.writeString(archive.resolve("42-2026-11-14 20-01-02.mp4"), "whole");
+
+        archiver.archive(null);
+
+        assertThat(stale).doesNotExist();
+        assertThat(staleClip).doesNotExist();
+        assertThat(staleThumb).doesNotExist();
+        assertThat(usersOwn).exists();
+        assertThat(archived).exists();
     }
 
     @Test

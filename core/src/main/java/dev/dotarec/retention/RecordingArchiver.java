@@ -17,8 +17,12 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Deque;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.regex.Pattern;
+import java.util.stream.Stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -59,6 +63,12 @@ public class RecordingArchiver {
     /** Leave this much free on an archive drive after a move, so a drive is never filled to 0. */
     private static final long ARCHIVE_FREE_MARGIN_BYTES = 256L * 1024 * 1024;
 
+    /** Suffix of a cross-store copy in progress; it gets its final name only once complete. */
+    static final String PARTIAL_SUFFIX = ".partial";
+
+    /** A copy this archiver left in progress: {@code [clip-]<id>-<name>.partial}. */
+    private static final Pattern ARCHIVER_PARTIAL = Pattern.compile("(?:clip-)?\\d+-.+\\.partial");
+
     /**
      * Probes a directory's real usable free space. Pulled behind an interface so tests can inject a
      * deterministic value instead of depending on the host filesystem.
@@ -74,6 +84,9 @@ public class RecordingArchiver {
     private final RetentionSweeper sweeper;
     private final FreeSpaceProbe freeSpace;
     private final StorageMaintenanceLock maintenanceLock;
+
+    /** Archive dirs already cleared of interrupted copies this run (see {@link #sweepPartials}). */
+    private final Set<Path> partialsSwept = new HashSet<>();
 
     @Autowired
     public RecordingArchiver(
@@ -151,6 +164,7 @@ public class RecordingArchiver {
             }
             Location active = locations.get(0);
             List<Location> archives = locations.subList(1, locations.size());
+            sweepPartials(archives);
 
             // Account current per-location usage from the DB. Match VODs AND clips are first-class
             // movable stored files — gather both into one uniform list.
@@ -335,6 +349,14 @@ public class RecordingArchiver {
      * AFTER the DB repoint. This is the crux of crash-safety: the source is never unlinked before the
      * row points at a fully-written destination.
      *
+     * <p>The copy is written under {@code <dst>.partial} and renamed to {@code dst} (same directory, so
+     * an atomic rename) only after its size checks out. On Windows {@code Files.copy} is CopyFileEx,
+     * which sizes the destination to the full length up front: a copy cut short when the process is
+     * ended (quit, an unattended update, Windows shutting down) left a full-size file with a zeroed
+     * tail under the final {@code <id>-<name>}, and boot recovery, which attributes an archive file by
+     * that name and size, re-linked the match to it whenever the original's drive was not back yet. A
+     * {@code .partial} carries neither, and {@link #sweepPartials} removes it.
+     *
      * <p>{@code REPLACE_EXISTING} is safe because {@code dst} carries the match id (see the caller): it
      * can only ever overwrite a leftover from this same match's prior interrupted move, making retries
      * idempotent.
@@ -346,11 +368,73 @@ public class RecordingArchiver {
         } catch (AtomicMoveNotSupportedException expected) {
             // Cross-store move: copy and verify the byte count; the source is deleted later, post-repoint.
         }
-        Files.copy(src, dst, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
-        if (Files.size(dst) != Files.size(src)) {
-            throw new IOException("Copy size mismatch moving " + src + " -> " + dst);
+        Path partial = dst.resolveSibling(dst.getFileName() + PARTIAL_SUFFIX);
+        try {
+            copyFile(src, partial);
+            if (Files.size(partial) != Files.size(src)) {
+                throw new IOException("Copy size mismatch moving " + src + " -> " + dst);
+            }
+            // Same directory, so a rename; it replaces a leftover under the final name too.
+            Files.move(partial, dst, StandardCopyOption.ATOMIC_MOVE);
+        } catch (IOException | RuntimeException e) {
+            deletePartialQuietly(partial);
+            throw e;
         }
         return false;
+    }
+
+    /** Copies {@code src} over {@code dst}. A seam so a test can stand in for an interrupted copy. */
+    void copyFile(Path src, Path dst) throws IOException {
+        Files.copy(src, dst, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
+    }
+
+    private void deletePartialQuietly(Path partial) {
+        try {
+            Files.deleteIfExists(partial);
+        } catch (IOException | RuntimeException e) {
+            log.debug("Could not remove the failed archive copy {}: {}", partial, e.toString());
+        }
+    }
+
+    /**
+     * Removes copies a process ended mid-copy left behind ({@code [clip-]<id>-<name>.partial}, in an
+     * archive dir or its {@code thumbs}), once per dir per run; a drive that is unplugged now is tried
+     * on a later pass. Only this archiver writes them, always under the maintenance lock this pass
+     * holds, so none is in flight. Each one's source is still in place and still the row's file (the
+     * rename to the final name comes before the repoint and the source delete), so only a redundant
+     * copy goes.
+     */
+    private void sweepPartials(List<Location> archives) {
+        for (Location loc : archives) {
+            Path dir = loc.dir();
+            if (partialsSwept.contains(dir) || !Files.isDirectory(dir)) {
+                continue;
+            }
+            partialsSwept.add(dir);
+            deletePartials(dir);
+            deletePartials(dir.resolve("thumbs"));
+        }
+    }
+
+    private void deletePartials(Path dir) {
+        if (!Files.isDirectory(dir)) {
+            return;
+        }
+        try (Stream<Path> files = Files.list(dir)) {
+            files.filter(p -> ARCHIVER_PARTIAL.matcher(p.getFileName().toString()).matches())
+                    .filter(Files::isRegularFile)
+                    .forEach(p -> {
+                        try {
+                            Files.delete(p);
+                            log.info("Removed an interrupted archive copy: {}", p);
+                        } catch (IOException | RuntimeException e) {
+                            log.warn("Could not remove the interrupted archive copy {}: {}",
+                                    p, e.toString());
+                        }
+                    });
+        } catch (IOException | RuntimeException e) {
+            log.warn("Could not check {} for interrupted archive copies: {}", dir, e.toString());
+        }
     }
 
     /** Deletes a now-redundant source file; a failed delete only leaves a stale duplicate (logged). */
