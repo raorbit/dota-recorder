@@ -169,8 +169,11 @@ public class ObsSceneConfigurer {
     /**
      * {@link #ensureSceneReady(OBSRemoteController)}, with the audio captures present only when
      * {@code attachAudio} (a recording is arming or running).
+     *
+     * @return whether the audio state was applied (see {@link #reconcileAudioInputs(OBSRemoteController,
+     *     boolean)})
      */
-    public void ensureSceneReady(OBSRemoteController controller, boolean attachAudio)
+    public boolean ensureSceneReady(OBSRemoteController controller, boolean attachAudio)
             throws Exception {
         if (controller == null) {
             throw new IllegalArgumentException("Controller cannot be null");
@@ -178,9 +181,10 @@ public class ObsSceneConfigurer {
         ensureScene(controller);
         ensureGameCaptureInput(controller);
         fitGameCaptureToCanvas(controller);
-        reconcileAudioInputs(controller, attachAudio);
+        boolean audioApplied = reconcileAudioInputs(controller, attachAudio);
         ensureProgramScene(controller);
         log.info("OBS scene '{}' is fully configured and active", SCENE_NAME);
+        return audioApplied;
     }
 
     private void ensureScene(OBSRemoteController controller) {
@@ -392,10 +396,14 @@ public class ObsSceneConfigurer {
      * WASAPI input still captures, and an idle OBS holding the user's output device open was enough
      * to stutter browser video. The settings stay the source of truth and are re-applied by the next
      * attach.
+     *
+     * @return whether the audio state was applied: false when the input list could not be read (nothing
+     *     was reconciled) or a configured source's input could not be created, so the caller retries
+     *     instead of treating the captures as in place
      */
-    public synchronized void reconcileAudioInputs(OBSRemoteController controller, boolean attach) {
+    public synchronized boolean reconcileAudioInputs(OBSRemoteController controller, boolean attach) {
         if (controller == null) {
-            return;
+            return false;
         }
         List<AudioSource> desired = attach ? settings.get().audioSources : List.of();
         if (desired == null) {
@@ -405,11 +413,12 @@ public class ObsSceneConfigurer {
         GetInputListResponse inputs = controller.getInputList(null, REQUEST_TIMEOUT_MS);
         if (inputs == null || !inputs.isSuccessful()) {
             log.warn("Failed to fetch input list; skipping audio reconcile");
-            return;
+            return false;
         }
         // name -> current OBS input kind, so a source whose KIND changed (same id) is recreated rather
         // than have settings overlaid onto an input of the wrong kind (an OBS input's kind is immutable).
         Map<String, String> existingOwned = ownedInputKinds(inputs.getInputs());
+        boolean applied = true;
 
         for (AudioSource s : desired) {
             String name = ownedInputName(s);
@@ -453,6 +462,7 @@ public class ObsSceneConfigurer {
                                 REQUEST_TIMEOUT_MS);
                 if (created == null || !created.isSuccessful()) {
                     log.warn("Failed to create audio input '{}'; continuing", name);
+                    applied = false;
                     continue;
                 }
                 log.info("Created audio input '{}' ({})", name, obsKind);
@@ -517,6 +527,7 @@ public class ObsSceneConfigurer {
             }
             log.debug("Muted non-managed audio input '{}' (kept out of the recording)", foreign);
         }
+        return applied;
     }
 
     private void ensureProgramScene(OBSRemoteController controller) {

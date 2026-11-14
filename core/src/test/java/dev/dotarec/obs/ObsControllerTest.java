@@ -673,6 +673,7 @@ class ObsControllerTest {
     void attachAudio_reconcilesOnceThenNoOpsOnStartRetries() {
         ObsSceneConfigurer cfg = mock(ObsSceneConfigurer.class);
         OBSRemoteController obs = mock(OBSRemoteController.class);
+        when(cfg.reconcileAudioInputs(obs, true)).thenReturn(true);
         ObsController controller = connectedTo(obs, cfg);
 
         controller.attachAudio();
@@ -682,9 +683,42 @@ class ObsControllerTest {
     }
 
     @Test
+    void attachAudio_aFailedReconcileIsRetriedOnTheNextStart() {
+        // The input list timed out (OBS stalled while Dota loads) or a capture failed to create: the
+        // attach must not count as applied, or every later start retry no-ops while the readiness
+        // gate keeps waiting for a live audio input and the whole match goes unrecorded.
+        ObsSceneConfigurer cfg = mock(ObsSceneConfigurer.class);
+        OBSRemoteController obs = mock(OBSRemoteController.class);
+        when(cfg.reconcileAudioInputs(obs, true)).thenReturn(false, true);
+        ObsController controller = connectedTo(obs, cfg);
+
+        controller.attachAudio(); // fails
+        controller.attachAudio(); // retried, succeeds
+        controller.attachAudio(); // applied now: no-op
+
+        verify(cfg, times(2)).reconcileAudioInputs(obs, true);
+    }
+
+    @Test
+    void configureScene_aFailedAudioReconcileLeavesTheAttachToRetry() throws Exception {
+        ObsSceneConfigurer cfg = mock(ObsSceneConfigurer.class);
+        OBSRemoteController obs = mock(OBSRemoteController.class);
+        when(cfg.reconcileAudioInputs(obs, true)).thenReturn(true);
+        when(cfg.ensureSceneReady(obs, true)).thenReturn(false);
+        ObsController controller = connectedTo(obs, cfg);
+        controller.attachAudio();
+
+        controller.configureScene(); // a reconnect mid-arm whose audio reconcile failed
+        controller.attachAudio();
+
+        verify(cfg, times(2)).reconcileAudioInputs(obs, true);
+    }
+
+    @Test
     void detachIdleAudio_waitsOutTheReleaseDelayThenRemovesTheCaptures() {
         ObsSceneConfigurer cfg = mock(ObsSceneConfigurer.class);
         OBSRemoteController obs = mock(OBSRemoteController.class);
+        when(cfg.reconcileAudioInputs(eq(obs), anyBoolean())).thenReturn(true);
         ObsController controller = connectedTo(obs, cfg);
         long[] now = {0L};
         ReflectionTestUtils.setField(controller, "nanoTime", (LongSupplier) () -> now[0]);
