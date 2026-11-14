@@ -22,3 +22,18 @@ export function retentionAffectsMatch(payload: unknown, matchId: number): boolea
   const ids = (payload as { deletedIds?: unknown }).deletedIds;
   return Array.isArray(ids) && ids.includes(matchId);
 }
+
+// Whether a library event took the given match's VOD away: a retention.swept that pruned it, or a
+// match.deleted for it (a delete that may have finished after the request that asked for it gave up).
+// The open player then re-derives full-VOD availability instead of streaming a file that is gone.
+export function libraryEventRemovesVod(
+  evt: { readonly type: string; readonly payload: unknown },
+  matchId: number,
+): boolean {
+  if (evt.type === 'retention.swept') return retentionAffectsMatch(evt.payload, matchId);
+  if (evt.type !== 'match.deleted') return false;
+  const payload = evt.payload;
+  return (
+    typeof payload === 'object' && payload !== null && (payload as { id?: unknown }).id === matchId
+  );
+}

@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { shouldShowNoVideoPlaceholder, retentionAffectsMatch } from './video-availability';
+import {
+  shouldShowNoVideoPlaceholder,
+  retentionAffectsMatch,
+  libraryEventRemovesVod,
+} from './video-availability';
 
 describe('shouldShowNoVideoPlaceholder', () => {
   it('shows the placeholder for a no-VOD row over the full VOD (no clip playing)', () => {
@@ -35,5 +39,31 @@ describe('retentionAffectsMatch', () => {
     expect(retentionAffectsMatch(null, 2)).toBe(false);
     expect(retentionAffectsMatch('nope', 2)).toBe(false);
     expect(retentionAffectsMatch({ deletedIds: 'x' }, 2)).toBe(false);
+  });
+});
+
+describe('libraryEventRemovesVod', () => {
+  it('is true for a retention.swept that pruned the match', () => {
+    expect(
+      libraryEventRemovesVod({ type: 'retention.swept', payload: { deletedIds: [2] } }, 2),
+    ).toBe(true);
+    expect(
+      libraryEventRemovesVod({ type: 'retention.swept', payload: { deletedIds: [3] } }, 2),
+    ).toBe(false);
+  });
+
+  it('is true for a match.deleted of the match, whichever branch the delete took', () => {
+    for (const outcome of ['deleted', 'stubbed']) {
+      expect(
+        libraryEventRemovesVod({ type: 'match.deleted', payload: { id: 2, outcome } }, 2),
+      ).toBe(true);
+    }
+    expect(libraryEventRemovesVod({ type: 'match.deleted', payload: { id: 3 } }, 2)).toBe(false);
+  });
+
+  it('is false for other events and malformed payloads', () => {
+    expect(libraryEventRemovesVod({ type: 'match.enriched', payload: { id: 2 } }, 2)).toBe(false);
+    expect(libraryEventRemovesVod({ type: 'match.deleted', payload: null }, 2)).toBe(false);
+    expect(libraryEventRemovesVod({ type: 'match.deleted', payload: { id: '2' } }, 2)).toBe(false);
   });
 });

@@ -125,6 +125,42 @@ describe('startLibrary storage-events wiring', () => {
     teardown();
   });
 
+  it('refetches the library on a match.deleted frame (a delete that outlived its request)', async () => {
+    const teardown = startLibrary();
+    await flush();
+    const ws = FakeWebSocket.instances[0];
+    const before = matchesCallCount();
+
+    ws.emitMessage({ type: 'match.deleted', payload: { id: 7, outcome: 'deleted' } });
+    await vi.advanceTimersByTimeAsync(200); // scheduleReload's coalescing delay
+    await flush();
+
+    expect(matchesCallCount()).toBeGreaterThan(before);
+    teardown();
+  });
+
+  it('reconciles with a refetch when a recording delete fails or times out', async () => {
+    const teardown = startLibrary();
+    await flush();
+    const listFetches = (): number =>
+      fetchMock.mock.calls.filter(
+        (c) =>
+          String(c[0]).includes('/matches') &&
+          (c[1] as { method?: string } | undefined)?.method !== 'DELETE',
+      ).length;
+    const before = listFetches();
+    // The DELETE (the next fetch) gives up, as it does behind a long archive pass.
+    fetchMock.mockImplementationOnce(() =>
+      Promise.reject(new DOMException('The operation timed out.', 'TimeoutError')),
+    );
+
+    await expect(useLibraryStore.getState().deleteMatch(7)).rejects.toThrow();
+    await flush();
+
+    expect(listFetches()).toBeGreaterThan(before);
+    teardown();
+  });
+
   it('reconciles with a refetch when the socket reconnects', async () => {
     const teardown = startLibrary();
     await flush();

@@ -216,7 +216,16 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
     // drop a row the server stubbed). Only a missing outcome (older core) falls back to the local
     // guess. Rethrows so the caller can surface a failure.
     deleteMatch: async (id) => {
-      const outcome = await apiDeleteMatch(id);
+      let outcome: Awaited<ReturnType<typeof apiDeleteMatch>>;
+      try {
+        outcome = await apiDeleteMatch(id);
+      } catch (err) {
+        // Failed, or gave up while the core waits out an archive pass (it then finishes the delete
+        // and its match.deleted frame reloads the list). Reconcile with the server either way, so a
+        // delete that did land never leaves its row listed.
+        void get().load({ silent: true });
+        throw err;
+      }
       // A coalesced match.* frame fires load() every ~200ms, so a load() that fetched the list BEFORE
       // this delete committed server-side may still be in flight; invalidate it so it can't resurrect
       // the just-deleted row (and so it doesn't leave the table wedged on the spinner).
@@ -244,14 +253,17 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
       const removed = new Set<number>();
       const stubbed = new Set<number>();
       const unknown = new Set<number>(); // no outcome in the response (older core) -> local guess
+      let failed = false;
       for (const id of ids) {
         try {
           const outcome = await apiDeleteMatch(id);
           (outcome === 'deleted' ? removed : outcome === 'stubbed' ? stubbed : unknown).add(id);
         } catch {
-          /* skip this one; the rest still delete and the next load() reconciles */
+          failed = true; // skip this one; the rest still delete
         }
       }
+      // Reconcile a failed (or timed-out, see deleteMatch) delete with the server's list.
+      if (failed) void get().load({ silent: true });
       if (removed.size === 0 && stubbed.size === 0 && unknown.size === 0) return;
       invalidatePendingLoad();
       set((s) => {
@@ -401,9 +413,9 @@ export function startLibrary(): () => void {
   });
 
   // Beyond `status` frames, the socket forwards library-mutating events (match.recorded /
-  // match.enriched / match.enrichFailed AND retention.swept) via onEvent. Any of them re-loads the
-  // list + counts so an enriched row jumps Unsorted -> its real bucket, a swept row drops, and the
-  // sidebar badges refresh together.
+  // match.enriched / match.enrichFailed / match.deleted AND retention.swept) via onEvent. Any of
+  // them re-loads the list + counts so an enriched row jumps Unsorted -> its real bucket, a swept or
+  // deleted row drops, and the sidebar badges refresh together.
   //
   // Coalesce bursts: a backlog enriching can fire several frames in quick succession. The store's
   // loadToken already prevents stale results from clobbering, but without coalescing each frame still

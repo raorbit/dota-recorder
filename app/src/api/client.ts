@@ -368,12 +368,18 @@ async function postJsonBody<TBody, TResult>(path: string, body: TBody): Promise<
   return (await res.json()) as TResult;
 }
 
-// DELETE returning no body (204/200). Wider timeout: the core also unlinks the .mp4 + thumbnail.
+// How long a delete may take. It waits for the core's storage-maintenance lock, which the archiver
+// holds through a whole pass of cross-drive copies (minutes for multi-GB VODs onto a slow HDD). The
+// core finishes a delete even after the request gives up and announces it (match.deleted /
+// clip.deleted), so this only bounds a wedged core.
+const DELETE_TIMEOUT_MS = 10 * 60_000;
+
+// DELETE returning no body (204/200).
 async function delVoid(path: string): Promise<void> {
   const res = await fetch(`${bridgeBase()}${path}`, {
     method: 'DELETE',
     headers: { ...authHeaders() },
-    signal: AbortSignal.timeout(10_000),
+    signal: AbortSignal.timeout(DELETE_TIMEOUT_MS),
   });
   if (!res.ok) {
     throw new Error(`DELETE ${path} failed: ${res.status} ${res.statusText}`);
@@ -661,7 +667,7 @@ export async function deleteMatch(id: number): Promise<MatchDeleteOutcome | null
   const res = await fetch(`${bridgeBase()}/matches/${id}`, {
     method: 'DELETE',
     headers: { Accept: 'application/json', ...authHeaders() },
-    signal: AbortSignal.timeout(10_000),
+    signal: AbortSignal.timeout(DELETE_TIMEOUT_MS),
   });
   if (!res.ok) {
     throw new Error(`DELETE /matches/${id} failed: ${res.status} ${res.statusText}`);
@@ -678,10 +684,11 @@ export async function deleteMatch(id: number): Promise<MatchDeleteOutcome | null
 export type StatusListener = (status: Status) => void;
 export type StateListener = (connected: boolean) => void;
 // Receives raw /ws envelopes for library-mutating events: the match.* frames
-// (match.recorded / match.enriched / match.enrichFailed) AND retention.swept (a
+// (match.recorded / match.enriched / match.enrichFailed / match.deleted) AND retention.swept (a
 // retention pass pruned VOD rows). The renderer reacts by re-fetching the list +
 // counts; the payload is intentionally opaque to onEvent subscribers, though
-// retention.swept carries a deletedIds array a scoped listener (the player) may read.
+// retention.swept carries a deletedIds array and match.deleted an { id, outcome } a scoped
+// listener (the player) may read.
 export type MatchEventListener = (evt: { type: string; payload: unknown }) => void;
 
 // A low-disk warning frame — the core publishes it as a `{ type: "error" }` envelope with
@@ -873,6 +880,7 @@ export function classifyWsFrame(parsed: unknown): RoutedFrame | null {
     type === 'match.enriched' ||
     type === 'match.enrichFailed' ||
     type === 'match.recorded' ||
+    type === 'match.deleted' ||
     type === 'retention.swept'
   ) {
     return { kind: 'libraryEvent', envelope: { type, payload } };
