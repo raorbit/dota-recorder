@@ -25,13 +25,13 @@
 !macro customInstall
   ${ifNot} ${isUpdated}
     DetailPrint "Scoping the OBS control port (4466) to loopback (may prompt for administrator)..."
-    ExecShellWait "runas" "cmd.exe" '/c netsh advfirewall firewall delete rule name="Dota 2 Recorder OBS WebSocket" protocol=TCP localport=4466 & netsh advfirewall firewall add rule name="Dota 2 Recorder OBS WebSocket" dir=in action=block protocol=TCP localport=4466' SW_HIDE
+    ExecShellWait "runas" "$SYSDIR\cmd.exe" '/c ""$SYSDIR\netsh.exe" advfirewall firewall delete rule name="Dota 2 Recorder OBS WebSocket" protocol=TCP localport=4466 & "$SYSDIR\netsh.exe" advfirewall firewall add rule name="Dota 2 Recorder OBS WebSocket" dir=in action=block protocol=TCP localport=4466"' SW_HIDE
   ${endIf}
 !macroend
 
 !macro customUnInstall
   ${ifNot} ${isUpdated}
     DetailPrint "Removing the OBS control port firewall rule..."
-    ExecShellWait "runas" "cmd.exe" '/c netsh advfirewall firewall delete rule name="Dota 2 Recorder OBS WebSocket" protocol=TCP localport=4466' SW_HIDE
+    ExecShellWait "runas" "$SYSDIR\cmd.exe" '/c ""$SYSDIR\netsh.exe" advfirewall firewall delete rule name="Dota 2 Recorder OBS WebSocket" protocol=TCP localport=4466"' SW_HIDE
   ${endIf}
 !macroend
