@@ -8,10 +8,13 @@ import dev.dotarec.data.ClipRow;
 import dev.dotarec.data.MatchRepository;
 import dev.dotarec.data.MatchSummary;
 import java.io.IOException;
+import java.nio.channels.FileChannel;
+import java.nio.file.AccessDeniedException;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -357,6 +360,11 @@ public class RecordingArchiver {
      * that name and size, re-linked the match to it whenever the original's drive was not back yet. A
      * {@code .partial} carries neither, and {@link #sweepPartials} removes it.
      *
+     * <p>The copy is flushed to the drive before the rename, and again after it, so both its bytes
+     * and its final name are on disk before the caller repoints the row and deletes the source. The
+     * copy returns once the data is in the write cache; a power cut or crash after the source delete
+     * would otherwise leave the only copy with unwritten ranges reading as zeros.
+     *
      * <p>{@code REPLACE_EXISTING} is safe because {@code dst} carries the match id (see the caller): it
      * can only ever overwrite a leftover from this same match's prior interrupted move, making retries
      * idempotent.
@@ -374,13 +382,29 @@ public class RecordingArchiver {
             if (Files.size(partial) != Files.size(src)) {
                 throw new IOException("Copy size mismatch moving " + src + " -> " + dst);
             }
+            syncToDisk(partial);
             // Same directory, so a rename; it replaces a leftover under the final name too.
             Files.move(partial, dst, StandardCopyOption.ATOMIC_MOVE);
         } catch (IOException | RuntimeException e) {
             deletePartialQuietly(partial);
             throw e;
         }
+        syncToDisk(dst);
         return false;
+    }
+
+    /**
+     * Flushes {@code file}'s data and metadata to the drive (FlushFileBuffers on Windows). A seam so
+     * a test can see where in the move it happens.
+     */
+    void syncToDisk(Path file) throws IOException {
+        try (FileChannel channel = FileChannel.open(file, StandardOpenOption.WRITE)) {
+            channel.force(true);
+        } catch (AccessDeniedException e) {
+            // A read-only file (the copy keeps the source's attributes) can't be opened for the
+            // write access a flush needs; leave it to the cache rather than never archive it.
+            log.debug("Could not flush {} (read-only?): {}", file, e.toString());
+        }
     }
 
     /** Copies {@code src} over {@code dst}. A seam so a test can stand in for an interrupted copy. */

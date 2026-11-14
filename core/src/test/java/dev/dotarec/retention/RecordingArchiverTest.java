@@ -376,6 +376,40 @@ class RecordingArchiverTest {
     }
 
     @Test
+    void crossStoreCopy_isOnDiskBeforeTheRowMovesAndTheSourceGoes() throws Exception {
+        // The copy returns with the data still in the write cache. Deleting the source before it is
+        // flushed risks a power cut leaving the only copy with ranges reading as zeros.
+        Path archive = configureArchive("hdd", 2);
+        settings.get().retentionCapGb = 1;
+        long oldest = seed(videoDir, "old.mp4", "old.jpg", 4 * 1024, 1_000L, false);
+        seed(videoDir, "new.mp4", "new.jpg", 2 * GIB, 2_000L, false);
+        Path src = videoDir.resolve("old.mp4");
+        Path dst = archive.resolve(oldest + "-old.mp4");
+        List<Path> synced = new ArrayList<>();
+        RecordingArchiver watched =
+                new RecordingArchiver(matches, clips, settings, sweeper, hugeFreeProbe()) {
+                    @Override
+                    void syncToDisk(Path file) throws IOException {
+                        synced.add(file);
+                        assertThat(src).as("the source outlives the flush").exists();
+                        assertThat(matches.findById(oldest).orElseThrow().videoPath())
+                                .as("the row moves only after the flush")
+                                .isEqualTo(src.toString());
+                        super.syncToDisk(file);
+                    }
+                };
+
+        try (MockedStatic<Files> ignored = forceCrossStoreMoves()) {
+            assertThat(watched.archive(null).movedIds()).containsExactly(oldest);
+        }
+
+        assertThat(synced).as("its bytes, then its final name")
+                .contains(archive.resolve(oldest + "-old.mp4" + RecordingArchiver.PARTIAL_SUFFIX), dst);
+        assertThat(src).doesNotExist();
+        assertThat(matches.findById(oldest).orElseThrow().videoPath()).isEqualTo(dst.toString());
+    }
+
+    @Test
     void interruptedCopiesLeftOnAnArchiveDrive_areRemoved_andNothingElse() throws Exception {
         Path archive = configureArchive("hdd", 10);
         Path thumbs = Files.createDirectories(archive.resolve("thumbs"));
