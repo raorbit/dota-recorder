@@ -131,6 +131,9 @@ public class ObsController implements ObsRecorder, MatchFsm.RecordStatusProbe {
      */
     private volatile boolean connectionReady;
 
+    /** Bumped on each identified connection; see {@link ObsRecorder#connectionEpoch()}. */
+    private volatile long connectionEpoch;
+
     /**
      * Whether the audio captures should be in OBS: set by {@link #attachAudio()}, cleared by {@link
      * #detachIdleAudio()}. The scene setup on (re)connect applies it, so a reconnect mid-recording
@@ -333,6 +336,7 @@ public class ObsController implements ObsRecorder, MatchFsm.RecordStatusProbe {
             // Identified+ready: now verify we are talking v5, not a v4/old-OBS that merely accepted
             // the socket. A protocol mismatch otherwise surfaces as a confusing generic failure.
             verifyProtocol();
+            connectionEpoch++;
             health.setConnected(true);
             refreshSceneActive();
             refreshRecordingActive();
@@ -625,6 +629,16 @@ public class ObsController implements ObsRecorder, MatchFsm.RecordStatusProbe {
     @Override
     public String lastStoppedOutputPath() {
         return events.lastStoppedOutputPath();
+    }
+
+    @Override
+    public String startedOutputPath() {
+        return events.startedOutputPath();
+    }
+
+    @Override
+    public long connectionEpoch() {
+        return connectionEpoch;
     }
 
     @Override

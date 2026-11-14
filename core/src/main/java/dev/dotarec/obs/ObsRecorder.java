@@ -111,6 +111,24 @@ public interface ObsRecorder {
     }
 
     /**
+     * The output path OBS reported when the current recording started, or {@code null} when it
+     * reported none. Only a finalize that can't learn the path any other way uses it: the OBS that
+     * held the output crashed, so no StopRecord answer or STOPPED event ever names the file.
+     */
+    default String startedOutputPath() {
+        return null;
+    }
+
+    /**
+     * Counts the identified connections made so far; each reconnect, and so each relaunched OBS,
+     * gets a new value. A recording started under another value is not the connected OBS's own: if
+     * that OBS reports no active output, the one that was recording is gone.
+     */
+    default long connectionEpoch() {
+        return 0L;
+    }
+
+    /**
      * The wall-clock instant OBS confirmed OUTPUT_STARTED for the current/most-recent recording, or
      * {@code null} if recording has never been confirmed. This is the anchor every
      * {@code markers.video_offset_s} is computed against.

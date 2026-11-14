@@ -51,6 +51,9 @@ public class ObsEvents {
     /** Output path captured from the most recent STOPPED event (fallback path source). */
     private final AtomicReference<String> lastStoppedOutputPath = new AtomicReference<>();
 
+    /** Output path the most recent STARTED event reported, when it reported one. */
+    private final AtomicReference<String> startedOutputPath = new AtomicReference<>();
+
     /**
      * Re-armable latch counted down on the next OUTPUT_STARTED. {@link #clearRecordConfirmation()}
      * installs a fresh one immediately before a StartRecord so {@link #awaitRecordConfirmed(long)}
@@ -88,6 +91,8 @@ public class ObsEvents {
                 // this recording's. OBS stops the old output before it can start the new one, so
                 // its STOPPED always lands before this STARTED.
                 lastStoppedOutputPath.set(null);
+                startedOutputPath.set(
+                        outputPath != null && !outputPath.isBlank() ? outputPath : null);
                 health.setRecording(true);
                 CountDownLatch latch = confirmLatch;
                 if (latch != null) {
@@ -169,10 +174,20 @@ public class ObsEvents {
         return lastStoppedOutputPath.get();
     }
 
+    /**
+     * The output path the latest OUTPUT_STARTED reported, or {@code null} when it reported none (the
+     * v5 event often carries none; see the class notes). The FSM keeps it with the recording, so a
+     * recording whose OBS crashed, and so never reported a STOPPED path, can still keep its file.
+     */
+    public String startedOutputPath() {
+        return startedOutputPath.get();
+    }
+
     /** Clears the per-recording state so a fresh recording cannot read a stale start instant/path. */
     public void reset() {
         recordConfirmedAt.set(null);
         lastStoppedOutputPath.set(null);
+        startedOutputPath.set(null);
         confirmLatch = null;
     }
 }
