@@ -140,6 +140,27 @@ class SettingsStoreTest {
     }
 
     @Test
+    void load_ignoresUnknownKeys_andKeepsTheKnownValues(@TempDir Path dir) throws Exception {
+        // A settings.json written by another build (the Go remake adds readOnlyDirs, and a nested
+        // storage location can grow a key too) must not read as corrupt: that used to fall back to
+        // fresh defaults, a 50 GB cap and no archive drives, which the sweeper then enforced.
+        Files.createDirectories(dir);
+        Files.writeString(
+                dir.resolve("settings.json"),
+                """
+                {"retentionCapGb": 400, "gsiAuthToken": "tok-keep", "readOnlyDirs": [],
+                 "storageLocations": [{"id": "a1", "path": "D:\\\\Archive", "capGb": 900, "label": "x"}]}
+                """);
+
+        SettingsStore store = new SettingsStore(paths(dir));
+
+        assertThat(store.get().retentionCapGb).isEqualTo(400);
+        assertThat(store.get().gsiAuthToken).isEqualTo("tok-keep");
+        assertThat(store.get().storageLocations)
+                .containsExactly(new SettingsStore.StorageLocation("a1", "D:\\Archive", 900));
+    }
+
+    @Test
     void freshStore_seedsDotaOnPlusTwoBuiltinRowsOff(@TempDir Path dir) {
         SettingsStore store = new SettingsStore(paths(dir));
 
