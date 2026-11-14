@@ -1,8 +1,10 @@
 package dev.dotarec.obs;
 
 import dev.dotarec.bridge.EventPublisher;
+import java.util.function.BooleanSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -32,6 +34,9 @@ public class ObsConnectionScheduler {
     private final ObsDemand demand;
     private final EventPublisher eventPublisher;
 
+    /** Whether this app's own OBS process is running (see {@link ObsHealer#isObsRunning()}). */
+    private final BooleanSupplier obsProcessRunning;
+
     /**
      * Tracks the connection edge (only the scheduler thread touches it). Scene setup runs on each
      * disconnected->connected transition, not every tick: a freshly (re)launched OBS is configured
@@ -43,20 +48,33 @@ public class ObsConnectionScheduler {
      * the 5s retry doesn't spam. Reset after a clean configure so a later regression re-surfaces. */
     private boolean loggedConfigError = false;
 
+    @Autowired
     public ObsConnectionScheduler(
             ObsController obsController,
             ObsHealth health,
             ObsDemand demand,
-            EventPublisher eventPublisher) {
+            EventPublisher eventPublisher,
+            ObsHealer healer) {
+        this(obsController, health, demand, eventPublisher, healer::isObsRunning);
+    }
+
+    ObsConnectionScheduler(
+            ObsController obsController,
+            ObsHealth health,
+            ObsDemand demand,
+            EventPublisher eventPublisher,
+            BooleanSupplier obsProcessRunning) {
         this.obsController = obsController;
         this.health = health;
         this.demand = demand;
         this.eventPublisher = eventPublisher;
+        this.obsProcessRunning = obsProcessRunning;
     }
 
     @Scheduled(fixedRate = 5_000) // every 5 seconds
     public void tryConnectAndConfigure() {
         try {
+            clearRecordingIfObsExited();
             if (!health.isConnected() && !demand.isWanted()) {
                 wasConnected = false;
                 return; // OBS is stopped on purpose; nothing to connect to
@@ -93,5 +111,23 @@ public class ObsConnectionScheduler {
                 /* status heartbeat is best-effort */
             }
         }
+    }
+
+    /**
+     * Clears the recording flag once the OBS process that held the output is gone. A dropped
+     * websocket leaves {@link ObsHealth#isRecording()} set on purpose (OBS keeps recording across a
+     * blip, and the reconnect re-syncs the flag), but a crashed OBS records nothing, and when no OBS
+     * comes back to reconnect to (its relaunch budget spent) the stale flag kept OBS wanted and the
+     * app busy for good: Electron never saw the need end, so it never refilled that budget, and OBS
+     * stayed down until the app restarted. The flag only matters while disconnected, so only then
+     * is the process table scanned.
+     */
+    private void clearRecordingIfObsExited() {
+        if (health.isConnected() || !health.isRecording() || obsProcessRunning.getAsBoolean()) {
+            return;
+        }
+        health.setRecording(false);
+        log.warn("OBS exited while recording; it is recording nothing now, so the recording flag"
+                + " is cleared");
     }
 }

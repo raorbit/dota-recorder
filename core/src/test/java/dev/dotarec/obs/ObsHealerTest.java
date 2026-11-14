@@ -197,6 +197,15 @@ class ObsHealerTest {
     }
 
     @Test
+    void isObsRunning_isFalseWhileNoProcessRunsThisAppsObs(@TempDir Path dir) throws Exception {
+        // A real process-table scan: nothing runs an obs64.exe that exists only in a temp dir.
+        Path exe = Files.createFile(dir.resolve("obs64.exe"));
+        ObsHealer healer = new ObsHealer(exe, (e, waitMs) -> 0, new TimeSource(nanos::get, () -> 0L));
+
+        assertThat(healer.isObsRunning()).isFalse();
+    }
+
+    @Test
     void noRunningObs_reportsNothingRestarted() {
         running = 0;
         assertThat(healer().restartObs("test")).isFalse();

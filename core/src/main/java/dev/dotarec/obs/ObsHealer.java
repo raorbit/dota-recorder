@@ -148,6 +148,25 @@ public class ObsHealer implements ObsRestarter {
         return true;
     }
 
+    /**
+     * Whether a process is running this app's own OBS executable (never another OBS). Lets the core
+     * tell an OBS that exited apart from a websocket that merely dropped. A scan that fails reads as
+     * running, so a caller never acts on a guess that OBS is gone.
+     */
+    public boolean isObsRunning() {
+        String target = canonical(obsExecutable.toString());
+        String exeName = fileName(obsExecutable.toString());
+        if (target == null || exeName == null) {
+            return true;
+        }
+        try {
+            return ProcessHandle.allProcesses().anyMatch(ph -> runs(ph, target, exeName));
+        } catch (RuntimeException e) {
+            log.debug("Process scan for {} failed: {}", obsExecutable, e.toString());
+            return true;
+        }
+    }
+
     private static int killByExecutable(Path exe, long waitMs) {
         String target = canonical(exe.toString());
         String exeName = fileName(exe.toString());
@@ -156,12 +175,7 @@ public class ObsHealer implements ObsRestarter {
         }
         int[] killed = {0};
         ProcessHandle.allProcesses()
-                .filter(ph -> ph.info().command()
-                        // Cheap name check first: resolving a real path touches the disk, and
-                        // only obs64.exe candidates are worth it.
-                        .filter(c -> exeName.equals(fileName(c)))
-                        .map(c -> target.equals(canonical(c)))
-                        .orElse(false))
+                .filter(ph -> runs(ph, target, exeName))
                 .forEach(ph -> {
                     if (ph.destroyForcibly()) {
                         killed[0]++;
@@ -173,6 +187,16 @@ public class ObsHealer implements ObsRestarter {
                     }
                 });
         return killed[0];
+    }
+
+    /** Whether {@code ph} runs the executable whose {@link #canonical} form is {@code target}. */
+    private static boolean runs(ProcessHandle ph, String target, String exeName) {
+        return ph.info().command()
+                // Cheap name check first: resolving a real path touches the disk, and only
+                // obs64.exe candidates are worth it.
+                .filter(c -> exeName.equals(fileName(c)))
+                .map(c -> target.equals(canonical(c)))
+                .orElse(false);
     }
 
     /**
