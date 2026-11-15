@@ -22,8 +22,14 @@ import org.springframework.stereotype.Component;
  * a hardware encoder when one exists (so recording does not steal CPU from Dota), with the
  * universal software x264 as the always-available fallback. The choice is a vendor heuristic over
  * the GPU name(s) reported by {@code Win32_VideoController} -- not a true capability probe (which
- * would require launching OBS), but enough to pick the right family; if the chosen HW encoder is
- * unavailable at OBS startup, OBS itself falls back, and PR5 validates against the live encoder.
+ * would require launching OBS), but enough to pick the right family.
+ *
+ * <p>Nothing here checks that the picked encoder opens. Two things cover a pick that doesn't: OBS
+ * itself swaps the token for x264 at startup when it didn't register that encoder, and
+ * {@link ObsConfigWriter#fallBackToX264} swaps an auto pick for x264 when OBS did register it but
+ * record starts keep failing. That second case is real: OBS registers QSV on any Intel GPU, and AMF
+ * after creating the encoder without ever opening a session, so either can register on a PC whose
+ * driver then can't open it.
  *
  * <p>The GPU-name source is injectable so the mapping is unit-tested without touching WMI.
  */
