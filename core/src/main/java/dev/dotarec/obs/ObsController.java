@@ -179,8 +179,9 @@ public class ObsController implements ObsRecorder, MatchFsm.RecordStatusProbe {
     private Boolean audioApplied;
 
     /**
-     * {@link #nanoTime} of the last {@link #attachAudio()} reconcile that failed, or null when none
-     * failed on this connection; see {@link #AUDIO_ATTACH_RETRY_MS}. Guarded by {@code this}.
+     * {@link #nanoTime} when the last {@link #attachAudio()} reconcile that failed gave up, or null
+     * when none failed on this connection; see {@link #AUDIO_ATTACH_RETRY_MS}. Guarded by
+     * {@code this}.
      */
     private Long audioFailedAtNanos;
 
@@ -275,9 +276,10 @@ public class ObsController implements ObsRecorder, MatchFsm.RecordStatusProbe {
         if (!sceneConfigurer.reconcileAudioInputs(c, true)) {
             // Left unapplied so a later start retry reconciles again: marked applied, the retries
             // would no-op and the readiness gate would hold the match unrecorded. Not on the very
-            // next frame, though: see AUDIO_ATTACH_RETRY_MS.
+            // next frame, though: see AUDIO_ATTACH_RETRY_MS. The wait runs from when the reconcile
+            // gave up, since against a stalled OBS its input list alone waits out a 5s timeout.
             audioApplied = null;
-            audioFailedAtNanos = now;
+            audioFailedAtNanos = nanoTime.getAsLong();
             log.warn("Could not attach every audio capture; trying again in {}s",
                     AUDIO_ATTACH_RETRY_MS / 1000);
             return;

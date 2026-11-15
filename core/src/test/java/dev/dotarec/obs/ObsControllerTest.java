@@ -844,6 +844,31 @@ class ObsControllerTest {
     }
 
     @Test
+    void attachAudio_aReconcileThatTimedOut_stillWaitsBeforeTheNextTry() {
+        // Against a stalled OBS the reconcile's input list waits out its 5s timeout before it fails.
+        // Timed from when the reconcile began, the wait would be over by the time it gave up, and the
+        // next start frame would stall the FSM on another full reconcile.
+        ObsSceneConfigurer cfg = mock(ObsSceneConfigurer.class);
+        OBSRemoteController obs = mock(OBSRemoteController.class);
+        ObsController controller = connectedTo(obs, cfg);
+        long[] now = {0L};
+        ReflectionTestUtils.setField(controller, "nanoTime", (LongSupplier) () -> now[0]);
+        when(cfg.reconcileAudioInputs(obs, true)).thenAnswer(inv -> {
+            now[0] += 5_000L * 1_000_000L; // the input list timed out
+            return false;
+        });
+
+        controller.attachAudio();
+        now[0] += 100L * 1_000_000L; // the next start frame
+        controller.attachAudio();
+        verify(cfg, times(1)).reconcileAudioInputs(obs, true);
+
+        now[0] += ObsController.AUDIO_ATTACH_RETRY_MS * 1_000_000L;
+        controller.attachAudio();
+        verify(cfg, times(2)).reconcileAudioInputs(obs, true);
+    }
+
+    @Test
     void configureScene_aFailedAudioReconcileLeavesTheAttachToRetry() throws Exception {
         ObsSceneConfigurer cfg = mock(ObsSceneConfigurer.class);
         OBSRemoteController obs = mock(OBSRemoteController.class);
