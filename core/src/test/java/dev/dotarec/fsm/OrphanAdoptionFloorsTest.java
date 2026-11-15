@@ -79,6 +79,26 @@ class OrphanAdoptionFloorsTest {
     }
 
     @Test
+    void theFloorOfAFolderThatIsNoLongerARootIsDropped(@TempDir Path dir) throws Exception {
+        Path kept = dir.resolve("kept");
+        Path left = dir.resolve("left"); // never created: a missing folder is fine either way
+        Path file = dir.resolve("data").resolve(OrphanAdoptionFloors.FILE_NAME);
+        OrphanAdoptionFloors.write(
+                file, Map.of(OrphanAdoptionFloors.key(kept), 1_000L, OrphanAdoptionFloors.key(left), 2_000L));
+
+        OrphanAdoptionFloors.Snapshot snapshot =
+                new OrphanAdoptionFloors(dir.resolve("data")).prepare(List.of(kept), 50_000L);
+
+        assertThat(snapshot.of(kept)).isEqualTo(new OrphanAdoptionFloors.Floor(1_000L, true));
+        assertThat(snapshot.of(left)).isEqualTo(OrphanAdoptionFloors.Floor.NONE);
+        assertThat(OrphanAdoptionFloors.read(file)).containsOnlyKeys(OrphanAdoptionFloors.key(kept));
+
+        // Back as a root, it starts again from the scan that sees it.
+        assertThat(new OrphanAdoptionFloors(dir.resolve("data")).prepare(List.of(kept, left), 90_000L).of(left))
+                .isEqualTo(new OrphanAdoptionFloors.Floor(90_000L, true));
+    }
+
+    @Test
     void withoutADataFolderNothingIsAdmitted(@TempDir Path dir) {
         OrphanAdoptionFloors.Snapshot snapshot = new OrphanAdoptionFloors(null).prepare(List.of(dir), 0L);
 
