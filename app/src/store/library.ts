@@ -262,15 +262,22 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
           failed = true; // skip this one; the rest still delete
         }
       }
-      // Reconcile a failed (or timed-out, see deleteMatch) delete with the server's list.
-      if (failed) void get().load({ silent: true });
-      if (removed.size === 0 && stubbed.size === 0 && unknown.size === 0) return;
+      // Reconcile a failed (or timed-out, see deleteMatch) delete with the server's list. Started
+      // only after invalidatePendingLoad below, which would otherwise drop it as stale.
+      const reconcile = (): void => {
+        if (failed) void get().load({ silent: true });
+      };
+      if (removed.size === 0 && stubbed.size === 0 && unknown.size === 0) {
+        reconcile();
+        return;
+      }
       invalidatePendingLoad();
       set((s) => {
         let next: DeleteSlice = applyMatchVideosDeleted(s, stubbed);
         next = applyMatchesDeleted(next, removed);
         return applyRecordingsDeleted(next, unknown);
       });
+      reconcile();
       try {
         set({ counts: await fetchBucketCounts() });
       } catch {
