@@ -547,6 +547,38 @@ describe('startLibrary storage-events wiring', () => {
     teardown();
   });
 
+  it('sends every row of a bulk delete at once, so none is left in a window that closes', async () => {
+    // The first delete waits its half minute for the core's maintenance lock. Had the rest waited in
+    // this window behind it, closing the window to the tray then would have lost them: the core never
+    // heard of them.
+    const held = heldDelete();
+    const deletes = serveLibrary(
+      {
+        matches: [{ id: 7 }, { id: 8 }, { id: 9 }],
+        clips: [5, 6].map((id) => ({ id, parentMatchId: 7 })),
+      },
+      (url) => (url.endsWith('/matches/7') || url.endsWith('/clips/5') ? held.answer : deleted()),
+    );
+    const teardown = startLibrary();
+    await flush();
+
+    const recordings = useLibraryStore.getState().deleteMatches([7, 8, 9]);
+    const clips = useLibraryStore.getState().deleteClips([5, 6]);
+    await flush();
+    expect(deletes).toEqual([
+      'http://127.0.0.1:3224/matches/7',
+      'http://127.0.0.1:3224/matches/8',
+      'http://127.0.0.1:3224/matches/9',
+      'http://127.0.0.1:3224/clips/5',
+      'http://127.0.0.1:3224/clips/6',
+    ]);
+
+    held.release();
+    await recordings;
+    await clips;
+    teardown();
+  });
+
   it('unmarks a delete that was refused or timed out', async () => {
     serveLibrary({ matches: [{ id: 7 }], clips: [{ id: 5, parentMatchId: 7 }] }, (url) =>
       url.endsWith('/matches/7') ? refused() : timedOut(),
