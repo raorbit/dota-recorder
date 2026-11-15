@@ -66,7 +66,7 @@ class OrphanAdoptionFloorsTest {
         OrphanAdoptionFloors.write(file, Map.of(OrphanAdoptionFloors.key(known), 1_000L));
 
         OrphanAdoptionFloors.Snapshot snapshot =
-                new OrphanAdoptionFloors(dir.resolve("data")).prepare(List.of(known, fresh), 50_000L);
+                new OrphanAdoptionFloors(dir.resolve("data")).prepare(known, List.of(fresh), 50_000L, 50_000L);
 
         assertThat(snapshot.of(known)).isEqualTo(new OrphanAdoptionFloors.Floor(1_000L, true));
         assertThat(snapshot.of(fresh)).isEqualTo(new OrphanAdoptionFloors.Floor(50_000L, true));
@@ -87,21 +87,36 @@ class OrphanAdoptionFloorsTest {
                 file, Map.of(OrphanAdoptionFloors.key(kept), 1_000L, OrphanAdoptionFloors.key(left), 2_000L));
 
         OrphanAdoptionFloors.Snapshot snapshot =
-                new OrphanAdoptionFloors(dir.resolve("data")).prepare(List.of(kept), 50_000L);
+                new OrphanAdoptionFloors(dir.resolve("data")).prepare(kept, List.of(), 50_000L, 50_000L);
 
         assertThat(snapshot.of(kept)).isEqualTo(new OrphanAdoptionFloors.Floor(1_000L, true));
         assertThat(snapshot.of(left)).isEqualTo(OrphanAdoptionFloors.Floor.NONE);
         assertThat(OrphanAdoptionFloors.read(file)).containsOnlyKeys(OrphanAdoptionFloors.key(kept));
 
         // Back as a root, it starts again from the scan that sees it.
-        assertThat(new OrphanAdoptionFloors(dir.resolve("data")).prepare(List.of(kept, left), 90_000L).of(left))
+        assertThat(new OrphanAdoptionFloors(dir.resolve("data")).prepare(kept, List.of(left), 90_000L, 90_000L).of(left))
                 .isEqualTo(new OrphanAdoptionFloors.Floor(90_000L, true));
     }
 
     @Test
     void withoutADataFolderNothingIsAdmitted(@TempDir Path dir) {
-        OrphanAdoptionFloors.Snapshot snapshot = new OrphanAdoptionFloors(null).prepare(List.of(dir), 0L);
+        OrphanAdoptionFloors.Snapshot snapshot = new OrphanAdoptionFloors(null).prepare(dir, List.of(), 0L, 0L);
 
         assertThat(snapshot.of(dir).admits(Long.MAX_VALUE)).isFalse();
+    }
+
+    @Test
+    void onlyAVideoFolderWithoutAFloorTakesTheJournalsEarlierFirstFloor(@TempDir Path dir) throws Exception {
+        Path video = dir.resolve("video");
+        Path archive = dir.resolve("archive");
+        OrphanAdoptionFloors floors = new OrphanAdoptionFloors(dir.resolve("data"));
+
+        OrphanAdoptionFloors.Snapshot first = floors.prepare(video, List.of(archive), 50_000L, 20_000L);
+
+        assertThat(first.of(video)).isEqualTo(new OrphanAdoptionFloors.Floor(20_000L, true));
+        assertThat(first.of(archive)).isEqualTo(new OrphanAdoptionFloors.Floor(50_000L, true));
+        // An existing floor is never lowered.
+        assertThat(floors.prepare(video, List.of(archive), 90_000L, 1_000L).of(video))
+                .isEqualTo(new OrphanAdoptionFloors.Floor(20_000L, true));
     }
 }

@@ -1164,14 +1164,114 @@ class CrashRecoveryRunnerTest {
     }
 
     @Test
-    void linkingAFreshlyChosenFolderTakesNothingItAlreadyHeld() throws Exception {
-        Path held = writeModifiedAt(chooseVideoDir("Videos").resolve("2026-06-28 14-30-15.mp4"), 5_000L);
-        journal.open(crashedSessionRow());
+    void aFirstVideoFloorReachesBackToAPathlessJournal() throws Exception {
+        // The upgrade boot after a crash mid-match (or the first boot in a newly chosen folder) gives
+        // the video folder its first floor in the same boot that recovers the pathless journal. The
+        // journal is evidence of recording from its start, so the floor starts there, less the link
+        // grace, and the file is linked rather than turned away for good. Archives still start at the
+        // scan.
+        Path videos = chooseVideoDir("Videos");
+        Path archive = chooseArchive("hdd");
+        Crash crash = crashedHalfAnHourAgo(null);
+        Path crashed = writeModifiedAt(videos.resolve("2026-11-14 10-00-00.mp4"), crash.updatedMs());
+        Path older = writeModifiedAt(videos.resolve("2026-11-14 09-00-00.mp4"),
+                crash.startedMs() - 5L * 60_000L - 60_000L);
+        Path archived = writeModifiedAt(archive.resolve("2026-11-14 09-50-00.mkv"), crash.startedMs());
+        long scanStart = System.currentTimeMillis();
+
+        runner.run(null);
+
+        assertThat(matches.findAll())
+                .singleElement()
+                .satisfies(
+                        row -> {
+                            assertThat(row.dotaMatchId()).isEqualTo(1234L);
+                            assertThat(row.videoPath()).isEqualTo(crashed.toString());
+                        });
+        assertThat(older).exists();
+        assertThat(archived).exists();
+        assertThat(storedFloor(videos)).isEqualTo(crash.startedMs() - 5L * 60_000L);
+        assertThat(storedFloor(archive)).isNotNull().isGreaterThanOrEqualTo(scanStart);
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest(name = "journal with its path: {0}")
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void aFirstVideoFloorIsTheScanWithoutAPathlessJournal(boolean journalWithPath) throws Exception {
+        Path videos = chooseVideoDir("Videos");
+        long started = System.currentTimeMillis() - 30L * 60_000L;
+        if (journalWithPath) {
+            Path own = videos.resolve("2026-11-14 10-00-00.mp4");
+            Files.writeString(own, "the journal's own recording");
+            started = crashedHalfAnHourAgo(own.toString()).startedMs();
+        }
+        Path personal = writeModifiedAt(videos.resolve("2026-11-14 09-55-00.mp4"), started);
+        long scanStart = System.currentTimeMillis();
+
+        runner.run(null);
+
+        assertThat(matches.findAll()).noneMatch(row -> personal.toString().equals(row.videoPath()));
+        assertThat(personal).exists();
+        assertThat(storedFloor(videos)).isNotNull().isGreaterThanOrEqualTo(scanStart);
+    }
+
+    @Test
+    void aPathlessJournalNeverLowersAnExistingFloor() throws Exception {
+        Path videos = chooseVideoDir("Videos");
+        long existing = System.currentTimeMillis() - 10L * 60_000L;
+        seedAdoptionFloor(videos, existing);
+        Crash crash = crashedHalfAnHourAgo(null);
+        Path crashed = writeModifiedAt(videos.resolve("2026-11-14 10-00-00.mp4"), crash.updatedMs());
 
         runner.run(null);
 
         assertJournalRowWithoutVideo();
-        assertThat(held).exists();
+        assertThat(crashed).exists();
+        assertThat(storedFloor(videos)).isEqualTo(existing);
+    }
+
+    @Test
+    void firstVideoFloorReachesBackOnlyForPathlessSessionsWithAStart() {
+        RecordingSessionRow pathless = sessionAt("pathless", 100_000_000L, null);
+        RecordingSessionRow withPath = sessionAt("with-path", 50_000_000L, "C:\\v\\own.mp4");
+        RecordingSessionRow noStart = sessionAt("no-start", 0L, null);
+
+        assertThat(CrashRecoveryRunner.firstVideoFloorMs(List.of(), 200_000_000L)).isEqualTo(200_000_000L);
+        assertThat(CrashRecoveryRunner.firstVideoFloorMs(List.of(pathless, withPath, noStart), 200_000_000L))
+                .isEqualTo(100_000_000L - 5L * 60_000L);
+        assertThat(CrashRecoveryRunner.firstVideoFloorMs(List.of(pathless), 10_000_000L)).isEqualTo(10_000_000L);
+    }
+
+    private record Crash(long startedMs, long updatedMs) {}
+
+    /**
+     * Journals a recording that started 30 minutes ago and was last updated 20 minutes ago, with
+     * {@code videoPath} null when OBS never revealed it (a stop that never came).
+     */
+    private Crash crashedHalfAnHourAgo(String videoPath) {
+        long now = System.currentTimeMillis();
+        RecordingSessionRow row = sessionAt("session-crash", now - 30L * 60_000L, videoPath);
+        journal.open(row);
+        return new Crash(row.recordStartedWallMs(), row.updatedAt());
+    }
+
+    private static RecordingSessionRow sessionAt(String id, long startedMs, String videoPath) {
+        return new RecordingSessionRow(
+                id,
+                "surrogate-" + id,
+                "recording",
+                1234L,
+                "npc_dota_hero_puck",
+                startedMs,
+                startedMs,
+                startedMs + 10L * 60_000L,
+                "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS",
+                1,
+                1,
+                1,
+                videoPath,
+                null,
+                startedMs - 60_000L,
+                startedMs + 10L * 60_000L);
     }
 
     private static final long LONG_AGO_MS = 1_714_588_212_000L; // 2024-05-01 18:30:12 UTC

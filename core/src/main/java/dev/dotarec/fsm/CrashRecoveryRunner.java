@@ -154,12 +154,14 @@ public class CrashRecoveryRunner implements ApplicationRunner {
         // scan) is taken with no move/sweep in flight and cannot go stale mid-decision.
         maintenanceLock.lock();
         try {
+            List<RecordingSessionRow> unfinished = journal.findUnfinished();
             // Before anything is linked or adopted, so a root new to this scan (the first boot after
             // the upgrade, or a newly chosen folder) adopts nothing it already held. These are all the
             // roots, so a folder that has stopped being one loses its floor here.
+            long startMs = System.currentTimeMillis();
             OrphanAdoptionFloors.Snapshot floors =
-                    adoptionFloors.prepare(scanRoots(), System.currentTimeMillis());
-            List<RecordingSessionRow> unfinished = journal.findUnfinished();
+                    adoptionFloors.prepare(
+                            videoDir(), archiveDirs(), startMs, firstVideoFloorMs(unfinished, startMs));
             if (unfinished.isEmpty()) {
                 reconcileOrphanVods(floors);
                 return;
@@ -359,13 +361,22 @@ public class CrashRecoveryRunner implements ApplicationRunner {
         }
     }
 
-    /** Every root the orphan scan reads: the active video folder and each archive drive. */
-    private List<Path> scanRoots() {
-        List<Path> roots = new ArrayList<>();
-        roots.add(videoDir());
-        roots.addAll(archiveDirs());
-        roots.removeIf(java.util.Objects::isNull);
-        return roots;
+    /**
+     * The floor a video folder with none gets: the scan's start, or, when the journal holds an
+     * unfinished session with no path, that session's record start less the link window's grace if
+     * earlier. The journal is evidence this app was recording there from then, and a floor at the scan
+     * would turn away the very file {@link #linkOrphanVideo} is about to claim, on this boot and every
+     * later one (see {@link OrphanAdoptionFloors}).
+     */
+    static long firstVideoFloorMs(List<RecordingSessionRow> unfinished, long startMs) {
+        long first = startMs;
+        for (RecordingSessionRow session : unfinished) {
+            boolean pathless = session.videoPath() == null || session.videoPath().isBlank();
+            if (pathless && session.recordStartedWallMs() > 0) {
+                first = Math.min(first, session.recordStartedWallMs() - LINK_WINDOW_GRACE_MS);
+            }
+        }
+        return first;
     }
 
     /**
