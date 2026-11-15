@@ -193,7 +193,10 @@ public class ClipController {
                         .body(MatchController.DeleteOutcome.QUEUED));
     }
 
-    /** The delete itself, run with the maintenance lock held. */
+    /**
+     * The delete itself, run with the maintenance lock held. Always true: the queue hands what a delete
+     * returns on to its announcement, and a clip delete has nothing more to tell it.
+     */
     private boolean deleteUnderLock(long clipId) {
         // Re-read the CURRENT row inside the lock: the archiver may have repointed video_path/
         // thumb_path to an archive drive since the probe, so unlink the present locations, not the
