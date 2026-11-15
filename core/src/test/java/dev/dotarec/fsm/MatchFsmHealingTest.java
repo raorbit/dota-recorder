@@ -343,8 +343,9 @@ class MatchFsmHealingTest {
 
     @Test
     void obsRelaunchedMidMatch_withNoStartPath_stillRecordsTheRest() {
-        // OBS reported no path at the start: the part is kept as a row, and the boot orphan scan
-        // adopts its file, as before. What changes is that the rest of the match records.
+        // The STARTED event named no file, as an older obs-websocket's does (the bundled one always
+        // names it): the part is kept as a row without video, the boot orphan scan adopts its file,
+        // and the rest of the match still records.
         fsm.onFrame(playing());
         advanceSeconds(300);
         obsCrashedAndARelaunchedOneConnected();

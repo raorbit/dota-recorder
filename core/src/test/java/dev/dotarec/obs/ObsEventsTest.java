@@ -44,7 +44,8 @@ class ObsEventsTest {
 
     @Test
     void started_doesNotDependOnEventOutputPath() {
-        // v5 regression: the STARTED event's outputPath is null. We must still confirm recording.
+        // An older obs-websocket sends STARTED with no outputPath (the bundled one names the file).
+        // The recording must still be confirmed.
         events.onRecordStateChanged(ObsEvents.OUTPUT_STARTED, null);
 
         assertThat(health.isRecording()).isTrue();
