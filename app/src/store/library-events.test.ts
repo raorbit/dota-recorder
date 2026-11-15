@@ -55,6 +55,51 @@ async function flush(): Promise<void> {
   await vi.advanceTimersByTimeAsync(0);
 }
 
+// What the core holds, for the delete tests: each list is what its GET returns.
+interface CoreLibrary {
+  matches: { id: number }[];
+  clips: { id: number; parentMatchId: number }[];
+}
+
+// Stubs fetch with a core holding `core`. A DELETE drops its row there first, as the core does once
+// it gets its maintenance lock (even when the request has given up by then), and is then answered
+// with whatever `answer` returns for its URL. Returns the URLs of the DELETEs sent, in order.
+function serveLibrary(core: CoreLibrary, answer: (url: string) => Promise<unknown>): string[] {
+  const deletes: string[] = [];
+  fetchMock.mockImplementation((url: unknown, init?: { method?: string }) => {
+    const u = String(url);
+    if (init?.method === 'DELETE') {
+      deletes.push(u);
+      core.matches = core.matches.filter((m) => !u.endsWith(`/matches/${m.id}`));
+      core.clips = core.clips.filter((c) => !u.endsWith(`/clips/${c.id}`));
+      return answer(u);
+    }
+    const json = u.includes('/buckets/counts')
+      ? EMPTY_COUNTS
+      : u.includes('/status')
+        ? IDLE_STATUS
+        : u.includes('/clips')
+          ? core.clips
+          : core.matches;
+    return Promise.resolve({
+      ok: true,
+      json: async () => json,
+      text: async () => JSON.stringify(json),
+    });
+  });
+  return deletes;
+}
+
+// The answers a DELETE can get: done, refused (a locked file, say), or given up on behind the lock.
+const deleted = (): Promise<unknown> =>
+  Promise.resolve({ ok: true, json: async () => ({ outcome: 'deleted' }) });
+const refused = (): Promise<unknown> =>
+  Promise.resolve({ ok: false, status: 500, statusText: 'Internal Server Error' });
+const timedOut = (): Promise<unknown> =>
+  Promise.reject(new DOMException('The operation timed out.', 'TimeoutError'));
+
+const matchIds = (): number[] => useLibraryStore.getState().matches.map((m) => m.id);
+
 beforeEach(() => {
   vi.useFakeTimers();
   FakeWebSocket.instances = [];
@@ -139,62 +184,35 @@ describe('startLibrary storage-events wiring', () => {
     teardown();
   });
 
-  it('reconciles with a refetch when a recording delete fails or times out', async () => {
+  it('reconciles with the core when a recording delete times out', async () => {
+    // The DELETE gives up behind a long archive pass, and the core finishes it once the lock frees.
+    // Only the reconcile reload can show that 7 went.
+    serveLibrary({ matches: [{ id: 7 }, { id: 8 }], clips: [] }, timedOut);
     const teardown = startLibrary();
     await flush();
-    const listFetches = (): number =>
-      fetchMock.mock.calls.filter(
-        (c) =>
-          String(c[0]).includes('/matches') &&
-          (c[1] as { method?: string } | undefined)?.method !== 'DELETE',
-      ).length;
-    const before = listFetches();
-    // The DELETE (the next fetch) gives up, as it does behind a long archive pass.
-    fetchMock.mockImplementationOnce(() =>
-      Promise.reject(new DOMException('The operation timed out.', 'TimeoutError')),
-    );
+    expect(matchIds()).toEqual([7, 8]);
 
     await expect(useLibraryStore.getState().deleteMatch(7)).rejects.toThrow();
     await flush();
 
-    expect(listFetches()).toBeGreaterThan(before);
+    expect(matchIds()).toEqual([8]);
     teardown();
   });
 
   it('applies the reconcile reload of a bulk delete in which one delete failed', async () => {
-    // Server state: 7's delete is refused (a locked file, say) though the core dropped the row
-    // anyway; 8's succeeds. Only the reconcile reload can show that 7 went too.
-    let serverMatches = [{ id: 7 }, { id: 8 }, { id: 9 }];
-    fetchMock.mockImplementation((url: unknown, init?: { method?: string }) => {
-      const u = String(url);
-      if (init?.method === 'DELETE') {
-        serverMatches = serverMatches.filter((m) => !u.endsWith(`/matches/${m.id}`));
-        return u.endsWith('/matches/7')
-          ? Promise.resolve({ ok: false, status: 500, statusText: 'Internal Server Error' })
-          : Promise.resolve({ ok: true, json: async () => ({ outcome: 'deleted' }) });
-      }
-      const json = u.includes('/buckets/counts')
-        ? EMPTY_COUNTS
-        : u.includes('/status')
-          ? IDLE_STATUS
-          : u.includes('/clips')
-            ? []
-            : serverMatches;
-      return Promise.resolve({
-        ok: true,
-        json: async () => json,
-        text: async () => JSON.stringify(json),
-      });
-    });
-    const ids = (): number[] => useLibraryStore.getState().matches.map((m) => m.id);
+    // 7's delete is refused (a locked file, say) though the core dropped the row anyway; 8's
+    // succeeds. Only the reconcile reload can show that 7 went too.
+    serveLibrary({ matches: [{ id: 7 }, { id: 8 }, { id: 9 }], clips: [] }, (url) =>
+      url.endsWith('/matches/7') ? refused() : deleted(),
+    );
     const teardown = startLibrary();
     await flush();
-    expect(ids()).toEqual([7, 8, 9]);
+    expect(matchIds()).toEqual([7, 8, 9]);
 
     await useLibraryStore.getState().deleteMatches([7, 8]);
     await flush();
 
-    expect(ids()).toEqual([9]);
+    expect(matchIds()).toEqual([9]);
     teardown();
   });
 
@@ -202,31 +220,10 @@ describe('startLibrary storage-events wiring', () => {
     // 7's delete waited out its whole timeout behind the core's maintenance lock (the core finishes
     // it later). 8 and 9 would only wait as long behind it, so they aren't sent; the reconcile
     // reload shows what the core holds.
-    let serverMatches = [{ id: 7 }, { id: 8 }, { id: 9 }];
-    const deletes: string[] = [];
-    fetchMock.mockImplementation((url: unknown, init?: { method?: string }) => {
-      const u = String(url);
-      if (init?.method === 'DELETE') {
-        deletes.push(u);
-        serverMatches = serverMatches.filter((m) => !u.endsWith(`/matches/${m.id}`));
-        return u.endsWith('/matches/7')
-          ? Promise.reject(new DOMException('The operation timed out.', 'TimeoutError'))
-          : Promise.resolve({ ok: true, json: async () => ({ outcome: 'deleted' }) });
-      }
-      const json = u.includes('/buckets/counts')
-        ? EMPTY_COUNTS
-        : u.includes('/status')
-          ? IDLE_STATUS
-          : u.includes('/clips')
-            ? []
-            : serverMatches;
-      return Promise.resolve({
-        ok: true,
-        json: async () => json,
-        text: async () => JSON.stringify(json),
-      });
-    });
-    const ids = (): number[] => useLibraryStore.getState().matches.map((m) => m.id);
+    const deletes = serveLibrary(
+      { matches: [{ id: 7 }, { id: 8 }, { id: 9 }], clips: [] },
+      (url) => (url.endsWith('/matches/7') ? timedOut() : deleted()),
+    );
     const teardown = startLibrary();
     await flush();
 
@@ -234,7 +231,7 @@ describe('startLibrary storage-events wiring', () => {
     await flush();
 
     expect(deletes).toHaveLength(1);
-    expect(ids()).toEqual([8, 9]);
+    expect(matchIds()).toEqual([8, 9]);
     teardown();
   });
 
