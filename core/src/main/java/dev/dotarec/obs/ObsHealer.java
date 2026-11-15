@@ -151,7 +151,9 @@ public class ObsHealer implements ObsRestarter {
     /**
      * Whether a process is running this app's own OBS executable (never another OBS). Lets the core
      * tell an OBS that exited apart from a websocket that merely dropped. A scan that fails reads as
-     * running, so a caller never acts on a guess that OBS is gone.
+     * running, so a caller never acts on a guess that OBS is gone. A process this one can't read (an
+     * OBS run elevated, say) has no command to match and reads as not running, so a caller must not
+     * act on a single answer either (see {@link ObsConnectionScheduler}).
      */
     public boolean isObsRunning() {
         String target = canonical(obsExecutable.toString());

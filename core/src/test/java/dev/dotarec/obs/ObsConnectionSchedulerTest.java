@@ -40,8 +40,25 @@ class ObsConnectionSchedulerTest {
         obsProcessRunning = false;
 
         scheduler.tryConnectAndConfigure();
+        assertThat(health.isRecording()).isTrue(); // one miss is never enough
+        scheduler.tryConnectAndConfigure();
 
         assertThat(health.isRecording()).isFalse();
+    }
+
+    @Test
+    void anObsTheScanMissesOnceKeepsTheRecordingFlag() {
+        // An elevated OBS can't be read by this process, so the scan misses it; its websocket blip
+        // reconnects within a tick. Two misses in a row must come before the flag is cleared.
+        health.setRecording(true);
+        obsProcessRunning = false;
+        scheduler.tryConnectAndConfigure(); // missed once
+        obsProcessRunning = true;
+        scheduler.tryConnectAndConfigure(); // seen: the count starts over
+        obsProcessRunning = false;
+        scheduler.tryConnectAndConfigure(); // missed once again
+
+        assertThat(health.isRecording()).isTrue();
     }
 
     @Test
