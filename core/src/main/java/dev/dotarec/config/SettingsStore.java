@@ -8,11 +8,14 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -170,12 +173,41 @@ public class SettingsStore {
          * Keys in settings.json this build doesn't declare (a newer build's, or the Go remake's), kept
          * as read and written back with the rest. Without them every save would strip them: the boot
          * re-saves settings too (the OBS config writer pins the websocket password), so one launch of
-         * this build was enough to lose them.
+         * this build was enough to lose them. A key that only differs from a declared one in letter
+         * case is the exception (see {@link #keepUnknownKey}).
          */
         private final Map<String, JsonNode> unknownKeys = new LinkedHashMap<>();
 
+        /** The keys of the fields above: Jackson maps each public field to the key of its name. */
+        private static final List<String> DECLARED_KEYS =
+                Arrays.stream(Settings.class.getFields())
+                        .filter(field -> !Modifier.isStatic(field.getModifiers()))
+                        .map(Field::getName)
+                        .toList();
+
+        /**
+         * Keeps a key none of the fields above takes, unless it only differs from one of theirs in
+         * letter case, as a hand edit can leave "retentionCapGB" beside "retentionCapGb". This build
+         * never reads such a key, but the Go remake's reader matches keys ignoring case and lets the
+         * last one win. Written back after the fields, the stray key would replace the value this
+         * build used once the Go remake takes the file over, and one holding the wrong JSON type would
+         * make that reader refuse the file and start from its defaults. So it is dropped, and logged.
+         * {@code equalsIgnoreCase} also folds the long s and the Kelvin sign onto s and k, as Go does.
+         */
         @JsonAnySetter
         void keepUnknownKey(String key, JsonNode value) {
+            for (String declared : DECLARED_KEYS) {
+                if (declared.equalsIgnoreCase(key)) {
+                    log.warn(
+                            "Dropping \"{}\" from settings.json: it only differs from \"{}\" in letter"
+                                    + " case, so this build never reads it, and a reader that ignores"
+                                    + " case would take it over \"{}\"",
+                            key,
+                            declared,
+                            declared);
+                    return;
+                }
+            }
             unknownKeys.put(key, value);
         }
 
