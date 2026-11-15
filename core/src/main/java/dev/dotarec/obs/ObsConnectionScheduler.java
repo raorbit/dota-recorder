@@ -38,6 +38,19 @@ public class ObsConnectionScheduler {
     private final BooleanSupplier obsProcessRunning;
 
     /**
+     * How many ticks in a row the recording flag has outlived the connection with no OBS process
+     * found. Only the scheduler thread touches it.
+     */
+    private int obsGoneTicks = 0;
+
+    /**
+     * Ticks OBS must look gone before the flag is cleared. The scan can miss a live OBS (one that runs
+     * elevated can't be read by this process), and a socket blip to a live OBS reconnects within a
+     * tick, so a single miss is never enough.
+     */
+    static final int OBS_GONE_TICKS_TO_CLEAR = 2;
+
+    /**
      * Tracks the connection edge (only the scheduler thread touches it). Scene setup runs on each
      * disconnected->connected transition, not every tick: a freshly (re)launched OBS is configured
      * without an app restart, while a steady connection isn't reconfigured every 5s.
@@ -120,12 +133,18 @@ public class ObsConnectionScheduler {
      * comes back to reconnect to (its relaunch budget spent) the stale flag kept OBS wanted and the
      * app busy for good: Electron never saw the need end, so it never refilled that budget, and OBS
      * stayed down until the app restarted. The flag only matters while disconnected, so only then
-     * is the process table scanned.
+     * is the process table scanned, and OBS must look gone on {@link #OBS_GONE_TICKS_TO_CLEAR} ticks
+     * in a row.
      */
     private void clearRecordingIfObsExited() {
         if (health.isConnected() || !health.isRecording() || obsProcessRunning.getAsBoolean()) {
+            obsGoneTicks = 0;
             return;
         }
+        if (++obsGoneTicks < OBS_GONE_TICKS_TO_CLEAR) {
+            return;
+        }
+        obsGoneTicks = 0;
         health.setRecording(false);
         log.warn("OBS exited while recording; it is recording nothing now, so the recording flag"
                 + " is cleared");
