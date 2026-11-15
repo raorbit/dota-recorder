@@ -99,6 +99,7 @@ const timedOut = (): Promise<unknown> =>
   Promise.reject(new DOMException('The operation timed out.', 'TimeoutError'));
 
 const matchIds = (): number[] => useLibraryStore.getState().matches.map((m) => m.id);
+const clipIds = (): number[] => useLibraryStore.getState().clips.map((c) => c.id);
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -232,6 +233,24 @@ describe('startLibrary storage-events wiring', () => {
 
     expect(deletes).toHaveLength(1);
     expect(matchIds()).toEqual([8, 9]);
+    teardown();
+  });
+
+  it('goes on past a refused clip delete in a bulk delete, then applies its reconcile reload', async () => {
+    // Clip 7's delete is refused though the core dropped the clip anyway; 8 is still sent and goes.
+    // Only the reconcile reload, started after the bulk delete's own invalidation, shows 7 went too.
+    const clips = [7, 8, 9].map((id) => ({ id, parentMatchId: 1 }));
+    serveLibrary({ matches: [{ id: 1 }], clips }, (url) =>
+      url.endsWith('/clips/7') ? refused() : deleted(),
+    );
+    const teardown = startLibrary();
+    await flush();
+    expect(clipIds()).toEqual([7, 8, 9]);
+
+    await useLibraryStore.getState().deleteClips([7, 8]);
+    await flush();
+
+    expect(clipIds()).toEqual([9]);
     teardown();
   });
 
