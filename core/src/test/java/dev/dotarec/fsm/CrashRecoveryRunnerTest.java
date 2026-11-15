@@ -1048,6 +1048,45 @@ class CrashRecoveryRunnerTest {
     }
 
     @Test
+    void aFolderFirstFlooredOnAClockFarBehindStillTurnsAwayWhatItHeld() throws Exception {
+        // This boot's clock is a year behind the recordings the user's own OBS already saved in the
+        // newly chosen folder (a reset CMOS clock before time sync, say). The floor goes just after
+        // the newest of them rather than at this boot's wrong "now", so none passes once the clock is
+        // right. Only names the scan could adopt count.
+        Path videos = chooseVideoDir("Videos");
+        long yearAhead = System.currentTimeMillis() + 365L * 24 * 60 * 60_000L;
+        Path personal = writeModifiedAt(videos.resolve("2027-11-14 20-00-00.mp4"), yearAhead);
+        Path older = writeModifiedAt(videos.resolve("2024-05-01 18-30-12.mkv"), LONG_AGO_MS);
+        writeModifiedAt(videos.resolve("family.mp4"), yearAhead + 60_000L);
+
+        runner.run(null);
+
+        assertThat(storedFloor(videos)).isEqualTo(yearAhead + 1);
+        assertThat(matches.findAll()).isEmpty();
+        assertThat(personal).exists();
+        assertThat(older).exists();
+    }
+
+    @Test
+    void anArchiveThatCantBeReadGetsItsFloorOnTheFirstBootThatCan() throws Exception {
+        // Configured but unplugged on its first boot: what it holds can't be checked, so it gets no
+        // floor yet, and the boot it's back floors it after what it holds.
+        Path archive = chooseArchive("usb");
+        Files.delete(archive);
+        runner.run(null);
+        assertThat(storedFloor(archive)).isNull();
+
+        Files.createDirectories(archive);
+        long ahead = System.currentTimeMillis() + 60L * 60_000L;
+        Path held = writeModifiedAt(archive.resolve("12-2026-11-14 20-00-00.mp4"), ahead);
+        newRunner().run(null);
+
+        assertThat(storedFloor(archive)).isEqualTo(ahead + 1);
+        assertThat(matches.findAll()).isEmpty();
+        assertThat(held).exists();
+    }
+
+    @Test
     void theFloorsFileIsTheFormatBothAppsKeep() throws Exception {
         // The file the Go remake writes, laid out the way its json.MarshalIndent lays it out, and this
         // app's additions read back as plain JSON.
