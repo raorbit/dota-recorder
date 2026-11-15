@@ -40,11 +40,22 @@ import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 
 /**
- * Startup reconciliation for sessions left in {@code recording_session} after a core/app crash.
+ * Startup reconciliation after a core/app crash, run once per boot while it holds the storage
+ * maintenance lock:
  *
- * <p>This runner intentionally reconstructs only from durable journal rows/events. Full orphan VOD
- * directory scanning is a later hardening slice; here the invariant is that a journaled recording is
- * never silently forgotten.
+ * <ol>
+ *   <li>plans every recording and archive root's {@link OrphanAdoptionFloors adoption floor} for
+ *       this boot;</li>
+ *   <li>replays the sessions left in {@code recording_session} into match rows, linking a session's
+ *       file by its modification time when OBS never reported the path. A journaled recording is
+ *       never silently forgotten: one whose file could only be found in a video folder this boot
+ *       can't read stays in the journal for a boot that can;</li>
+ *   <li>saves the floors, holding a new video folder's first floor back while a recording its link
+ *       reached back for is still unrecovered;</li>
+ *   <li>scans the roots for files no row references: an archive drive's leftover from an interrupted
+ *       move is re-linked to its row or deleted, and a recorder-named file written since its folder's
+ *       floor is adopted as a {@code gsi_only} row.</li>
+ * </ol>
  */
 @Component
 @Order(1)
@@ -157,33 +168,92 @@ public class CrashRecoveryRunner implements ApplicationRunner {
         maintenanceLock.lock();
         try {
             List<RecordingSessionRow> unfinished = journal.findUnfinished();
-            // Before anything is linked or adopted, so a root new to this scan (the first boot after
-            // the upgrade, or a newly chosen folder) adopts nothing it already held. These are all the
-            // roots, so a folder that has stopped being one loses its floor here.
+            // Planned before anything is linked or adopted, so a root new to this scan (the first boot
+            // after the upgrade, or a newly chosen folder) adopts nothing it already held. These are
+            // all the roots, so a folder that has stopped being one loses its floor here. Saved only
+            // once the journal is replayed: the link needs no saved floor, and a pathless recording
+            // left unrecovered keeps a new video folder's first floor back so the next boot can still
+            // reach back for its file (see OrphanAdoptionFloors).
             long startMs = System.currentTimeMillis();
-            OrphanAdoptionFloors.Snapshot floors =
-                    adoptionFloors.prepare(
-                            videoDir(), archiveDirs(), startMs, videoLinkFromMs(unfinished, startMs),
+            Path videoDir = videoDir();
+            OrphanAdoptionFloors.Plan plan =
+                    adoptionFloors.plan(
+                            videoDir, archiveDirs(), startMs, videoLinkFromMs(unfinished, startMs),
                             this::newestRecorderFileMs);
-            if (unfinished.isEmpty()) {
-                reconcileOrphanVods(floors);
-                return;
+            if (!unfinished.isEmpty()) {
+                recoverAll(unfinished, plan, videoDir);
             }
-            log.warn("Recovering {} unfinished recording session(s)", unfinished.size());
-            for (RecordingSessionRow session : unfinished) {
-                try {
-                    recover(session, floors);
-                } catch (RuntimeException e) {
-                    log.error("Failed to recover recording session {}: {}", session.sessionId(), e.toString(), e);
-                }
-            }
+            OrphanAdoptionFloors.Snapshot floors =
+                    plan.save(plan.linksBack() && anyStillJournaled(reachedBackFor(unfinished)));
             reconcileOrphanVods(floors);
         } finally {
             maintenanceLock.unlock();
         }
     }
 
-    private void recover(RecordingSessionRow session, OrphanAdoptionFloors.Snapshot floors) {
+    private void recoverAll(
+            List<RecordingSessionRow> unfinished, OrphanAdoptionFloors.Plan plan, Path videoDir) {
+        log.warn("Recovering {} unfinished recording session(s)", unfinished.size());
+        // A recording with no journaled path has its file found by listing the video folder. While the
+        // folder can't be read (a drive not mounted yet), recovering it would commit it without its
+        // file and delete the journal a later boot could link that file from. With no folder set,
+        // there is none to wait for.
+        boolean waitForVideoDir = videoDir != null && !listable(videoDir);
+        for (RecordingSessionRow session : unfinished) {
+            if (waitForVideoDir && hasNoPath(session)) {
+                log.warn("Leaving recording session {} in the journal for a boot that can read {}",
+                        session.sessionId(), videoDir);
+                continue;
+            }
+            try {
+                recover(session, plan);
+            } catch (RuntimeException e) {
+                log.error("Failed to recover recording session {}: {}", session.sessionId(), e.toString(), e);
+            }
+        }
+    }
+
+    /** The pathless sessions with a start, which the video folder's link can reach back for. */
+    private static Set<String> reachedBackFor(List<RecordingSessionRow> unfinished) {
+        Set<String> ids = new HashSet<>();
+        for (RecordingSessionRow session : unfinished) {
+            if (hasNoPath(session) && session.recordStartedWallMs() > 0) {
+                ids.add(session.sessionId());
+            }
+        }
+        return ids;
+    }
+
+    /**
+     * Whether any of {@code sessionIds} is still in the journal, its recovery rolled back. Unsure
+     * counts as yes: it only holds a floor back for a boot that can still reach back.
+     */
+    private boolean anyStillJournaled(Set<String> sessionIds) {
+        if (sessionIds.isEmpty()) {
+            return false;
+        }
+        try {
+            return journal.findUnfinished().stream().anyMatch(s -> sessionIds.contains(s.sessionId()));
+        } catch (RuntimeException e) {
+            log.warn("Could not check the recording journal after recovery: {}", e.toString());
+            return true;
+        }
+    }
+
+    private static boolean hasNoPath(RecordingSessionRow session) {
+        return session.videoPath() == null || session.videoPath().isBlank();
+    }
+
+    /** Whether {@code dir} is a folder this boot can list. */
+    private static boolean listable(Path dir) {
+        try (Stream<Path> entries = Files.list(dir)) {
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private void recover(RecordingSessionRow session, OrphanAdoptionFloors.Plan floors) {
         List<RecordingEventRow> events = journal.findEvents(session.sessionId());
         long recoveredAt = System.currentTimeMillis();
         // Elapsed from the record-confirmed wall anchor to the last journal update (never negative).
@@ -195,7 +265,7 @@ public class CrashRecoveryRunner implements ApplicationRunner {
         // early. The stored duration_s stays the floored int above.
         double durationClampS = elapsedMs / 1000.0;
         String videoPath = session.videoPath();
-        if (videoPath == null || videoPath.isBlank()) {
+        if (hasNoPath(session)) {
             // OBS reveals the recording path only on StopRecord, so a crash mid-recording leaves the
             // journal with no path. Claim the leftover .mp4 for this recovered match rather than
             // letting the orphan scan import it as a detached, video-only row.
@@ -375,8 +445,7 @@ public class CrashRecoveryRunner implements ApplicationRunner {
     static long videoLinkFromMs(List<RecordingSessionRow> unfinished, long startMs) {
         long first = startMs;
         for (RecordingSessionRow session : unfinished) {
-            boolean pathless = session.videoPath() == null || session.videoPath().isBlank();
-            if (pathless && session.recordStartedWallMs() > 0) {
+            if (hasNoPath(session) && session.recordStartedWallMs() > 0) {
                 first = Math.min(first, session.recordStartedWallMs() - LINK_WINDOW_GRACE_MS);
             }
         }
@@ -829,10 +898,10 @@ public class CrashRecoveryRunner implements ApplicationRunner {
      *
      * <p>A link makes the file a match's video as surely as an import does, so it takes the same
      * basename gate and adoption floor: a window of minutes can still hold the user's own recording.
-     * The floor is the link's own, which reaches back for a folder floored this boot (see {@link
-     * OrphanAdoptionFloors.Snapshot#linkFloorOf}).
+     * The floor is the link's own, planned for this boot whether or not it can be saved, which reaches
+     * back for a folder floored this boot (see {@link OrphanAdoptionFloors.Plan#linkFloorOf}).
      */
-    private String linkOrphanVideo(RecordingSessionRow session, OrphanAdoptionFloors.Snapshot floors) {
+    private String linkOrphanVideo(RecordingSessionRow session, OrphanAdoptionFloors.Plan floors) {
         Path videoDir = videoDir();
         if (videoDir == null || !Files.isDirectory(videoDir)) {
             return null;
