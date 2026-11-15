@@ -24,7 +24,6 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -68,9 +67,6 @@ public class RecordingArchiver {
 
     /** Suffix of a cross-store copy in progress; it gets its final name only once complete. */
     static final String PARTIAL_SUFFIX = ".partial";
-
-    /** A copy this archiver left in progress: {@code [clip-]<id>-<name>.partial}. */
-    private static final Pattern ARCHIVER_PARTIAL = Pattern.compile("(?:clip-)?\\d+-.+\\.partial");
 
     /**
      * Probes a directory's real usable free space. Pulled behind an interface so tests can inject a
@@ -167,17 +163,19 @@ public class RecordingArchiver {
             }
             Location active = locations.get(0);
             List<Location> archives = locations.subList(1, locations.size());
-            sweepPartials(archives);
+            List<MatchSummary> matchRows = matches.findAll();
+            List<ClipRow> clipRows = clips.findAll();
+            sweepPartials(archives, matchRows, clipRows);
 
             // Account current per-location usage from the DB. Match VODs AND clips are first-class
             // movable stored files — gather both into one uniform list.
             List<Movable> all = new ArrayList<>();
-            for (MatchSummary m : matches.findAll()) {
+            for (MatchSummary m : matchRows) {
                 if (m.videoPath() != null && !m.videoPath().isBlank()) {
                     all.add(Movable.ofMatch(m, sizeOf(m.videoPath(), m.fileSizeBytes())));
                 }
             }
-            for (ClipRow c : clips.findAll()) {
+            for (ClipRow c : clipRows) {
                 if (c.videoPath() != null && !c.videoPath().isBlank()) {
                     all.add(Movable.ofClip(c, sizeOf(c.videoPath(), c.fileSizeBytes())));
                 }
@@ -450,32 +448,42 @@ public class RecordingArchiver {
     }
 
     /**
-     * Removes copies a process ended mid-copy left behind ({@code [clip-]<id>-<name>.partial}, in an
-     * archive dir or its {@code thumbs}), once per dir per run; a drive that is unplugged now is tried
-     * on a later pass. Only this archiver writes them, always under the maintenance lock this pass
-     * holds, so none is in flight. Each one's source is still in place and still the row's file (the
-     * rename to the final name comes before the repoint and the source delete), so only a redundant
-     * copy goes.
+     * Removes copies a process ended mid-copy left behind, once per archive dir per run; a drive that
+     * is unplugged now is tried on a later pass. An archive dir is a folder the user picked, a whole
+     * drive even, and other tools give their in-flight files the same {@code .partial} suffix, so a
+     * file goes only when it is exactly the copy this archiver writes for one of the rows: {@code
+     * <id>-<name>.partial} (or {@code clip-<id>-<name>.partial}) where that row's video is still
+     * {@code <name>} and still on disk, or the same in {@code thumbs} for its thumbnail, and no row
+     * points at the file itself. Anything else is left alone. Only this archiver writes these, always
+     * under the maintenance lock this pass holds, so none is in flight, and the file each one copies
+     * is still in place and still the row's, so only a redundant copy goes.
      */
-    private void sweepPartials(List<Location> archives) {
+    private void sweepPartials(
+            List<Location> archives, List<MatchSummary> matchRows, List<ClipRow> clipRows) {
+        List<Path> pending = new ArrayList<>();
         for (Location loc : archives) {
             Path dir = loc.dir();
-            if (partialsSwept.contains(dir) || !Files.isDirectory(dir)) {
-                continue;
+            if (!partialsSwept.contains(dir) && Files.isDirectory(dir)) {
+                pending.add(dir);
             }
+        }
+        if (pending.isEmpty()) {
+            return;
+        }
+        PartialCopies copies = new PartialCopies(matchRows, clipRows);
+        for (Path dir : pending) {
             partialsSwept.add(dir);
-            deletePartials(dir);
-            deletePartials(dir.resolve("thumbs"));
+            deletePartials(dir, copies, false);
+            deletePartials(dir.resolve("thumbs"), copies, true);
         }
     }
 
-    private void deletePartials(Path dir) {
+    private void deletePartials(Path dir, PartialCopies copies, boolean thumbs) {
         if (!Files.isDirectory(dir)) {
             return;
         }
         try (Stream<Path> files = Files.list(dir)) {
-            files.filter(p -> ARCHIVER_PARTIAL.matcher(p.getFileName().toString()).matches())
-                    .filter(Files::isRegularFile)
+            files.filter(p -> copies.isLeftover(p, thumbs))
                     .forEach(p -> {
                         try {
                             Files.delete(p);
@@ -572,11 +580,68 @@ public class RecordingArchiver {
 
         /** Collision-proof archive filename prefix; clips get a distinct namespace from match ids. */
         String fileNamePrefix() {
+            return fileNamePrefix(isClip, ownerId);
+        }
+
+        static String fileNamePrefix(boolean isClip, long ownerId) {
             return (isClip ? "clip-" : "") + ownerId + "-";
         }
 
         String kindLabel() {
             return isClip ? "clip" : "match";
+        }
+    }
+
+    /**
+     * The copies this archiver can have left in progress for the current rows, by file name: each
+     * row's video as {@code <prefix><name>.partial} in an archive dir, and its thumbnail as the same
+     * in {@code thumbs}, each mapped to the file it copies; plus every path a row points at.
+     */
+    private static final class PartialCopies {
+        private final Map<String, Path> videos = new HashMap<>();
+        private final Map<String, Path> thumbs = new HashMap<>();
+        private final Set<String> referenced = new HashSet<>();
+
+        PartialCopies(List<MatchSummary> matchRows, List<ClipRow> clipRows) {
+            for (MatchSummary m : matchRows) {
+                add(Movable.fileNamePrefix(false, m.id()), m.videoPath(), m.thumbPath());
+            }
+            for (ClipRow c : clipRows) {
+                add(Movable.fileNamePrefix(true, c.id()), c.videoPath(), c.thumbPath());
+            }
+        }
+
+        private void add(String prefix, String videoPath, String thumbPath) {
+            put(videos, prefix, videoPath);
+            put(thumbs, prefix, thumbPath);
+        }
+
+        private void put(Map<String, Path> copies, String prefix, String stored) {
+            if (stored == null || stored.isBlank()) {
+                return;
+            }
+            Path file;
+            try {
+                file = Path.of(stored);
+                referenced.add(StorageRoots.normalize(file));
+            } catch (RuntimeException e) {
+                return; // an unparseable path names no file this archiver could have copied
+            }
+            if (file.getFileName() != null) {
+                copies.put(prefix + file.getFileName() + PARTIAL_SUFFIX, file);
+            }
+        }
+
+        /**
+         * Whether {@code file} is one of these copies: named for a row's video (or, in {@code
+         * thumbs}, its thumbnail) that is still in place, and not a file a row points at itself.
+         */
+        boolean isLeftover(Path file, boolean inThumbs) {
+            Path copied = (inThumbs ? thumbs : videos).get(file.getFileName().toString());
+            return copied != null
+                    && !referenced.contains(StorageRoots.normalize(file))
+                    && Files.isRegularFile(file)
+                    && Files.isRegularFile(copied);
         }
     }
 
