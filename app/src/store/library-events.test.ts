@@ -275,8 +275,8 @@ describe('startLibrary storage-events wiring', () => {
   });
 
   it('reconciles with the core when a recording delete times out', async () => {
-    // The DELETE gives up behind a long archive pass, and the core finishes it once the lock frees.
-    // Only the reconcile reload can show that 7 went.
+    // The core didn't answer in time, but did the delete. Only the reconcile reload can show that 7
+    // went.
     serveLibrary({ matches: [{ id: 7 }, { id: 8 }], clips: [] }, timedOut);
     const teardown = startLibrary();
     await flush();
@@ -286,6 +286,28 @@ describe('startLibrary storage-events wiring', () => {
     await flush();
 
     expect(matchIds()).toEqual([8]);
+    teardown();
+  });
+
+  it('reconciles with the core when a single clip delete fails or times out', async () => {
+    // The core dropped clips 5 and 6 although 5's answer was a refusal and 6's never came (its
+    // clip.deleted frame missed, say, with the socket down). Only the reconcile reload can show that
+    // they went.
+    const clips = [5, 6, 7].map((id) => ({ id, parentMatchId: 1 }));
+    serveLibrary({ matches: [{ id: 1 }], clips }, (url) =>
+      url.endsWith('/clips/5') ? refused() : timedOut(),
+    );
+    const teardown = startLibrary();
+    await flush();
+    expect(clipIds()).toEqual([5, 6, 7]);
+
+    await expect(useLibraryStore.getState().deleteClip(5)).rejects.toThrow();
+    await flush();
+    expect(clipIds()).toEqual([6, 7]);
+
+    await expect(useLibraryStore.getState().deleteClip(6)).rejects.toThrow();
+    await flush();
+    expect(clipIds()).toEqual([7]);
     teardown();
   });
 
