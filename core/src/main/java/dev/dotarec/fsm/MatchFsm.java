@@ -300,8 +300,8 @@ public class MatchFsm {
      * RECORDING against a dead output for the rest of the match, never restarting OBS. An output
      * that stopped while OBS still renders (the user stopped it in the OBS window, the disk filled)
      * is left for POST_GAME as before: a restart can't fix those, and re-arming against them would
-     * only loop junk rows. The exception is an inactive output on a newer connection than the one
-     * the recording started on: the OBS that recorded it crashed and a relaunched one took its
+     * only loop junk rows. The exception is an inactive output on a newer connection than the last
+     * one it was seen active on: the OBS that recorded it crashed and a relaunched one took its
      * place, so the recording is finalized and the next in-match frame records the rest.
      */
     public synchronized void superviseRecording() {
@@ -314,12 +314,21 @@ public class MatchFsm {
         if (ageMs < OUTPUT_FIRST_CHECK_MS) {
             return;
         }
+        // Read before the probe, so a reconnect landing between the two can only make this tick
+        // miss a relaunch (the next one catches it), never adopt the new connection for an output
+        // the old one reported.
+        long epoch = obs.connectionEpoch();
         RecordOutputStatus status = statusProbe.probeRecordStatus();
         if (status == null) {
             return;
         }
-        if (!status.active()) {
-            if (obs.connectionEpoch() != s.getObsConnectionEpoch()) {
+        if (status.active()) {
+            // The output survived onto this connection (a websocket blip, not a crash): it is this
+            // connection's own from here on. Otherwise one blip left every later stop on it (a full
+            // disk, a stop in the OBS window) looking like a relaunch, finalizing and re-arming.
+            s.setObsConnectionEpoch(epoch);
+        } else {
+            if (epoch != s.getObsConnectionEpoch()) {
                 // OBS crashed (or was ended) mid-match and a relaunched one is connected now: the
                 // output died with the old process, which never sent a STOPPED. Left RECORDING, the
                 // rest of the match went unrecorded against the idle new OBS. Keep what the old one
