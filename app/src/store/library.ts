@@ -24,6 +24,7 @@ import {
   type MatchSummary,
   type Clip,
   type ClipDeleteOutcome,
+  type DeleteFailure,
   type BucketCounts,
   type Status,
   type DiskWarning,
@@ -142,6 +143,9 @@ export interface LibraryState {
   // it off the queued set. For a delete the core queued, nothing else says it is done.
   readonly recordingDeleteDone: (id: number, outcome: 'deleted' | 'stubbed' | null) => void;
   readonly clipDeleteDone: (id: number) => void;
+  // The core's word that a delete it queued failed (its delete.failed frame): the banner says so, the
+  // row is no longer marked, and a reload reconciles with what the core holds.
+  readonly queuedDeleteFailed: (failure: DeleteFailure) => void;
   readonly setDeleteError: (message: string | null) => void;
   readonly setDiskWarning: (warning: DiskWarning | null) => void;
   readonly setUpdate: (update: UpdateState | null) => void;
@@ -455,6 +459,17 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
       }));
     },
 
+    queuedDeleteFailed: (failure) => {
+      const recording = failure.kind === 'match';
+      set((s) => ({
+        deleteError: deleteFailureMessage(recording ? 'recording' : 'clip', 1, 1, failure.message),
+        ...(recording
+          ? { queuedMatchIds: withoutIds(s.queuedMatchIds, [failure.id]) }
+          : { queuedClipIds: withoutIds(s.queuedClipIds, [failure.id]) }),
+      }));
+      void get().load({ silent: true });
+    },
+
     load: async (opts) => {
       const token = ++loadToken;
       // A silent reload (see LibraryState.load) skips the 'loading' flip so the table + open player
@@ -485,7 +500,8 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
  * status from a one-shot GET /status, and subscribes to the StatusSocket. The
  * socket drives the live status card and triggers a list refresh when the core
  * pushes a `match.recorded` / `match.enriched` / `retention.swept` frame; a
- * low-disk `error` frame surfaces the banner.
+ * low-disk `error` frame surfaces the banner, and a `delete.failed` frame the
+ * delete-failure one.
  *
  * On reconnect it reconciles (a silent library refetch + status re-prime) so
  * events missed while the socket was down are picked up.
@@ -550,6 +566,12 @@ export function startLibrary(): () => void {
     useLibraryStore.getState().setDiskWarning(warning);
   });
 
+  // A delete the core queued and then could not do: no request is left to say so, so its frame does,
+  // in the same delete-failure banner.
+  const offDeleteFailed = socket.onDeleteFailed((failure) => {
+    useLibraryStore.getState().queuedDeleteFailed(failure);
+  });
+
   // Beyond `status` frames, the socket forwards library-mutating events (match.recorded /
   // match.enriched / match.enrichFailed / match.deleted AND retention.swept) via onEvent. Any of
   // them re-loads the list + counts so an enriched row jumps Unsorted -> its real bucket, a swept or
@@ -598,6 +620,7 @@ export function startLibrary(): () => void {
     offStatus();
     offConn();
     offDisk();
+    offDeleteFailed();
     off();
     offClips();
     offUpdate?.();

@@ -558,6 +558,36 @@ describe('startLibrary storage-events wiring', () => {
     teardown();
   });
 
+  it('says why the core could not do a delete it queued, and unmarks the row', async () => {
+    const core = { matches: [{ id: 7 }], clips: [{ id: 5, parentMatchId: 7 }] };
+    serveLibrary(core, () => QUEUED);
+    const teardown = startLibrary();
+    await flush();
+    await useLibraryStore.getState().deleteMatch(7);
+    await useLibraryStore.getState().deleteClip(5);
+    expect(queuedMatches()).toEqual([7]);
+    expect(queuedClips()).toEqual([5]);
+    const ws = FakeWebSocket.instances[0];
+    const before = matchesCallCount();
+
+    ws.emitMessage({
+      type: 'delete.failed',
+      payload: { kind: 'match', id: 7, message: 'database is locked' },
+    });
+    expect(useLibraryStore.getState().deleteError).toBe(
+      'The recording was not deleted: database is locked',
+    );
+    expect(queuedMatches()).toEqual([]);
+    expect(queuedClips()).toEqual([5]);
+    await flush();
+    expect(matchesCallCount()).toBeGreaterThan(before); // reconciled with what the core holds
+
+    ws.emitMessage({ type: 'delete.failed', payload: { kind: 'clip', id: 5, message: 'gone' } });
+    expect(useLibraryStore.getState().deleteError).toBe('The clip was not deleted: gone');
+    expect(queuedClips()).toEqual([]);
+    teardown();
+  });
+
   it('marks nothing from an older core whose status has no deletes', async () => {
     const teardown = startLibrary();
     await flush();

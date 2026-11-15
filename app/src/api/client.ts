@@ -717,6 +717,17 @@ export interface DiskWarning {
 
 export type DiskWarningListener = (warning: DiskWarning) => void;
 
+// A delete the core queued behind its maintenance lock and then could not do (a `delete.failed`
+// frame): no request is left to carry the reason, so the frame does. `kind` names what it was deleting,
+// as the core does: 'match' (a recording) or 'clip'.
+export interface DeleteFailure {
+  readonly kind: 'match' | 'clip';
+  readonly id: number;
+  readonly message: string;
+}
+
+export type DeleteFailureListener = (failure: DeleteFailure) => void;
+
 // Clip lifecycle frames fanned out to onClipEvent() subscribers. Four kinds:
 //   'clip.created'  — payload is the new Clip (status 'pending')
 //   'clip.progress' — payload is { clipId, parentMatchId, percent }
@@ -882,6 +893,15 @@ function parseDiskWarning(payload: unknown): DiskWarning | null {
   return { freeBytes, thresholdBytes, message };
 }
 
+// Validate a delete.failed frame against the fields the banner reads: what was being deleted (a known
+// kind and a numeric id) and why. A missing message reads as none; anything else malformed is dropped.
+function parseDeleteFailure(payload: unknown): DeleteFailure | null {
+  if (!isRecord(payload)) return null;
+  const { kind, id, message } = payload;
+  if ((kind !== 'match' && kind !== 'clip') || typeof id !== 'number') return null;
+  return { kind, id, message: typeof message === 'string' ? message : '' };
+}
+
 // The routing decision for a parsed /ws frame, split out as a PURE function so the fan-out in
 // StatusSocket.onmessage stays a thin switch and the routing itself is unit-testable without a live
 // socket. Returns null for a malformed envelope or an unknown/unhandled type — the same tolerance the
@@ -892,7 +912,8 @@ export type RoutedFrame =
   | { readonly kind: 'status'; readonly status: Status }
   | { readonly kind: 'libraryEvent'; readonly envelope: WsEnvelope }
   | { readonly kind: 'clip'; readonly event: ClipEvent }
-  | { readonly kind: 'diskWarning'; readonly warning: DiskWarning };
+  | { readonly kind: 'diskWarning'; readonly warning: DiskWarning }
+  | { readonly kind: 'deleteFailed'; readonly failure: DeleteFailure };
 
 export function classifyWsFrame(parsed: unknown): RoutedFrame | null {
   if (!isRecord(parsed) || typeof parsed.type !== 'string') return null;
@@ -924,6 +945,10 @@ export function classifyWsFrame(parsed: unknown): RoutedFrame | null {
     const warning = parseDiskWarning(payload);
     return warning === null ? null : { kind: 'diskWarning', warning };
   }
+  if (type === 'delete.failed') {
+    const failure = parseDeleteFailure(payload);
+    return failure === null ? null : { kind: 'deleteFailed', failure };
+  }
   return null;
 }
 
@@ -941,6 +966,7 @@ export class StatusSocket {
   private readonly stateListeners = new Set<StateListener>();
   private readonly matchEventListeners = new Set<MatchEventListener>();
   private readonly diskWarningListeners = new Set<DiskWarningListener>();
+  private readonly deleteFailureListeners = new Set<DeleteFailureListener>();
   // Clip-event subscribers keyed by the match they care about; a 0 key means "all
   // matches". onClipEvent() adds to a per-match set and returns a detacher.
   private readonly clipEventListeners = new Map<number, Set<ClipEventListener>>();
@@ -978,6 +1004,13 @@ export class StatusSocket {
   onDiskWarning(listener: DiskWarningListener): () => void {
     this.diskWarningListeners.add(listener);
     return () => this.diskWarningListeners.delete(listener);
+  }
+
+  // Subscribe to delete.failed frames: a delete the core queued and then could not do. Mirrors
+  // onDiskWarning(): returns a detacher. The library wiring turns these into the delete-failure banner.
+  onDeleteFailed(listener: DeleteFailureListener): () => void {
+    this.deleteFailureListeners.add(listener);
+    return () => this.deleteFailureListeners.delete(listener);
   }
 
   // Subscribe to clip lifecycle frames (clip.created / clip.progress / clip.ready /
@@ -1044,6 +1077,9 @@ export class StatusSocket {
           break;
         case 'diskWarning':
           for (const listener of this.diskWarningListeners) listener(routed.warning);
+          break;
+        case 'deleteFailed':
+          for (const listener of this.deleteFailureListeners) listener(routed.failure);
           break;
       }
     };
