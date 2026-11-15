@@ -8,6 +8,7 @@ import {
   applyClipDeleted,
   applyClipsDeleted,
   deletingRows,
+  idsListed,
   matchDeleteDone,
   type DeleteSlice,
 } from './library-delete';
@@ -184,6 +185,18 @@ describe('deletingRows', () => {
     const queued = new Set([2]);
     expect(deletingRows(inFlight, new Set())).toBe(inFlight);
     expect(deletingRows(new Set(), queued)).toBe(queued);
+  });
+});
+
+describe('idsListed', () => {
+  it('takes the ids a status lists', () => {
+    expect([...idsListed(new Set([1, 2]), [2, 3])].sort()).toEqual([2, 3]);
+    expect([...idsListed(new Set([1]), [])]).toEqual([]);
+  });
+
+  it('keeps the current set when the status lists the same ids, in any order', () => {
+    const current = new Set([1, 2]);
+    expect(idsListed(current, [2, 1])).toBe(current);
   });
 });
 

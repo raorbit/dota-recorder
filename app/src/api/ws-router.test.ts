@@ -66,6 +66,30 @@ describe('classifyWsFrame', () => {
     expect(classifyWsFrame({ type: 'status', payload: { gsi: {} } })).toBeNull();
   });
 
+  it("reads the deletes a status frame says the core still has, and none from an older core's", () => {
+    const status = {
+      gsi: { connected: true, lastFrameAgoMs: 10 },
+      obs: { connected: true, sceneActive: false, recording: false },
+      fsm: { state: 'IDLE', activeMatchId: null },
+    };
+    const deletesOf = (payload: unknown) => {
+      const routed = classifyWsFrame({ type: 'status', payload });
+      return routed?.kind === 'status' ? routed.status.snapshot.deletes : undefined;
+    };
+
+    expect(deletesOf({ ...status, deletes: { matchIds: [7, 9], clipIds: [5] } })).toEqual({
+      matchIds: [7, 9],
+      clipIds: [5],
+    });
+    expect(deletesOf(status)).toEqual({ matchIds: [], clipIds: [] });
+    // Malformed: a list that isn't one reads as empty, and an entry that isn't an id is left out.
+    expect(deletesOf({ ...status, deletes: { matchIds: 'x', clipIds: [5, '6', null] } })).toEqual({
+      matchIds: [],
+      clipIds: [5],
+    });
+    expect(deletesOf({ ...status, deletes: null })).toEqual({ matchIds: [], clipIds: [] });
+  });
+
   it('routes clip frames and drops a clip payload without a numeric parentMatchId', () => {
     expect(
       classifyWsFrame({ type: 'clip.created', payload: { parentMatchId: 5, id: 1 } })?.kind,

@@ -106,6 +106,18 @@ export function deletingRows(
   return new Set([...inFlight, ...queued]);
 }
 
+// The queued set a status sets: the ids it lists as the core's pending deletes. `current` is handed
+// back as it is when it holds the same ids, so a status every few seconds that changes nothing
+// re-renders nothing.
+export function idsListed(
+  current: ReadonlySet<number>,
+  listed: readonly number[],
+): ReadonlySet<number> {
+  const next = new Set(listed);
+  if (next.size === current.size && [...next].every((id) => current.has(id))) return current;
+  return next;
+}
+
 // Clip delete: drop the clip row; clear a clip auto-play selection that pointed at it (the parent
 // match selection survives — only the clip is gone).
 export function applyClipDeleted(s: DeleteSlice, clipId: number): DeleteSlice {

@@ -39,6 +39,7 @@ import {
   applyRecordingsOutcome,
   applyClipDeleted,
   applyClipsDeleted,
+  idsListed,
   matchDeleteDone,
 } from '../lib/library-delete';
 export type { Bucket } from './buckets';
@@ -73,10 +74,13 @@ export interface LibraryState {
   // timed out.
   readonly deletingMatchIds: ReadonlySet<number>;
   readonly deletingClipIds: ReadonlySet<number>;
-  // Recordings and clips whose delete the core has queued: it waits for the core's maintenance lock (an
-  // archive pass holds it) and is done once that frees, however long that takes and whether or not this
-  // window is still open. Shown as being deleted, like the in-flight ones, until the core's
-  // match.deleted / clip.deleted frame says the delete is done (and drops or stubs the row).
+  // Recordings and clips whose delete the core has and hasn't finished: queued behind its maintenance
+  // lock (an archive pass holds it) and done once that frees, however long that takes and whether or
+  // not this window is still open, or still running. The core lists them in its status (so a window
+  // opened later shows them too), and a request answered 'queued' adds its row until the next status
+  // does. Shown as being deleted, like the in-flight ones, until the core's match.deleted /
+  // clip.deleted frame says the delete is done (and drops or stubs the row), or a status no longer
+  // lists it. A dropped socket leaves them as they are.
   readonly queuedMatchIds: ReadonlySet<number>;
   readonly queuedClipIds: ReadonlySet<number>;
   // Why the last recording or clip delete failed, or null. Backs the delete-failure banner; cleared
@@ -171,11 +175,26 @@ function withoutIds(from: ReadonlySet<number>, ids: Iterable<number>): ReadonlyS
 // a delete that means the core didn't answer at all within the client's timeout, though it answers one
 // within about half a minute even while its maintenance lock is held: it hung, or was too slow. That
 // isn't a refusal, and the core may still finish the delete, its frame then dropping the row. So a
-// timeout is reconciled like a failure, but not reported as one.
+// timeout is reconciled like a failure, but not reported as one, and the row stays marked as being
+// deleted for as long as the core's status lists the delete.
 function isRequestTimeout(err: unknown): boolean {
   return (
     typeof err === 'object' && err !== null && (err as { name?: unknown }).name === 'TimeoutError'
   );
+}
+
+// The queued sets a status gives: the core's own list of the deletes it has and hasn't finished (none
+// from an older core). A set stays as it is when the list matches it, so the status every five seconds
+// re-renders nothing.
+function queuedFromStatus(
+  s: Pick<LibraryState, 'queuedMatchIds' | 'queuedClipIds'>,
+  status: Status,
+): Pick<LibraryState, 'queuedMatchIds' | 'queuedClipIds'> {
+  const deletes = status.snapshot.deletes;
+  return {
+    queuedMatchIds: idsListed(s.queuedMatchIds, deletes?.matchIds ?? []),
+    queuedClipIds: idsListed(s.queuedClipIds, deletes?.clipIds ?? []),
+  };
 }
 
 // The delete-failure banner's message for a delete of `total` recordings or clips that failed with
@@ -248,7 +267,8 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
           )
         : {}),
       deletingMatchIds: withoutIds(s.deletingMatchIds, ids),
-      // Done or refused, the core no longer has the delete; queued, it does until its frame.
+      // Done or refused, the core no longer has the delete; queued, it does until its frame. One that
+      // timed out is left to the core's status, which lists it for as long as the core still has it.
       queuedMatchIds: withIds(withoutIds(s.queuedMatchIds, [...done, ...refused]), queued),
       ...failureReport('recording', errors, ids.length),
     }));
@@ -344,7 +364,10 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
         selectedClipId: clip.id,
         clipPlayToken: s.clipPlayToken + 1,
       })),
-    setStatus: (status) => set({ status }),
+    // A status (a frame, or GET /status) also says which deletes the core still has; a dropped socket
+    // (null) leaves the queued sets as they are, since the core most likely still has those.
+    setStatus: (status) =>
+      set((s) => (status === null ? { status } : { status, ...queuedFromStatus(s, status) })),
     setDeleteError: (deleteError) => set({ deleteError }),
     setDiskWarning: (diskWarning) => set({ diskWarning }),
     setUpdate: (update) => set({ update }),
