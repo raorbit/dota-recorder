@@ -436,7 +436,9 @@ public class CrashRecoveryRunner implements ApplicationRunner {
      *       a clip's ({@link #APP_ONLY_BASENAME}): residue only this app makes;</li>
      *   <li>a row whose file is another row's archived copy's source (that copy's name less its
      *       {@code <matchId>-}, and the same size), adopted when the archiver failed to delete it:
-     *       retention reclaims it, as before the floors;</li>
+     *       retention reclaims it, as before the floors. Only a copy whose own row this release
+     *       doesn't look at counts: the archiver's copy of a user's file adopted before the floors
+     *       and the source it couldn't delete, adopted again, would otherwise keep each other;</li>
      *   <li>a row whose file its folder's floor admits (modified since): released, it would only be
      *       adopted again;</li>
      *   <li>a row with a clip still to be cut from its video.</li>
@@ -459,13 +461,18 @@ public class CrashRecoveryRunner implements ApplicationRunner {
             return;
         }
         try {
-            Map<String, List<Path>> copies = archivedCopies().videos();
+            List<MatchSummary> adopted = matches.findAdoptedBefore(cutoffMs);
+            Set<Long> adoptedIds = new HashSet<>();
+            for (MatchSummary row : adopted) {
+                adoptedIds.add(row.id());
+            }
+            Map<String, List<ArchivedCopy>> copies = archivedCopies().videos();
             List<MatchSummary> candidates = new ArrayList<>();
             int kept = 0;
-            for (MatchSummary row : matches.findAdoptedBefore(cutoffMs)) {
+            for (MatchSummary row : adopted) {
                 Path file = safePath(row.videoPath());
                 if (file == null || file.getFileName() == null
-                        || keepsAdoptedRow(row, file, copies, floors)) {
+                        || keepsAdoptedRow(row, file, copies, adoptedIds, floors)) {
                     kept++;
                 } else {
                     candidates.add(row);
@@ -518,11 +525,15 @@ public class CrashRecoveryRunner implements ApplicationRunner {
         }
     }
 
-    /** Whether a row adopted before the floors keeps its video (see the release's rules). */
+    /**
+     * Whether a row adopted before the floors keeps its video (see the release's rules). A copy owned
+     * by one of {@code adopted}, the rows the release looks at, is no evidence.
+     */
     private static boolean keepsAdoptedRow(
             MatchSummary row,
             Path file,
-            Map<String, List<Path>> copies,
+            Map<String, List<ArchivedCopy>> copies,
+            Set<Long> adopted,
             OrphanAdoptionFloors.Snapshot floors) {
         String name = file.getFileName().toString();
         String own = leftoverRemainder(name, row.id() + "-");
@@ -530,8 +541,10 @@ public class CrashRecoveryRunner implements ApplicationRunner {
             return true;
         }
         for (String original : own == null ? List.of(name) : List.of(name, own)) {
-            for (Path copy : copies.getOrDefault(original, List.of())) {
-                if (!normalize(copy).equals(normalize(file)) && sameSize(file, copy)) {
+            for (ArchivedCopy copy : copies.getOrDefault(original, List.of())) {
+                if (!adopted.contains(copy.rowId())
+                        && !normalize(copy.path()).equals(normalize(file))
+                        && sameSize(file, copy.path())) {
                     return true;
                 }
             }
@@ -820,16 +833,21 @@ public class CrashRecoveryRunner implements ApplicationRunner {
         return fileName.substring(prefix.length());
     }
 
+    /** A match row's archived video or thumbnail, and that row. */
+    private record ArchivedCopy(long rowId, Path path) {}
+
     /**
      * Each match row's archived video and thumbnail by the name its source had (the archived name less
      * the row's {@code <matchId>-}), and the thumbnails a row or journaled session points at.
      */
     private record ArchivedCopies(
-            Map<String, List<Path>> videos, Map<String, List<Path>> thumbs, Set<String> referencedThumbs) {}
+            Map<String, List<ArchivedCopy>> videos,
+            Map<String, List<ArchivedCopy>> thumbs,
+            Set<String> referencedThumbs) {}
 
     private ArchivedCopies archivedCopies() {
-        Map<String, List<Path>> videos = new HashMap<>();
-        Map<String, List<Path>> thumbs = new HashMap<>();
+        Map<String, List<ArchivedCopy>> videos = new HashMap<>();
+        Map<String, List<ArchivedCopy>> thumbs = new HashMap<>();
         Set<String> referencedThumbs = new HashSet<>();
         for (MatchSummary row : matches.findAll()) {
             indexArchivedCopy(videos, row.id(), row.videoPath());
@@ -845,14 +863,15 @@ public class CrashRecoveryRunner implements ApplicationRunner {
         return new ArchivedCopies(videos, thumbs, referencedThumbs);
     }
 
-    private static void indexArchivedCopy(Map<String, List<Path>> index, long matchId, String stored) {
+    private static void indexArchivedCopy(
+            Map<String, List<ArchivedCopy>> index, long matchId, String stored) {
         Path copy = safePath(stored);
         if (copy == null || copy.getFileName() == null) {
             return;
         }
         String original = leftoverRemainder(copy.getFileName().toString(), matchId + "-");
         if (original != null) {
-            index.computeIfAbsent(original, name -> new ArrayList<>()).add(copy);
+            index.computeIfAbsent(original, name -> new ArrayList<>()).add(new ArchivedCopy(matchId, copy));
         }
     }
 
@@ -874,19 +893,19 @@ public class CrashRecoveryRunner implements ApplicationRunner {
      * counts it against a drive's cap. A delete that fails is tried again next boot; the file is never
      * imported.
      */
-    private boolean deleteIfArchivedSource(Path file, Map<String, List<Path>> copiesByName) {
-        List<Path> copies = copiesByName.get(file.getFileName().toString());
+    private boolean deleteIfArchivedSource(Path file, Map<String, List<ArchivedCopy>> copiesByName) {
+        List<ArchivedCopy> copies = copiesByName.get(file.getFileName().toString());
         if (copies == null) {
             return false;
         }
-        for (Path copy : copies) {
-            if (isSourceOf(file, copy)) {
+        for (ArchivedCopy copy : copies) {
+            if (isSourceOf(file, copy.path())) {
                 try {
                     Files.deleteIfExists(file);
-                    log.warn("Removed {}, left behind when it was archived to {}", file, copy);
+                    log.warn("Removed {}, left behind when it was archived to {}", file, copy.path());
                 } catch (Exception e) {
                     log.warn("Could not remove {}, left behind when it was archived to {}: {}",
-                            file, copy, e.toString());
+                            file, copy.path(), e.toString());
                 }
                 return true;
             }

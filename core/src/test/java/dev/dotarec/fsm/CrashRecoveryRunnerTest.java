@@ -1589,6 +1589,52 @@ class CrashRecoveryRunnerTest {
     }
 
     @Test
+    void twoRowsAdoptedFromOneUserFileDontKeepEachOther() throws Exception {
+        // 0.1.20 adopted the user's own recording, archived it, and couldn't delete the source (a
+        // player held it open); the next boot adopted that source again, and a later pass archived it
+        // too. Each row's file is the other's copy, but neither row is this app's: both leave the
+        // library, and both files stay where they are.
+        Files.delete(floorsFile());
+        Path archive = chooseArchive("hdd");
+        long monthAgo = System.currentTimeMillis() - 30L * 24 * 60 * 60_000L;
+        Path source = writeModifiedAt(videoDir.resolve("2024-05-01 18-30-12.mkv"), LONG_AGO_MS);
+        long first = adoptedBeforeTheFloors(source, monthAgo);
+        Path firstCopy = writeModifiedAt(archive.resolve(first + "-2024-05-01 18-30-12.mkv"), LONG_AGO_MS);
+        matches.updateVideoPath(first, firstCopy.toString(), null);
+        long second = adoptedBeforeTheFloors(source, monthAgo + 60_000L);
+        Path secondCopy = writeModifiedAt(archive.resolve(second + "-2024-05-01 18-30-12.mkv"), LONG_AGO_MS);
+        Files.delete(source);
+        matches.updateVideoPath(second, secondCopy.toString(), null);
+
+        runner.run(null);
+
+        assertThat(matches.findAll()).isEmpty();
+        assertThat(firstCopy).exists();
+        assertThat(secondCopy).exists();
+    }
+
+    @Test
+    void aLeftBehindSourceIsNotKeptByTheCopyOfARowTheReleaseTakesOut() throws Exception {
+        // As above, but the second adoption is still the source in the video folder. Its copy's row
+        // leaves the library, so the copy is no evidence for it: it leaves too, and neither file is
+        // deleted.
+        Files.delete(floorsFile());
+        Path archive = chooseArchive("hdd");
+        long monthAgo = System.currentTimeMillis() - 30L * 24 * 60 * 60_000L;
+        Path source = writeModifiedAt(videoDir.resolve("2024-05-01 18-30-12.mkv"), LONG_AGO_MS);
+        long first = adoptedBeforeTheFloors(source, monthAgo);
+        Path copy = writeModifiedAt(archive.resolve(first + "-2024-05-01 18-30-12.mkv"), LONG_AGO_MS);
+        matches.updateVideoPath(first, copy.toString(), null);
+        adoptedBeforeTheFloors(source, monthAgo + 60_000L);
+
+        runner.run(null);
+
+        assertThat(matches.findAll()).isEmpty();
+        assertThat(source).exists();
+        assertThat(copy).exists();
+    }
+
+    @Test
     void theCutoffIsTheEarliestFloorTheFileHeldWhenTheBootBegan() throws Exception {
         // The floors file predates the release (an earlier build kept floors but never released, or
         // its marker couldn't be saved): only a row adopted before its earliest floor predates the
