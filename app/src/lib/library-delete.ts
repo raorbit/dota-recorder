@@ -1,6 +1,6 @@
 // Pure state transforms for the library's delete actions (store/library.ts). Kept React-free here so
-// the exact bookkeeping — which rows drop, which merely lose their video, and when the player's
-// selection must clear — is unit-testable (see library-delete.test.ts).
+// the exact bookkeeping — which rows drop, which merely lose their video, when the player's selection
+// must clear, and which rows show as being deleted — is unit-testable (see library-delete.test.ts).
 import type { MatchSummary, Clip } from '../api/client';
 
 // The slice of the library store a delete touches.
@@ -95,8 +95,8 @@ export function matchDeleteDone(evt: {
 }
 
 // The rows to show as being deleted: those this window has a delete request in flight for, and those
-// the core still has a delete of, queued behind its maintenance lock. One set for a table or the
-// player's strip; either input is handed back as it is when the other is empty.
+// the core still has a delete of (queued behind its maintenance lock, or running). One set for a table
+// or the player's strip; either input is handed back as it is when the other is empty.
 export function deletingRows(
   inFlight: ReadonlySet<number>,
   queued: ReadonlySet<number>,

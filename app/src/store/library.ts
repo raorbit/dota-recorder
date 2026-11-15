@@ -75,13 +75,13 @@ export interface LibraryState {
   // timed out.
   readonly deletingMatchIds: ReadonlySet<number>;
   readonly deletingClipIds: ReadonlySet<number>;
-  // Recordings and clips whose delete the core has and hasn't finished: queued behind its maintenance
-  // lock (an archive pass holds it) and done once that frees, however long that takes and whether or
-  // not this window is still open, or still running. The core lists them in its status (so a window
-  // opened later shows them too), and a request answered 'queued' adds its row until the next status
-  // does. Shown as being deleted, like the in-flight ones, until the core's match.deleted /
-  // clip.deleted frame says the delete is done (and drops or stubs the row), or a status no longer
-  // lists it. A dropped socket leaves them as they are.
+  // Recordings and clips the core is still deleting: a delete it queued behind its maintenance lock (an
+  // archive pass holds it), done once that frees however long that takes and whether or not this
+  // window is still open, or one still running. The core lists them in its status, so a window opened
+  // later shows them too, and a request answered 'queued' adds its row until the next status does.
+  // Shown as being deleted, like the in-flight ones, until the core's match.deleted / clip.deleted
+  // frame says the delete is done (dropping or stubbing the row), or a status no longer lists it. A
+  // dropped socket leaves them as they are.
   readonly queuedMatchIds: ReadonlySet<number>;
   readonly queuedClipIds: ReadonlySet<number>;
   // Why the last recording or clip delete failed, or null. Backs the delete-failure banner; cleared
@@ -161,8 +161,8 @@ export interface LibraryState {
 // store state) so it never triggers a re-render.
 let loadToken = 0;
 
-// One of the deleting* sets, `from`, with `ids` added or taken out. Always a new set, never `from`
-// changed in place, so a table reading it re-renders.
+// One of the deleting* or queued* sets, `from`, with `ids` added or taken out. Always a new set, never
+// `from` changed in place, so a table reading it re-renders.
 function withIds(from: ReadonlySet<number>, ids: Iterable<number>): ReadonlySet<number> {
   const next = new Set(from);
   for (const id of ids) next.add(id);
