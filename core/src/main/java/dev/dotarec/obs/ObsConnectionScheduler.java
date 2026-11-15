@@ -34,7 +34,10 @@ public class ObsConnectionScheduler {
     private final ObsDemand demand;
     private final EventPublisher eventPublisher;
 
-    /** Whether this app's own OBS process is running (see {@link ObsHealer#isObsRunning()}). */
+    /**
+     * Whether any process runs this app's own OBS (see {@link ObsHealer#isObsRunning()}), for when the
+     * one the last connection reached wasn't named.
+     */
     private final BooleanSupplier obsProcessRunning;
 
     /**
@@ -135,9 +138,15 @@ public class ObsConnectionScheduler {
      * stayed down until the app restarted. The flag only matters while disconnected, so only then
      * is the process table scanned, and OBS must look gone on {@link #OBS_GONE_TICKS_TO_CLEAR} ticks
      * in a row.
+     *
+     * <p>The OBS that held the output is the process the last connection reached, when that one was
+     * named, and the flag goes once it has exited even while Electron's relaunch of it runs. Kept
+     * until the relaunch's websocket came up, the flag sent a finalize in that window down the
+     * still-recording stop retry, which saved the row without the file the recording knew. Where no
+     * process was named, any process running this app's OBS keeps the flag.
      */
     private void clearRecordingIfObsExited() {
-        if (health.isConnected() || !health.isRecording() || obsProcessRunning.getAsBoolean()) {
+        if (health.isConnected() || !health.isRecording() || recordingObsRuns()) {
             obsGoneTicks = 0;
             return;
         }
@@ -148,5 +157,11 @@ public class ObsConnectionScheduler {
         health.setRecording(false);
         log.warn("OBS exited while recording; it is recording nothing now, so the recording flag"
                 + " is cleared");
+    }
+
+    /** Whether the OBS that held the output still runs; see {@link #clearRecordingIfObsExited()}. */
+    private boolean recordingObsRuns() {
+        ObsProcess held = obsController.connectedObsProcess();
+        return held != null ? obsController.isObsRunning(held) : obsProcessRunning.getAsBoolean();
     }
 }
