@@ -104,9 +104,10 @@ public class CrashRecoveryRunner implements ApplicationRunner {
 
     /**
      * For tests that only replay the journal: with no data folder to keep the adoption floors in, it
-     * adopts and links no orphan recordings.
+     * adopts and links no orphan recordings. Package-private so nothing but those tests can build a
+     * recovery that silently never adopts.
      */
-    public CrashRecoveryRunner(
+    CrashRecoveryRunner(
             RecordingSessionRepository journal,
             MatchRepository matches,
             ClipRepository clips,
