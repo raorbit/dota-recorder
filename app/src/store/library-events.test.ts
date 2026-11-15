@@ -162,15 +162,15 @@ describe('startLibrary storage-events wiring', () => {
   });
 
   it('applies the reconcile reload of a bulk delete in which one delete failed', async () => {
-    // Server state: 7's delete gives up client-side behind an archive pass, but the core still
-    // finishes it; 8's succeeds. Only the reconcile reload can show that 7 went too.
+    // Server state: 7's delete is refused (a locked file, say) though the core dropped the row
+    // anyway; 8's succeeds. Only the reconcile reload can show that 7 went too.
     let serverMatches = [{ id: 7 }, { id: 8 }, { id: 9 }];
     fetchMock.mockImplementation((url: unknown, init?: { method?: string }) => {
       const u = String(url);
       if (init?.method === 'DELETE') {
         serverMatches = serverMatches.filter((m) => !u.endsWith(`/matches/${m.id}`));
         return u.endsWith('/matches/7')
-          ? Promise.reject(new DOMException('The operation timed out.', 'TimeoutError'))
+          ? Promise.resolve({ ok: false, status: 500, statusText: 'Internal Server Error' })
           : Promise.resolve({ ok: true, json: async () => ({ outcome: 'deleted' }) });
       }
       const json = u.includes('/buckets/counts')
@@ -195,6 +195,46 @@ describe('startLibrary storage-events wiring', () => {
     await flush();
 
     expect(ids()).toEqual([9]);
+    teardown();
+  });
+
+  it('stops a bulk delete at a delete that timed out, then reconciles', async () => {
+    // 7's delete waited out its whole timeout behind the core's maintenance lock (the core finishes
+    // it later). 8 and 9 would only wait as long behind it, so they aren't sent; the reconcile
+    // reload shows what the core holds.
+    let serverMatches = [{ id: 7 }, { id: 8 }, { id: 9 }];
+    const deletes: string[] = [];
+    fetchMock.mockImplementation((url: unknown, init?: { method?: string }) => {
+      const u = String(url);
+      if (init?.method === 'DELETE') {
+        deletes.push(u);
+        serverMatches = serverMatches.filter((m) => !u.endsWith(`/matches/${m.id}`));
+        return u.endsWith('/matches/7')
+          ? Promise.reject(new DOMException('The operation timed out.', 'TimeoutError'))
+          : Promise.resolve({ ok: true, json: async () => ({ outcome: 'deleted' }) });
+      }
+      const json = u.includes('/buckets/counts')
+        ? EMPTY_COUNTS
+        : u.includes('/status')
+          ? IDLE_STATUS
+          : u.includes('/clips')
+            ? []
+            : serverMatches;
+      return Promise.resolve({
+        ok: true,
+        json: async () => json,
+        text: async () => JSON.stringify(json),
+      });
+    });
+    const ids = (): number[] => useLibraryStore.getState().matches.map((m) => m.id);
+    const teardown = startLibrary();
+    await flush();
+
+    await useLibraryStore.getState().deleteMatches([7, 8, 9]);
+    await flush();
+
+    expect(deletes).toHaveLength(1);
+    expect(ids()).toEqual([8, 9]);
     teardown();
   });
 
