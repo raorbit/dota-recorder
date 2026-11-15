@@ -43,11 +43,16 @@ function matchesSearch(match: MatchSummary, query: string): boolean {
   );
 }
 
-// Context threaded to each cell renderer: currently just the star toggle (for the hero
-// cell's keep-from-deletion button).
+// Context threaded to each cell renderer: the star toggle (for the hero cell's keep-from-deletion
+// button) and the recordings whose delete is queued or in flight (the hero cell tags them).
 interface CellCtx {
   readonly onToggleStar: (id: number, starred: boolean) => void;
+  readonly deleting: ReadonlySet<number>;
 }
+
+// The tag on a row whose delete is queued or in flight: it can wait minutes for the core's
+// maintenance lock (an archive pass holds it), and until then the row is still there.
+const DELETING_LABEL = 'Deleting…';
 
 // A rendered column = its pure metadata (from match-columns) plus the JSX cell renderer and the
 // cell wrapper class. The renderers live here (not in match-columns) because they return JSX / use
@@ -87,6 +92,7 @@ const CELL: Record<
         </button>
         <HeroIcon hero={m.hero} />
         <span className="mt-hero-name">{heroDisplayName(m.hero)}</span>
+        {ctx.deleting.has(m.id) && <span className="mt-deleting">{DELETING_LABEL}</span>}
       </>
     ),
   },
@@ -205,6 +211,8 @@ function ClipThumb({ clip }: { readonly clip: Clip }): React.JSX.Element {
 interface ClipRowProps {
   readonly clip: Clip;
   readonly selected: boolean;
+  // Its delete is queued or in flight: dimmed and tagged until it settles.
+  readonly deleting: boolean;
   readonly onSelect: (
     clip: Clip,
     opts?: { readonly shift?: boolean; readonly toggle?: boolean },
@@ -216,6 +224,7 @@ interface ClipRowProps {
 function ClipRow({
   clip,
   selected,
+  deleting,
   onSelect,
   onToggleStar,
   onOpenMenu,
@@ -224,6 +233,8 @@ function ClipRow({
     <div
       className="mt-row mt-clip-row"
       data-selected={selected ? 'true' : 'false'}
+      data-deleting={deleting ? 'true' : undefined}
+      aria-busy={deleting || undefined}
       role="button"
       tabIndex={0}
       onClick={(e) => {
@@ -269,6 +280,7 @@ function ClipRow({
         </button>
         <ClipThumb clip={clip} />
         <span className="mt-hero-name">{clipLabel(clip)}</span>
+        {deleting && <span className="mt-deleting">{DELETING_LABEL}</span>}
       </div>
       <div className="mt-cell mt-mono">
         {Math.max(0, Math.round(clip.endOffsetS - clip.startOffsetS))}s
@@ -293,6 +305,7 @@ function ClipTable(): React.JSX.Element {
   const toggleClipStar = useLibraryStore((s) => s.toggleClipStar);
   const deleteClip = useLibraryStore((s) => s.deleteClip);
   const deleteClips = useLibraryStore((s) => s.deleteClips);
+  const deletingClipIds = useLibraryStore((s) => s.deletingClipIds);
 
   // Multi-selection for bulk row actions, mirroring the match table: shift-click = range from the
   // anchor, Ctrl/Cmd-click = toggle one. LOCAL to this table (the player only cares about the single
@@ -398,6 +411,7 @@ function ClipTable(): React.JSX.Element {
               key={c.id}
               clip={c}
               selected={isRowSelected(c.id)}
+              deleting={deletingClipIds.has(c.id)}
               onSelect={onRowSelect}
               onToggleStar={(id, starred) => void toggleClipStar(id, starred)}
               onOpenMenu={openRowMenu}
@@ -417,7 +431,10 @@ function ClipTable(): React.JSX.Element {
           const idSet = new Set(ids);
           const targets = clips.filter((c) => idSet.has(c.id));
           const revealable = targets.filter((c) => canReveal(c));
-          const deleteLabel = clipDeleteMenuLabel(count);
+          // A clip whose delete is already queued or in flight gets no second one (it would only join
+          // the first), so the item deletes the rest, or just says so when there is no rest.
+          const deletable = ids.filter((id) => !deletingClipIds.has(id));
+          const deleteLabel = clipDeleteMenuLabel(deletable.length);
           // Mirror the match table's bulk menu: offer Star only when something is unstarred, Unstar
           // only when something is starred (mixed selections get both).
           const anyStarred = targets.some((c) => c.starred);
@@ -434,31 +451,42 @@ function ClipTable(): React.JSX.Element {
             );
             closeRowMenu();
           };
-          const deleteItem = (
-            <button
-              type="button"
-              className="ctx-item ctx-item-danger"
-              role="menuitem"
-              onClick={() => {
-                if (!menuDeleteArmed) {
-                  setMenuDeleteArmed(true);
-                  return;
-                }
-                if (count === 1) {
-                  // deleteClip rethrows on a failed API call; swallow it here (a stale row is
-                  // reconciled by the next load) so it can't surface as an unhandled rejection.
-                  void deleteClip(rowMenu.clip.id).catch(() => {});
-                } else {
-                  // deleteClips skips any failed delete; the next load() reconciles a straggler.
-                  void deleteClips(ids).catch(() => {});
-                  setSelectedIds(new Set<number>());
-                }
-                closeRowMenu();
-              }}
-            >
-              {menuDeleteArmed ? deleteLabel.armedLabel : deleteLabel.label}
-            </button>
-          );
+          const deleteItem =
+            deletable.length === 0 ? (
+              <div
+                className="ctx-item"
+                role="menuitem"
+                aria-disabled="true"
+                data-disabled="true"
+                tabIndex={-1}
+              >
+                {DELETING_LABEL}
+              </div>
+            ) : (
+              <button
+                type="button"
+                className="ctx-item ctx-item-danger"
+                role="menuitem"
+                onClick={() => {
+                  if (!menuDeleteArmed) {
+                    setMenuDeleteArmed(true);
+                    return;
+                  }
+                  if (count === 1) {
+                    // deleteClip rethrows on a failed API call; swallow it here (a stale row is
+                    // reconciled by the next load) so it can't surface as an unhandled rejection.
+                    void deleteClip(rowMenu.clip.id).catch(() => {});
+                  } else {
+                    // deleteClips skips any failed delete; the next load() reconciles a straggler.
+                    void deleteClips(deletable).catch(() => {});
+                    setSelectedIds(new Set<number>());
+                  }
+                  closeRowMenu();
+                }}
+              >
+                {menuDeleteArmed ? deleteLabel.armedLabel : deleteLabel.label}
+              </button>
+            );
           return (
             <PopupMenu
               x={rowMenu.x}
@@ -567,11 +595,14 @@ function MatchRow({
 }: MatchRowProps): React.JSX.Element {
   // The row is a clickable div (not a <button>) so it can hold the real star <button>
   // without nesting interactive elements; Enter/Space still selects for keyboard users.
+  const deleting = ctx.deleting.has(match.id);
   return (
     <div
       className="mt-row"
       style={{ gridTemplateColumns: gridTemplate }}
       data-selected={selected ? 'true' : 'false'}
+      data-deleting={deleting ? 'true' : undefined}
+      aria-busy={deleting || undefined}
       role="button"
       tabIndex={0}
       onClick={(e) => {
@@ -626,6 +657,7 @@ export function MatchTable(): React.JSX.Element {
   const toggleStar = useLibraryStore((s) => s.toggleStar);
   const deleteMatch = useLibraryStore((s) => s.deleteMatch);
   const deleteMatches = useLibraryStore((s) => s.deleteMatches);
+  const deletingMatchIds = useLibraryStore((s) => s.deletingMatchIds);
 
   // Multi-selection for bulk row actions: shift-click = range from the anchor, Ctrl/Cmd-click =
   // toggle one. LOCAL to the table (the player only cares about the single selectedMatchId). A plain
@@ -708,8 +740,11 @@ export function MatchTable(): React.JSX.Element {
   }, [matches, bucket, resultFilter, search, sort]);
 
   const cellCtx = useMemo<CellCtx>(
-    () => ({ onToggleStar: (id, starred) => void toggleStar(id, starred) }),
-    [toggleStar],
+    () => ({
+      onToggleStar: (id, starred) => void toggleStar(id, starred),
+      deleting: deletingMatchIds,
+    }),
+    [toggleStar, deletingMatchIds],
   );
 
   // Look up a match by id for the bulk menu actions (reveal / copy id over the whole selection).
@@ -935,55 +970,71 @@ export function MatchTable(): React.JSX.Element {
             .map((id) => matchById.get(id))
             .filter((m): m is MatchSummary => m != null);
           const revealable = targets.filter((m) => canReveal(m));
+          // A recording whose delete is already queued or in flight gets no second one (it would only
+          // join the first), so the delete item acts on the rest, or just says so when there is none.
+          const deletable = ids.filter((id) => !deletingMatchIds.has(id));
           // A recording delete never touches clips (they're deleted separately, from their own
           // right-click menus) — but when the targets carry clips, say so: the row will visibly
           // survive as a videoless stub, and the label explains why.
-          const idSet = new Set(ids);
-          const clipCount = clips.filter((c) => idSet.has(c.parentMatchId)).length;
-          const deleteLabel = deleteMenuLabel(count, clipCount);
+          const deletableSet = new Set(deletable);
+          const clipCount = clips.filter((c) => deletableSet.has(c.parentMatchId)).length;
+          const deleteLabel = deleteMenuLabel(deletable.length, clipCount);
           // A row that is ALREADY videoless and still has clips has nothing left to delete — the
           // server would 204 and change nothing, so an armed confirm there would be a silent no-op.
-          // When EVERY target is such a stub, swap the delete for a hint at the unblocking action.
+          // When EVERY target left to delete is such a stub, swap the delete for a hint at the
+          // unblocking action.
           const hasClips = (id: number): boolean => clips.some((c) => c.parentMatchId === id);
           const isBlockedStub = (m: MatchSummary): boolean =>
             (m.videoPath === null || m.videoPath.trim() === '') && hasClips(m.id);
-          const allBlocked = targets.length > 0 && targets.every(isBlockedStub);
-          const deleteItem = allBlocked ? (
-            <div
-              className="ctx-item"
-              role="menuitem"
-              aria-disabled="true"
-              data-disabled="true"
-              tabIndex={-1}
-              title="This entry only remains because its clips need it — delete the clips and it can be removed."
-            >
-              {deleteBlockedLabel(count, clipCount)}
-            </div>
-          ) : (
-            <button
-              type="button"
-              className="ctx-item ctx-item-danger"
-              role="menuitem"
-              onClick={() => {
-                if (!menuDeleteArmed) {
-                  setMenuDeleteArmed(true);
-                  return;
-                }
-                if (count === 1) {
-                  // deleteMatch rethrows on a failed API call; swallow it here (a stale row is
-                  // reconciled by the next load) so it can't surface as an unhandled rejection.
-                  void deleteMatch(rowMenu.match.id).catch(() => {});
-                } else {
-                  // deleteMatches skips any failed delete; the next load() reconciles a straggler.
-                  void deleteMatches(ids).catch(() => {});
-                  setSelectedIds(new Set<number>());
-                }
-                closeRowMenu();
-              }}
-            >
-              {menuDeleteArmed ? deleteLabel.armedLabel : deleteLabel.label}
-            </button>
-          );
+          const deletableTargets = targets.filter((m) => deletableSet.has(m.id));
+          const allBlocked = deletableTargets.length > 0 && deletableTargets.every(isBlockedStub);
+          const deleteItem =
+            deletable.length === 0 ? (
+              <div
+                className="ctx-item"
+                role="menuitem"
+                aria-disabled="true"
+                data-disabled="true"
+                tabIndex={-1}
+              >
+                {DELETING_LABEL}
+              </div>
+            ) : allBlocked ? (
+              <div
+                className="ctx-item"
+                role="menuitem"
+                aria-disabled="true"
+                data-disabled="true"
+                tabIndex={-1}
+                title="This entry only remains because its clips need it — delete the clips and it can be removed."
+              >
+                {deleteBlockedLabel(deletable.length, clipCount)}
+              </div>
+            ) : (
+              <button
+                type="button"
+                className="ctx-item ctx-item-danger"
+                role="menuitem"
+                onClick={() => {
+                  if (!menuDeleteArmed) {
+                    setMenuDeleteArmed(true);
+                    return;
+                  }
+                  if (count === 1) {
+                    // deleteMatch rethrows on a failed API call; swallow it here (a stale row is
+                    // reconciled by the next load) so it can't surface as an unhandled rejection.
+                    void deleteMatch(rowMenu.match.id).catch(() => {});
+                  } else {
+                    // deleteMatches skips any failed delete; the next load() reconciles a straggler.
+                    void deleteMatches(deletable).catch(() => {});
+                    setSelectedIds(new Set<number>());
+                  }
+                  closeRowMenu();
+                }}
+              >
+                {menuDeleteArmed ? deleteLabel.armedLabel : deleteLabel.label}
+              </button>
+            );
           // Mirror the single-row menu: offer Star only when something is unstarred, Unstar only when
           // something is starred (none starred -> Star only; all starred -> Unstar only; mixed -> both).
           const anyStarred = targets.some((m) => m.starred);

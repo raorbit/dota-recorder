@@ -300,6 +300,17 @@
 .vp-clip-item[data-active='true'] {
   border-color: var(--gold);
 }
+/* A clip whose delete is queued or in flight (it can wait minutes for the core's maintenance lock):
+   dimmed, with a "Deleting…" tag after its label, until the delete settles. */
+.vp-clip-item[data-deleting='true'] {
+  opacity: 0.55;
+}
+.vp-clip-deleting {
+  font-size: 11px;
+  font-style: italic;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
 /* Clip thumbnail at the head of the row: a small fixed tile, cover-cropped and rounded
    to match the design tokens. Hidden via inline display:none (onError) when the thumb
    404s, so the label/icon fall back cleanly. */

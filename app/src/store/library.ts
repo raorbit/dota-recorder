@@ -63,6 +63,13 @@ export interface LibraryState {
   readonly counts: BucketCounts;
   readonly status: Status | null;
   readonly loadState: LoadState;
+  // Recordings and clips whose delete is queued or in flight. A delete can wait minutes for the core's
+  // maintenance lock (an archive pass holds it), so the tables dim these rows ("Deleting…") and offer
+  // no second delete for them; one asked for anyway joins the first (see the client's delete queue). A
+  // row leaves its set when its delete settles: done, refused, or timed out (the core can still finish
+  // a timed-out one, and its match.deleted / clip.deleted frame reloads the list when it does).
+  readonly deletingMatchIds: ReadonlySet<number>;
+  readonly deletingClipIds: ReadonlySet<number>;
   // The latest low-disk warning: pushed by the core's "error" frame (scope "disk") and seeded from
   // GET /status (storage.lowDisk) on mount/reconnect, or null when none is outstanding. Backs the
   // in-app banner only; the OS notification is the Electron main process's (it outlives the window).
@@ -126,6 +133,20 @@ export interface LibraryState {
 // store state) so it never triggers a re-render.
 let loadToken = 0;
 
+// One of the deleting* sets, `from`, with `ids` added or taken out. Always a new set, never `from`
+// changed in place, so a table reading it re-renders.
+function withIds(from: ReadonlySet<number>, ids: Iterable<number>): ReadonlySet<number> {
+  const next = new Set(from);
+  for (const id of ids) next.add(id);
+  return next;
+}
+
+function withoutIds(from: ReadonlySet<number>, ids: Iterable<number>): ReadonlySet<number> {
+  const next = new Set(from);
+  for (const id of ids) next.delete(id);
+  return next;
+}
+
 export const useLibraryStore = create<LibraryState>((set, get) => {
   // Invalidate any load() already in flight so its (possibly pre-mutation) result can't clobber a
   // local mutation that just changed the list — e.g. resurrect a just-deleted row, or revert a
@@ -144,6 +165,8 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
     counts: EMPTY_COUNTS,
     status: null,
     loadState: 'idle',
+    deletingMatchIds: new Set<number>(),
+    deletingClipIds: new Set<number>(),
     diskWarning: null,
     update: null,
 
@@ -215,8 +238,11 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
     // SERVER reports it took (its decision is made from the clip table under its maintenance lock;
     // our own clips list can lag it by the ~200ms clip.created reload window, so guessing locally can
     // drop a row the server stubbed). Only a missing outcome (older core) falls back to the local
-    // guess. Rethrows so the caller can surface a failure.
+    // guess. The row is in deletingMatchIds until the delete settles. Rethrows so the caller can
+    // surface a failure.
     deleteMatch: async (id) => {
+      const deleted = new Set([id]);
+      set((s) => ({ deletingMatchIds: withIds(s.deletingMatchIds, deleted) }));
       let outcome: Awaited<ReturnType<typeof apiDeleteMatch>>;
       try {
         outcome = await apiDeleteMatch(id);
@@ -224,6 +250,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
         // Failed, or gave up while the core waits out an archive pass (it then finishes the delete
         // and its match.deleted frame reloads the list). Reconcile with the server either way, so a
         // delete that did land never leaves its row listed.
+        set((s) => ({ deletingMatchIds: withoutIds(s.deletingMatchIds, deleted) }));
         void get().load({ silent: true });
         throw err;
       }
@@ -231,14 +258,14 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
       // this delete committed server-side may still be in flight; invalidate it so it can't resurrect
       // the just-deleted row (and so it doesn't leave the table wedged on the spinner).
       invalidatePendingLoad();
-      const deleted = new Set([id]);
-      set((s) =>
-        outcome === 'stubbed'
+      set((s) => ({
+        ...(outcome === 'stubbed'
           ? applyMatchVideosDeleted(s, deleted)
           : outcome === 'deleted'
             ? applyMatchesDeleted(s, deleted)
-            : applyRecordingsDeleted(s, deleted),
-      );
+            : applyRecordingsDeleted(s, deleted)),
+        deletingMatchIds: withoutIds(s.deletingMatchIds, deleted),
+      }));
       try {
         set({ counts: await fetchBucketCounts() });
       } catch {
@@ -253,7 +280,9 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
     // So is one that timed out behind a long archive pass: the core still finishes it once its
     // maintenance lock frees, and the rows sent after it then too (the client's delete queue sends
     // them one at a time, so waiting on the lock holds one connection to the core, not one per row).
+    // Every row is in deletingMatchIds from the start until the whole run is done.
     deleteMatches: async (ids) => {
+      set((s) => ({ deletingMatchIds: withIds(s.deletingMatchIds, ids) }));
       const removed = new Set<number>();
       const stubbed = new Set<number>();
       const unknown = new Set<number>(); // no outcome in the response (older core) -> local guess
@@ -272,6 +301,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
         if (failed) void get().load({ silent: true });
       };
       if (removed.size === 0 && stubbed.size === 0 && unknown.size === 0) {
+        set((s) => ({ deletingMatchIds: withoutIds(s.deletingMatchIds, ids) }));
         reconcile();
         return;
       }
@@ -279,7 +309,10 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
       set((s) => {
         let next: DeleteSlice = applyMatchVideosDeleted(s, stubbed);
         next = applyMatchesDeleted(next, removed);
-        return applyRecordingsDeleted(next, unknown);
+        return {
+          ...applyRecordingsDeleted(next, unknown),
+          deletingMatchIds: withoutIds(s.deletingMatchIds, ids),
+        };
       });
       reconcile();
       try {
@@ -289,14 +322,24 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
       }
     },
 
-    // Permanently delete one clip (the Clips bucket's right-click delete). Pessimistic like
-    // deleteMatch: server-side first, then drop the row locally (clearing a clip auto-play that
-    // pointed at it) and refresh the Clips badge. The player's own strip follows the clip.deleted
-    // frame the core publishes. Rethrows so the caller can surface a failure.
+    // Permanently delete one clip (the Clips bucket's right-click delete, and the player strip's).
+    // Pessimistic like deleteMatch: server-side first, then drop the row locally (clearing a clip
+    // auto-play that pointed at it) and refresh the Clips badge. The clip is in deletingClipIds until
+    // the delete settles. Rethrows so the caller (the player, for its own strip) can tell a failure.
     deleteClip: async (id) => {
-      await apiDeleteClip(id);
+      const deleted = new Set([id]);
+      set((s) => ({ deletingClipIds: withIds(s.deletingClipIds, deleted) }));
+      try {
+        await apiDeleteClip(id);
+      } catch (err) {
+        set((s) => ({ deletingClipIds: withoutIds(s.deletingClipIds, deleted) }));
+        throw err;
+      }
       invalidatePendingLoad();
-      set((s) => applyClipDeleted(s, id));
+      set((s) => ({
+        ...applyClipDeleted(s, id),
+        deletingClipIds: withoutIds(s.deletingClipIds, deleted),
+      }));
       try {
         set({ counts: await fetchBucketCounts() });
       } catch {
@@ -307,8 +350,10 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
     // Bulk clip delete (the Clips bucket's multi-select). Mirrors deleteMatches: each delete runs
     // server-side first — sequentially, bounded by the small selection size — then all removals land
     // in ONE state update with a single counts refresh. A failed or timed-out delete is skipped so the
-    // rest still go, as in deleteMatches, and a reconcile reload follows.
+    // rest still go, as in deleteMatches, and a reconcile reload follows. Every clip is in
+    // deletingClipIds from the start until the whole run is done.
     deleteClips: async (ids) => {
+      set((s) => ({ deletingClipIds: withIds(s.deletingClipIds, ids) }));
       const removed = new Set<number>();
       let failed = false;
       for (const id of ids) {
@@ -324,11 +369,15 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
         if (failed) void get().load({ silent: true });
       };
       if (removed.size === 0) {
+        set((s) => ({ deletingClipIds: withoutIds(s.deletingClipIds, ids) }));
         reconcile();
         return;
       }
       invalidatePendingLoad();
-      set((s) => applyClipsDeleted(s, removed));
+      set((s) => ({
+        ...applyClipsDeleted(s, removed),
+        deletingClipIds: withoutIds(s.deletingClipIds, ids),
+      }));
       reconcile();
       try {
         set({ counts: await fetchBucketCounts() });
