@@ -943,6 +943,23 @@ class ObsControllerTest {
         verify(cfg, never()).reconcileAudioInputs(obs, true);
     }
 
+    @Test
+    void reconcileAudioOnDemand_aFailedReconcileLeavesTheAttachToRetry() {
+        // The user edits the audio sources while a match arms, and that edit's reconcile fails (the
+        // input list timed out). Counted as applied anyway, every later start's attach would no-op
+        // while the readiness gate waits on a capture that was never created.
+        ObsSceneConfigurer cfg = mock(ObsSceneConfigurer.class);
+        OBSRemoteController obs = mock(OBSRemoteController.class);
+        when(cfg.reconcileAudioInputs(obs, true)).thenReturn(true, false, true);
+        ObsController controller = connectedTo(obs, cfg);
+
+        controller.attachAudio(); // the arming match attached the captures
+        controller.reconcileAudioOnDemand(); // the edit's reconcile fails
+        controller.attachAudio(); // the next start frame
+
+        verify(cfg, times(3)).reconcileAudioInputs(obs, true);
+    }
+
     /** A connected controller over {@code obs}, for the render probe. */
     private static ObsController connectedTo(OBSRemoteController obs) {
         return connectedTo(obs, sceneConfigurer());
