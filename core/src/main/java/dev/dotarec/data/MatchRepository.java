@@ -323,63 +323,60 @@ public class MatchRepository {
     }
 
     /**
-     * Atomically claims a sweep candidate for eviction and has {@code unlink} delete its video: prunes
-     * the row exactly like {@link #nullVideoPath} but ONLY while it is still non-starred AND still
-     * points at the video the sweeper snapshotted, and the prune is durable only once the video is
-     * gone. Both guards live in the WHERE so the starred re-check and the prune are one statement, not
-     * a read-then-write: a star PATCH that commits between the sweeper's candidate snapshot and this
-     * row's eviction turn wins — the claim matches nothing and {@code unlink} never runs. The
-     * {@code video_path} guard likewise refuses a row that was repointed or already pruned since the
-     * snapshot.
+     * Claims a sweep candidate for eviction, has {@code unlink} delete its video, and only then prunes
+     * the row exactly like {@link #nullVideoPath}. The claim is a guarded UPDATE that changes nothing
+     * ({@code SET video_path = video_path}, as {@link ClipRepository#claimForSweep} does) and matches
+     * ONLY while the row is still non-starred AND still points at the video the sweeper snapshotted.
+     * Both guards live in its WHERE, so the starred re-check is one statement, not a read-then-write:
+     * a star PATCH that commits between the sweeper's candidate snapshot and this row's eviction turn
+     * wins — the claim matches nothing and {@code unlink} never runs. The {@code video_path} guard
+     * likewise refuses a row that was repointed or already pruned since the snapshot.
      *
-     * <p>The UPDATE and the unlink share one transaction, committed only when {@code unlink} reports
-     * the video gone and rolled back otherwise, so a failed unlink leaves the row referencing its
-     * intact file. A process ended in between leaves the row pointing at its file, or at nothing if
-     * the unlink got through, which the sweeper's missing-file reconcile catches up — never a pruned
-     * row whose file is still on disk, which nothing would count or sweep again. A star PATCH that
-     * arrives during the unlink waits for the write lock this transaction holds, and stars a row whose
-     * file is gone. The lock is held for the UPDATE, the unlink and the commit and no longer, and
-     * {@code unlink} must not touch the database.
+     * <p>The claim, the unlink and the prune are three steps with no transaction around them, and
+     * {@code unlink} runs with no connection held: a delete can block for seconds (an archive HDD
+     * spinning up, a NAS share waking its disks), and holding SQLite's write lock or one of the pool's
+     * two connections through it would make every other writer wait on it and fail with SQLITE_BUSY
+     * once busy_timeout runs out. Nothing changes before the video is gone, so a failed unlink
+     * leaves the row exactly as it was, referencing its intact file, and a process ended part way
+     * leaves the row pointing at its file, or at nothing if the unlink got through, which the
+     * sweeper's missing-file reconcile catches up — never a pruned row whose file is still on disk,
+     * which nothing would count or sweep again. The prune is guarded on the row still pointing at the
+     * snapshotted video, not on starred: a star PATCH that lands during the unlink stars a row whose
+     * file is gone, and the prune catches that row up all the same.
      *
      * @param unlink deletes the row's video and reports whether it is gone
      * @return true only if THIS call claimed the row, {@code unlink} removed its video, and the prune
-     *     committed
+     *     changed the row
      * @throws IllegalStateException when the database fails, which can be after {@code unlink} has
-     *     run (a failed commit), so the video may be gone either way
+     *     run (a failed prune), so the video may be gone either way
      */
     public boolean claimForSweep(long id, String videoPath, BooleanSupplier unlink) {
-        String sql = "UPDATE matches "
-                + "SET video_path = NULL, thumb_path = NULL, file_size_bytes = NULL "
+        String claim = "UPDATE matches SET video_path = video_path "
                 + "WHERE id = ? AND starred = 0 AND video_path = ?";
-        try (Connection conn = dataSource.getConnection()) {
-            conn.setAutoCommit(false);
-            boolean pruned = false;
-            try {
-                boolean claimed;
-                try (PreparedStatement ps = conn.prepareStatement(sql)) {
-                    ps.setLong(1, id);
-                    ps.setString(2, videoPath);
-                    claimed = ps.executeUpdate() == 1;
-                }
-                if (claimed && unlink.getAsBoolean()) {
-                    conn.commit();
-                    pruned = true;
-                }
-            } finally {
-                try {
-                    if (!pruned) {
-                        // Refused, kept, or failed part way (the unlink or the commit threw): the prune
-                        // must not outlive this call. Restoring auto-commit below commits whatever
-                        // transaction is still open, so this has to come first.
-                        conn.rollback();
-                    }
-                } finally {
-                    conn.setAutoCommit(true);
-                }
-            }
-            return pruned;
+        String prune = "UPDATE matches "
+                + "SET video_path = NULL, thumb_path = NULL, file_size_bytes = NULL "
+                + "WHERE id = ? AND video_path = ?";
+        if (!updateIfAt(claim, id, videoPath, "Failed to claim match " + id + " for sweep")) {
+            return false; // starred (or repointed/pruned) since the snapshot: nothing is unlinked
+        }
+        if (!unlink.getAsBoolean()) {
+            return false; // still on disk, and the claim changed nothing: no undo needed
+        }
+        return updateIfAt(prune, id, videoPath, "Failed to prune swept match " + id);
+    }
+
+    /**
+     * Runs one UPDATE guarded on the row's {@code id} and {@code video_path} (bound in that order) on
+     * a connection of its own, in auto-commit, and reports whether it changed the row.
+     */
+    private boolean updateIfAt(String sql, long id, String videoPath, String errContext) {
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, id);
+            ps.setString(2, videoPath);
+            return ps.executeUpdate() == 1;
         } catch (SQLException e) {
-            throw new IllegalStateException("Failed to claim match " + id + " for sweep", e);
+            throw new IllegalStateException(errContext, e);
         }
     }
 
