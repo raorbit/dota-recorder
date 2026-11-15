@@ -2,6 +2,8 @@ package dev.dotarec.config;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.dotarec.config.SettingsStore.AudioSource;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -158,6 +160,33 @@ class SettingsStoreTest {
         assertThat(store.get().gsiAuthToken).isEqualTo("tok-keep");
         assertThat(store.get().storageLocations)
                 .containsExactly(new SettingsStore.StorageLocation("a1", "D:\\Archive", 900));
+    }
+
+    @Test
+    void save_writesBackTheTopLevelKeysThisBuildDoesntKnow(@TempDir Path dir) throws Exception {
+        // Every boot saves settings (the OBS config writer pins the websocket password), so keys only
+        // read and never written back were gone after one launch of this build.
+        Files.createDirectories(dir);
+        Files.writeString(
+                dir.resolve("settings.json"),
+                """
+                {"retentionCapGb": 400, "readOnlyDirs": ["E:\\\\Old"], "futureKnob": {"on": true, "n": 3}}
+                """);
+        SettingsStore store = new SettingsStore(paths(dir));
+
+        store.update(s -> {
+            s.retentionCapGb = 500;
+            return s;
+        });
+
+        JsonNode saved = new ObjectMapper().readTree(dir.resolve("settings.json").toFile());
+        assertThat(saved.get("retentionCapGb").asInt()).isEqualTo(500);
+        assertThat(saved.get("readOnlyDirs").get(0).asText()).isEqualTo("E:\\Old");
+        assertThat(saved.get("futureKnob").get("n").asInt()).isEqualTo(3);
+        // And again after a restart reads the saved file back.
+        new SettingsStore(paths(dir)).update(s -> s);
+        JsonNode again = new ObjectMapper().readTree(dir.resolve("settings.json").toFile());
+        assertThat(again.get("futureKnob").get("on").asBoolean()).isTrue();
     }
 
     @Test
