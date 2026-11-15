@@ -410,6 +410,50 @@ class RecordingArchiverTest {
     }
 
     @Test
+    void aFlushTheDriveRejectsBeforeTheRename_doesNotStopTheMove() throws Exception {
+        assertAMoveSurvivesAFlushRejectedFor(RecordingArchiver.PARTIAL_SUFFIX);
+    }
+
+    @Test
+    void aFlushTheDriveRejectsAfterTheRename_doesNotStopTheMove() throws Exception {
+        assertAMoveSurvivesAFlushRejectedFor("-old.mp4");
+    }
+
+    /**
+     * A drive whose driver refuses FlushFileBuffers for the file whose name ends with {@code suffix}:
+     * the move still completes (the flush is a durability improvement, not a gate), rather than
+     * failing and re-copying the file every pass while nothing leaves the active drive.
+     */
+    private void assertAMoveSurvivesAFlushRejectedFor(String suffix) throws Exception {
+        Path archive = configureArchive("hdd", 2);
+        settings.get().retentionCapGb = 1;
+        long oldest = seed(videoDir, "old.mp4", "old.jpg", 4 * 1024, 1_000L, false);
+        seed(videoDir, "new.mp4", "new.jpg", 2 * GIB, 2_000L, false);
+        Path dst = archive.resolve(oldest + "-old.mp4");
+        RecordingArchiver rejecting =
+                new RecordingArchiver(matches, clips, settings, sweeper, hugeFreeProbe()) {
+                    @Override
+                    void syncToDisk(Path file) throws IOException {
+                        if (file.getFileName().toString().endsWith(suffix)) {
+                            throw new IOException("The request is not supported");
+                        }
+                        super.syncToDisk(file);
+                    }
+                };
+
+        try (MockedStatic<Files> ignored = forceCrossStoreMoves()) {
+            assertThat(rejecting.archive(null).movedIds()).containsExactly(oldest);
+        }
+
+        assertThat(dst).exists();
+        assertThat(Files.size(dst)).isEqualTo(4 * 1024);
+        assertThat(archive.resolve(oldest + "-old.mp4" + RecordingArchiver.PARTIAL_SUFFIX))
+                .doesNotExist();
+        assertThat(videoDir.resolve("old.mp4")).doesNotExist();
+        assertThat(matches.findById(oldest).orElseThrow().videoPath()).isEqualTo(dst.toString());
+    }
+
+    @Test
     void interruptedCopiesLeftOnAnArchiveDrive_areRemoved_andNothingElse() throws Exception {
         Path archive = configureArchive("hdd", 10);
         Path thumbs = Files.createDirectories(archive.resolve("thumbs"));

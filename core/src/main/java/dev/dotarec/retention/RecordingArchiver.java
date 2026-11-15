@@ -363,7 +363,8 @@ public class RecordingArchiver {
      * <p>The copy is flushed to the drive before the rename, and again after it, so both its bytes
      * and its final name are on disk before the caller repoints the row and deletes the source. The
      * copy returns once the data is in the write cache; a power cut or crash after the source delete
-     * would otherwise leave the only copy with unwritten ranges reading as zeros.
+     * would otherwise leave the only copy with unwritten ranges reading as zeros. The flushes improve
+     * durability but never gate the move (see {@link #flushBestEffort}).
      *
      * <p>{@code REPLACE_EXISTING} is safe because {@code dst} carries the match id (see the caller): it
      * can only ever overwrite a leftover from this same match's prior interrupted move, making retries
@@ -382,28 +383,43 @@ public class RecordingArchiver {
             if (Files.size(partial) != Files.size(src)) {
                 throw new IOException("Copy size mismatch moving " + src + " -> " + dst);
             }
-            syncToDisk(partial);
+            flushBestEffort(partial);
             // Same directory, so a rename; it replaces a leftover under the final name too.
             Files.move(partial, dst, StandardCopyOption.ATOMIC_MOVE);
         } catch (IOException | RuntimeException e) {
             deletePartialQuietly(partial);
             throw e;
         }
-        syncToDisk(dst);
+        flushBestEffort(dst);
         return false;
     }
 
     /**
+     * Flushes {@code file} if the drive lets it, and otherwise carries on unflushed, as the archiver
+     * did before it flushed at all. A flush a drive rejects must never fail the move: on a target whose
+     * driver refuses FlushFileBuffers every over-cap file would be re-copied each pass and nothing
+     * would ever leave the active drive.
+     */
+    private void flushBestEffort(Path file) {
+        try {
+            syncToDisk(file);
+        } catch (AccessDeniedException e) {
+            // A read-only file (the copy keeps the source's attributes) can't be opened for the
+            // write access a flush needs.
+            log.debug("Could not flush {} (read-only?): {}", file, e.toString());
+        } catch (IOException e) {
+            log.warn("Could not flush the archive copy {} to its drive ({}); moving it unflushed",
+                    file, e.toString());
+        }
+    }
+
+    /**
      * Flushes {@code file}'s data and metadata to the drive (FlushFileBuffers on Windows). A seam so
-     * a test can see where in the move it happens.
+     * a test can see where in the move it happens, or stand in for a drive that rejects it.
      */
     void syncToDisk(Path file) throws IOException {
         try (FileChannel channel = FileChannel.open(file, StandardOpenOption.WRITE)) {
             channel.force(true);
-        } catch (AccessDeniedException e) {
-            // A read-only file (the copy keeps the source's attributes) can't be opened for the
-            // write access a flush needs; leave it to the cache rather than never archive it.
-            log.debug("Could not flush {} (read-only?): {}", file, e.toString());
         }
     }
 
