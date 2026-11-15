@@ -25,6 +25,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.function.Consumer;
 import java.util.regex.Pattern;
@@ -162,7 +163,8 @@ public class CrashRecoveryRunner implements ApplicationRunner {
             long startMs = System.currentTimeMillis();
             OrphanAdoptionFloors.Snapshot floors =
                     adoptionFloors.prepare(
-                            videoDir(), archiveDirs(), startMs, videoLinkFromMs(unfinished, startMs));
+                            videoDir(), archiveDirs(), startMs, videoLinkFromMs(unfinished, startMs),
+                            this::newestRecorderFileMs);
             if (unfinished.isEmpty()) {
                 reconcileOrphanVods(floors);
                 return;
@@ -379,6 +381,27 @@ public class CrashRecoveryRunner implements ApplicationRunner {
             }
         }
         return first;
+    }
+
+    /**
+     * The newest last-modified time of the recorder-named recordings directly in {@code root}, which
+     * {@link OrphanAdoptionFloors} keeps a root's first floor after: {@link Long#MIN_VALUE} when it
+     * holds none, and empty when {@code root} isn't a folder this boot can read, so it gets no floor
+     * until a boot can check what it holds.
+     */
+    private OptionalLong newestRecorderFileMs(Path root) {
+        try (Stream<Path> stream = Files.list(root)) {
+            return OptionalLong.of(
+                    stream.filter(Files::isRegularFile)
+                            .filter(this::isRecordingFile)
+                            .filter(CrashRecoveryRunner::hasRecorderProvenance)
+                            .mapToLong(CrashRecoveryRunner::lastModifiedMs)
+                            .max()
+                            .orElse(Long.MIN_VALUE));
+        } catch (Exception e) {
+            log.debug("Could not read {} for its first adoption floor: {}", root, e.toString());
+            return OptionalLong.empty();
+        }
     }
 
     /**

@@ -17,8 +17,10 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.function.Function;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -31,18 +33,23 @@ import org.slf4j.LoggerFactory;
  * folder chosen where the user's own OBS saves (Videos, say) is full of names that pass. An adopted
  * file becomes a match row, and retention then deletes it or moves it to an archive drive. So each
  * root also gets a floor the first time a scan reads it, and nothing modified before it is adopted.
- * A boot scan that no longer reads a folder drops its floor, so a folder chosen again, or an archive
- * drive added back, starts from a new floor: what it gained while it wasn't ours is never adopted. A
- * drive that is configured but unplugged is still a root and keeps its floor. Only a boot sees the
- * roots, so a folder left and chosen again within one run keeps its old floor.
+ * That first floor is the scan's start, or just after the newest recorder-named file the folder
+ * already holds when that is later: a scan on a clock far behind (a reset CMOS clock before time
+ * sync, say) would otherwise set a floor from before the folder's own history, and once the clock
+ * is right every file in it would pass. A folder the scan can't read (an unplugged drive) gets no
+ * floor until a boot that can read it, since what it holds can't be checked. A boot scan that no
+ * longer reads a folder drops its floor, so a folder chosen again, or an archive drive added back,
+ * starts from a new floor: what it gained while it wasn't ours is never adopted. A drive that is
+ * configured but unplugged is still a root and keeps its floor. Only a boot sees the roots, so a
+ * folder left and chosen again within one run keeps its old floor.
  *
  * <p>The cost is lopsided on purpose. An orphan the floor turns away only stays on disk, where the
  * user can still find it; adopting the user's file hands it to deletion. So an upgraded install
  * never adopts what predates the upgrade, a newly chosen folder never adopts what it already held,
- * and when the floors can't be read they start again from now. A floor is set at the first boot scan
- * after a folder is chosen, not when it's chosen, so a crash orphan written there before that boot
- * stays on disk too. What's left: a personal OBS recording made into the same folder after its
- * floor, with OBS's default name, is still adopted.
+ * and when the floors can't be read they start again from now (or from what each folder holds). A
+ * floor is set at the first boot scan after a folder is chosen, not when it's chosen, so a crash
+ * orphan written there before that boot stays on disk too. What's left: a personal OBS recording
+ * made into the same folder after its floor, with OBS's default name, is still adopted.
  *
  * <p>One exception, for linking alone. When the video folder gets its first floor in a boot that
  * recovers an unfinished recording with no journaled path (the upgrade boot after a crash mid-match,
@@ -143,20 +150,27 @@ final class OrphanAdoptionFloors {
     }
 
     /**
-     * Gives every root that has no floor one, at {@code startMs}, drops the floor of any other folder,
-     * and makes that durable before returning, so no file is adopted against a floor a crash could
-     * lose. A video folder that gets its floor here may link from {@code videoLinkFromMs} when that is
-     * earlier ({@link Snapshot#linkFloorOf}); that is never stored. The roots must be every root the
+     * Gives every root that has no floor one, drops the floor of any other folder, and makes that
+     * durable before returning, so no file is adopted against a floor a crash could lose. A root's
+     * first floor is {@code startMs}, or 1 ms after the newest file {@code newestHeldMs} reports in it
+     * when that is later; a root it reports as unreadable (empty) gets none yet. A video folder that
+     * gets its floor here may link from {@code videoLinkFromMs} when that is earlier than {@code
+     * startMs} ({@link Snapshot#linkFloorOf}); that is never stored. The roots must be every root the
      * scan reads (the Go remake prunes only in its full scan, never in its separate link pass). Never
      * throws: whatever goes wrong, the answer is to adopt nothing.
      */
-    Snapshot prepare(Path videoDir, Collection<Path> archives, long startMs, long videoLinkFromMs) {
+    Snapshot prepare(
+            Path videoDir,
+            Collection<Path> archives,
+            long startMs,
+            long videoLinkFromMs,
+            Function<Path, OptionalLong> newestHeldMs) {
         if (file == null) {
             log.warn("No data folder to keep orphan adoption floors in; adopting no orphan recordings");
             return Snapshot.none();
         }
         try {
-            return prepareOrThrow(videoDir, archives, startMs, videoLinkFromMs);
+            return prepareOrThrow(videoDir, archives, startMs, videoLinkFromMs, newestHeldMs);
         } catch (RuntimeException | java.io.IOError e) {
             log.warn("Could not prepare the orphan adoption floors {}; adopting no orphan recordings"
                     + " this time: {}", file, e.toString());
@@ -165,7 +179,11 @@ final class OrphanAdoptionFloors {
     }
 
     private Snapshot prepareOrThrow(
-            Path videoDir, Collection<Path> archives, long startMs, long videoLinkFromMs) {
+            Path videoDir,
+            Collection<Path> archives,
+            long startMs,
+            long videoLinkFromMs,
+            Function<Path, OptionalLong> newestHeldMs) {
         List<Path> roots = new ArrayList<>();
         roots.add(videoDir);
         roots.addAll(archives);
@@ -189,9 +207,15 @@ final class OrphanAdoptionFloors {
             String key = key(root);
             current.add(key);
             if (!floors.containsKey(key)) {
-                floors.put(key, startMs);
+                OptionalLong newest = newestHeldMs.apply(root);
+                if (newest.isEmpty()) {
+                    log.info("Can't read {} now; it gets its orphan adoption floor on a boot that can", root);
+                    continue;
+                }
+                long from = firstFloor(startMs, newest.getAsLong());
+                floors.put(key, from);
                 changed = true;
-                log.info("Only recordings written to {} from {} on can be adopted as orphans", root, startMs);
+                log.info("Only recordings written to {} from {} on can be adopted as orphans", root, from);
                 if (i == 0 && videoLinkFromMs < startMs) {
                     linkFrom.put(key, videoLinkFromMs);
                     log.info("A crashed recording's file in {} can still be linked from {} on", root,
@@ -217,6 +241,15 @@ final class OrphanAdoptionFloors {
             }
         }
         return new Snapshot(floors, linkFrom);
+    }
+
+    /**
+     * A root's first floor: the scan's start, or 1 ms after the newest recorder-named file the root
+     * holds when that is later, so nothing it already held passes even when this scan's clock is far
+     * behind theirs.
+     */
+    private static long firstFloor(long startMs, long newestHeldMs) {
+        return Math.max(startMs, newestHeldMs == Long.MAX_VALUE ? Long.MAX_VALUE : newestHeldMs + 1);
     }
 
     /**
