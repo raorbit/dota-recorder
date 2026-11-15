@@ -125,16 +125,6 @@ export interface LibraryState {
 // store state) so it never triggers a re-render.
 let loadToken = 0;
 
-// Whether a request gave up on its own timeout (AbortSignal.timeout rejects with a TimeoutError). A
-// delete waits up to its timeout for the core's maintenance lock, so one that ran out means the core
-// held the lock (or hung) the whole time, and the next delete in a bulk run would only wait as long
-// behind it: the bulk deletes stop there instead of stalling a timeout per row.
-function isRequestTimeout(err: unknown): boolean {
-  return (
-    typeof err === 'object' && err !== null && (err as { name?: unknown }).name === 'TimeoutError'
-  );
-}
-
 export const useLibraryStore = create<LibraryState>((set, get) => {
   // Invalidate any load() already in flight so its (possibly pre-mutation) result can't clobber a
   // local mutation that just changed the list — e.g. resurrect a just-deleted row, or revert a
@@ -259,7 +249,9 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
     // small selection size — then applies the server-reported branches for all survivors in ONE state
     // update and refreshes counts once (rather than the per-row count fetch deleteMatch does). A
     // single failed delete is skipped so the rest still go; the next load() reconciles any straggler.
-    // A delete that timed out stops the rest (see isRequestTimeout).
+    // So is one that timed out behind a long archive pass: the core still finishes it once its
+    // maintenance lock frees, and the rows sent after it then too (the client's delete queue sends
+    // them one at a time, so waiting on the lock holds one connection to the core, not one per row).
     deleteMatches: async (ids) => {
       const removed = new Set<number>();
       const stubbed = new Set<number>();
@@ -269,9 +261,8 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
         try {
           const outcome = await apiDeleteMatch(id);
           (outcome === 'deleted' ? removed : outcome === 'stubbed' ? stubbed : unknown).add(id);
-        } catch (err) {
+        } catch {
           failed = true; // skip this one; the rest still delete
-          if (isRequestTimeout(err)) break;
         }
       }
       // Reconcile a failed (or timed-out, see deleteMatch) delete with the server's list. Started
@@ -314,9 +305,8 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
 
     // Bulk clip delete (the Clips bucket's multi-select). Mirrors deleteMatches: each delete runs
     // server-side first — sequentially, bounded by the small selection size — then all removals land
-    // in ONE state update with a single counts refresh. A failed delete is skipped so the rest still
-    // go, and a reconcile reload follows; a delete that timed out stops the rest (see
-    // isRequestTimeout).
+    // in ONE state update with a single counts refresh. A failed or timed-out delete is skipped so the
+    // rest still go, as in deleteMatches, and a reconcile reload follows.
     deleteClips: async (ids) => {
       const removed = new Set<number>();
       let failed = false;
@@ -324,9 +314,8 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
         try {
           await apiDeleteClip(id);
           removed.add(id);
-        } catch (err) {
+        } catch {
           failed = true; // skip this one; the rest still delete
-          if (isRequestTimeout(err)) break;
         }
       }
       // Started only after invalidatePendingLoad below, which would otherwise drop it as stale.
