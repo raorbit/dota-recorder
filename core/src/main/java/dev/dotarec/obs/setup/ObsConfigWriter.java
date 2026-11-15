@@ -171,10 +171,10 @@ public class ObsConfigWriter implements EncoderFallback {
      * Intel GPU, and AMF after a check that never opens an encode session, while its own x264
      * fallback only replaces an encoder it didn't register. When the one it offers then fails to
      * open, every record start shows an error dialog in OBS and never starts the output, restart or
-     * not. {@link dev.dotarec.fsm.MatchFsm} calls this once starts keep failing that way, then
-     * restarts OBS so the relaunched one loads x264. The profile names the one token as both the
-     * recording and the streaming encoder (the default Stream quality records with the latter), so
-     * both switch.
+     * not. {@link dev.dotarec.fsm.MatchFsm} calls this once a second run of OBS in a row fails that
+     * way, then restarts OBS so the relaunched one loads x264. The profile names the one token as
+     * both the recording and the streaming encoder (the default Stream quality records with the
+     * latter), so both switch.
      *
      * <p>Nothing is switched while OBS can't record into the profile's video folder at all: the
      * folder is missing (an unplugged drive), or its drive has under {@link #OBS_MIN_FREE_BYTES}
