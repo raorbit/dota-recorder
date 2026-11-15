@@ -384,14 +384,17 @@ async function postJsonBody<TBody, TResult>(path: string, body: TBody): Promise<
 // so. So this only bounds a core that stopped answering, with room to spare over that half minute.
 const DELETE_TIMEOUT_MS = 90_000;
 
-// Sends a delete. A refusal throws with the core's own reason where it gave one, like putJson: the
-// delete-failure banner shows it.
-async function sendDelete(path: string): Promise<Response> {
+// Sends a delete. Resolves null when the core has no such row (404): it is gone already (deleted
+// earlier, from another view or by a delete the core had queued, or swept by retention), which is what
+// the delete asked for. Any other refusal throws with the core's own reason where it gave one, like
+// putJson: the delete-failure banner shows it.
+async function sendDelete(path: string): Promise<Response | null> {
   const res = await fetch(`${bridgeBase()}${path}`, {
     method: 'DELETE',
     headers: { Accept: 'application/json', ...authHeaders() },
     signal: AbortSignal.timeout(DELETE_TIMEOUT_MS),
   });
+  if (res.status === 404) return null;
   if (!res.ok) {
     const detail = await errorBodyMessage(res);
     throw new Error(detail ?? `DELETE ${path} failed: ${res.status} ${res.statusText}`);
@@ -651,10 +654,11 @@ export function createClip(
 // (see MatchDeleteOutcome); its clip.deleted frame then says it is done.
 export type ClipDeleteOutcome = 'deleted' | 'queued';
 
-// Permanently deletes a clip (DELETE /clips/{id}): unlinks the .mp4 then drops the row.
+// Permanently deletes a clip (DELETE /clips/{id}): unlinks the .mp4 then drops the row. A clip the
+// core no longer has counts as deleted.
 export async function deleteClip(clipId: number): Promise<ClipDeleteOutcome> {
   const res = await sendDelete(`/clips/${clipId}`);
-  return res.status === 202 ? 'queued' : 'deleted';
+  return res !== null && res.status === 202 ? 'queued' : 'deleted';
 }
 
 // Toggles the star on a match (PATCH /matches/{id}) and returns the updated row.
@@ -682,9 +686,11 @@ export type MatchDeleteOutcome = 'deleted' | 'stubbed' | 'queued';
 // Returns the server's outcome so the store can mirror the AUTHORITATIVE branch: the server decides
 // stub-vs-delete from the clip table under its maintenance lock, and the store's own clip list can
 // lag it (a clip created in the ~200ms before its clip.created reload lands). Null when the body is
-// missing/unrecognized (an older core) — the caller then falls back to its local guess.
+// missing/unrecognized (an older core) — the caller then falls back to its local guess. A recording
+// the core no longer has counts as deleted: it has no row left to keep.
 export async function deleteMatch(id: number): Promise<MatchDeleteOutcome | null> {
   const res = await sendDelete(`/matches/${id}`);
+  if (res === null) return 'deleted';
   if (res.status === 202) return 'queued';
   try {
     const body: unknown = await res.json();

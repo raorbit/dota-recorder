@@ -25,6 +25,7 @@ import {
 import { clipLabel } from '../lib/clip-format';
 import { deleteMenuLabel, deleteBlockedLabel, clipDeleteMenuLabel } from '../lib/delete-labels';
 import { deletingRows } from '../lib/library-delete';
+import { menuTargetIds } from '../lib/row-menu';
 import './match-table.css';
 
 function matchesResultFilter(match: MatchSummary, filter: ResultFilter): boolean {
@@ -339,6 +340,8 @@ function ClipTable(): React.JSX.Element {
   };
 
   const visible = useMemo(() => clips.filter((c) => clipMatchesSearch(c, search)), [clips, search]);
+  // The clips still listed, for the row menu: the multi-selection can outlive a clip's row.
+  const listedClipIds = useMemo(() => new Set(clips.map((c) => c.id)), [clips]);
 
   // Row selection, mirroring the match table's onRowSelect: shift = range from the anchor over the
   // CURRENT visible order; Ctrl/Cmd = toggle one; plain = single-select AND open in the player.
@@ -429,11 +432,9 @@ function ClipTable(): React.JSX.Element {
       {rowMenu &&
         (() => {
           // The menu acts on the whole multi-selection when the right-clicked row is part of it;
-          // otherwise just that row (openRowMenu already collapsed the selection to it).
-          const ids =
-            selectedIds.size > 0 && selectedIds.has(rowMenu.clip.id)
-              ? [...selectedIds]
-              : [rowMenu.clip.id];
+          // otherwise just that row (openRowMenu already collapsed the selection to it). Either way,
+          // only on clips still listed (see menuTargetIds).
+          const ids = menuTargetIds(selectedIds, rowMenu.clip.id, (id) => listedClipIds.has(id));
           const count = ids.length;
           const idSet = new Set(ids);
           const targets = clips.filter((c) => idSet.has(c.id));
@@ -972,12 +973,10 @@ export function MatchTable(): React.JSX.Element {
       {rowMenu &&
         (() => {
           // The menu acts on the whole multi-selection when the right-clicked row is part of it;
-          // otherwise just that row (openRowMenu already collapsed the selection to it). `count` drives
-          // the labels and which item set renders.
-          const ids =
-            selectedIds.size > 0 && selectedIds.has(rowMenu.match.id)
-              ? [...selectedIds]
-              : [rowMenu.match.id];
+          // otherwise just that row (openRowMenu already collapsed the selection to it). Either way,
+          // only on recordings still listed (see menuTargetIds). `count` drives the labels and which
+          // item set renders.
+          const ids = menuTargetIds(selectedIds, rowMenu.match.id, (id) => matchById.has(id));
           const count = ids.length;
           const targets = ids
             .map((id) => matchById.get(id))
