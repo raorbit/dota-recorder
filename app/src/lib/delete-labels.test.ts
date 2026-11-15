@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { deleteMenuLabel, deleteBlockedLabel, clipDeleteMenuLabel } from './delete-labels';
+import {
+  deleteMenuLabel,
+  deleteBlockedLabel,
+  clipDeleteMenuLabel,
+  deleteFailureMessage,
+} from './delete-labels';
 
 describe('deleteMenuLabel', () => {
   it('a clipless recording gets a plain delete label', () => {
@@ -62,5 +67,30 @@ describe('deleteBlockedLabel', () => {
 
   it('a bulk all-stub selection uses their', () => {
     expect(deleteBlockedLabel(3, 7)).toBe('Delete their 7 clips first');
+  });
+});
+
+describe('deleteFailureMessage', () => {
+  it('says a single delete did not happen, and why', () => {
+    expect(deleteFailureMessage('recording', 1, 1, new Error('No match 7'))).toBe(
+      'The recording was not deleted: No match 7',
+    );
+    expect(deleteFailureMessage('clip', 1, 1, new TypeError('Failed to fetch'))).toBe(
+      'The clip was not deleted: Failed to fetch',
+    );
+  });
+
+  it('counts the rows of a bulk delete that did not go, with the first reason', () => {
+    expect(deleteFailureMessage('recording', 2, 5, new Error('locked'))).toBe(
+      '2 of 5 recordings were not deleted: locked',
+    );
+    expect(deleteFailureMessage('clip', 1, 3, new Error('locked'))).toBe(
+      '1 of 3 clips was not deleted: locked',
+    );
+  });
+
+  it('ends the sentence when there is no reason to give', () => {
+    expect(deleteFailureMessage('clip', 1, 1, new Error(' '))).toBe('The clip was not deleted.');
+    expect(deleteFailureMessage('recording', 1, 1, null)).toBe('The recording was not deleted.');
   });
 });

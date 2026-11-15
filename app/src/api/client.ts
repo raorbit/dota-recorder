@@ -390,7 +390,9 @@ async function delVoid(path: string): Promise<void> {
     signal: AbortSignal.timeout(DELETE_TIMEOUT_MS),
   });
   if (!res.ok) {
-    throw new Error(`DELETE ${path} failed: ${res.status} ${res.statusText}`);
+    // The core's own reason where it gave one, like putJson: the delete-failure banner shows it.
+    const detail = await errorBodyMessage(res);
+    throw new Error(detail ?? `DELETE ${path} failed: ${res.status} ${res.statusText}`);
   }
 }
 
@@ -684,7 +686,9 @@ async function sendMatchDelete(id: number): Promise<MatchDeleteOutcome | null> {
     signal: AbortSignal.timeout(DELETE_TIMEOUT_MS),
   });
   if (!res.ok) {
-    throw new Error(`DELETE /matches/${id} failed: ${res.status} ${res.statusText}`);
+    // The core's own reason where it gave one, as in delVoid.
+    const detail = await errorBodyMessage(res);
+    throw new Error(detail ?? `DELETE /matches/${id} failed: ${res.status} ${res.statusText}`);
   }
   try {
     const body: unknown = await res.json();

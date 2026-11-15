@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { WindowFrame } from './components/WindowFrame';
 import { Sidebar, type SettingsTab } from './components/Sidebar';
 import { DiskWarningBanner } from './components/DiskWarningBanner';
+import { DeleteErrorBanner } from './components/DeleteErrorBanner';
 import { VideoPlayer } from './components/VideoPlayer';
 import { FilterRow } from './components/FilterRow';
 import { MatchTable } from './components/MatchTable';
@@ -54,8 +55,10 @@ export function App(): React.JSX.Element {
         />
 
         <main className="app-main">
-          {/* Sticky low-disk warning, above whichever view is active so it shows everywhere. */}
+          {/* Sticky low-disk warning and delete failure, above whichever view is active so they
+              show everywhere. */}
           <DiskWarningBanner />
+          <DeleteErrorBanner />
           {view === 'library' ? (
             <>
               <VideoPlayer

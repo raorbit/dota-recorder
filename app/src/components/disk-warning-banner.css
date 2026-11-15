@@ -75,3 +75,25 @@
   outline: 2px solid var(--gold);
   outline-offset: 1px;
 }
+
+/* The delete-failure banner (DeleteErrorBanner) is this bar in the --loss tone: it reports a user
+   action that did not happen, not a condition to keep an eye on. */
+.dwb-banner-error {
+  background: rgba(224, 122, 111, 0.1);
+  border-bottom-color: rgba(224, 122, 111, 0.28);
+}
+
+.dwb-banner-error .dwb-icon {
+  background: rgba(224, 122, 111, 0.18);
+  border-color: rgba(224, 122, 111, 0.45);
+  color: var(--loss);
+}
+
+.dwb-banner-error .dwb-text {
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.dwb-banner-error .dwb-dismiss:focus-visible {
+  outline-color: var(--loss);
+}

@@ -473,11 +473,12 @@ function ClipTable(): React.JSX.Element {
                     return;
                   }
                   if (count === 1) {
-                    // deleteClip rethrows on a failed API call; swallow it here (a stale row is
-                    // reconciled by the next load) so it can't surface as an unhandled rejection.
+                    // deleteClip reports a failure in the banner and reloads, then rethrows; swallow
+                    // that here so it can't surface as an unhandled rejection.
                     void deleteClip(rowMenu.clip.id).catch(() => {});
                   } else {
-                    // deleteClips skips any failed delete; the next load() reconciles a straggler.
+                    // deleteClips skips any failed delete and reports them in the banner; its
+                    // reconcile reload settles a straggler.
                     void deleteClips(deletable).catch(() => {});
                     setSelectedIds(new Set<number>());
                   }
@@ -1021,11 +1022,12 @@ export function MatchTable(): React.JSX.Element {
                     return;
                   }
                   if (count === 1) {
-                    // deleteMatch rethrows on a failed API call; swallow it here (a stale row is
-                    // reconciled by the next load) so it can't surface as an unhandled rejection.
+                    // deleteMatch reports a failure in the banner and reloads, then rethrows; swallow
+                    // that here so it can't surface as an unhandled rejection.
                     void deleteMatch(rowMenu.match.id).catch(() => {});
                   } else {
-                    // deleteMatches skips any failed delete; the next load() reconciles a straggler.
+                    // deleteMatches skips any failed delete and reports them in the banner; its
+                    // reconcile reload settles a straggler.
                     void deleteMatches(deletable).catch(() => {});
                     setSelectedIds(new Set<number>());
                   }

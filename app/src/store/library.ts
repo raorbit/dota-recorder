@@ -30,6 +30,7 @@ import {
 import type { Bucket } from './buckets';
 import type { UpdateState } from '../../electron/bridge-contract';
 import { mergeLibraryLoad } from '../lib/library-load';
+import { deleteFailureMessage } from '../lib/delete-labels';
 import {
   applyMatchesDeleted,
   applyMatchVideosDeleted,
@@ -70,6 +71,10 @@ export interface LibraryState {
   // a timed-out one, and its match.deleted / clip.deleted frame reloads the list when it does).
   readonly deletingMatchIds: ReadonlySet<number>;
   readonly deletingClipIds: ReadonlySet<number>;
+  // Why the last recording or clip delete failed, or null. Backs the delete-failure banner; cleared
+  // when the banner is dismissed or another delete starts. A delete that timed out isn't reported:
+  // the core still finishes it once its maintenance lock frees (see isRequestTimeout).
+  readonly deleteError: string | null;
   // The latest low-disk warning: pushed by the core's "error" frame (scope "disk") and seeded from
   // GET /status (storage.lowDisk) on mount/reconnect, or null when none is outstanding. Backs the
   // in-app banner only; the OS notification is the Electron main process's (it outlives the window).
@@ -114,11 +119,12 @@ export interface LibraryState {
   // Bulk-delete several recordings at once (the table's multi-select). Deletes each server-side,
   // then applies the same rule to all survivors and refreshes counts in one shot.
   readonly deleteMatches: (ids: readonly number[]) => Promise<void>;
-  // Permanently delete one clip (the Clips bucket's right-click delete).
+  // Permanently delete one clip (the Clips bucket's right-click delete, and the player strip's).
   readonly deleteClip: (id: number) => Promise<void>;
   // Bulk-delete several clips at once (the Clips bucket's multi-select), mirroring deleteMatches:
   // each deletes server-side, then one state update + one counts refresh for all of them.
   readonly deleteClips: (ids: readonly number[]) => Promise<void>;
+  readonly setDeleteError: (message: string | null) => void;
   readonly setDiskWarning: (warning: DiskWarning | null) => void;
   readonly setUpdate: (update: UpdateState | null) => void;
   // A `silent` reload (reconnect reconciliation, a library frame, a delete's reconcile) refreshes in
@@ -147,6 +153,28 @@ function withoutIds(from: ReadonlySet<number>, ids: Iterable<number>): ReadonlyS
   return next;
 }
 
+// Whether a request gave up on its own timeout (AbortSignal.timeout rejects with a TimeoutError). For
+// a delete that means the core held its maintenance lock (or hung) for all ten minutes, not that it
+// refused: it still finishes the delete once the lock frees, and the frame it sends then reloads the
+// list. So a timeout is reconciled like a failure, but not reported as one.
+function isRequestTimeout(err: unknown): boolean {
+  return (
+    typeof err === 'object' && err !== null && (err as { name?: unknown }).name === 'TimeoutError'
+  );
+}
+
+// The delete-failure banner's message for a delete of `total` recordings or clips that failed with
+// `errors`, as state to merge into the update that ends the delete: none when every one timed out.
+function failureReport(
+  kind: 'recording' | 'clip',
+  errors: readonly unknown[],
+  total: number,
+): { readonly deleteError?: string } {
+  const failures = errors.filter((err) => !isRequestTimeout(err));
+  if (failures.length === 0) return {};
+  return { deleteError: deleteFailureMessage(kind, failures.length, total, failures[0]) };
+}
+
 export const useLibraryStore = create<LibraryState>((set, get) => {
   // Invalidate any load() already in flight so its (possibly pre-mutation) result can't clobber a
   // local mutation that just changed the list — e.g. resurrect a just-deleted row, or revert a
@@ -167,6 +195,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
     loadState: 'idle',
     deletingMatchIds: new Set<number>(),
     deletingClipIds: new Set<number>(),
+    deleteError: null,
     diskWarning: null,
     update: null,
 
@@ -193,6 +222,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
         clipPlayToken: s.clipPlayToken + 1,
       })),
     setStatus: (status) => set({ status }),
+    setDeleteError: (deleteError) => set({ deleteError }),
     setDiskWarning: (diskWarning) => set({ diskWarning }),
     setUpdate: (update) => set({ update }),
 
@@ -238,11 +268,11 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
     // SERVER reports it took (its decision is made from the clip table under its maintenance lock;
     // our own clips list can lag it by the ~200ms clip.created reload window, so guessing locally can
     // drop a row the server stubbed). Only a missing outcome (older core) falls back to the local
-    // guess. The row is in deletingMatchIds until the delete settles. Rethrows so the caller can
-    // surface a failure.
+    // guess. The row is in deletingMatchIds until the delete settles, and a failure is reported in
+    // the banner (deleteError). Rethrows so the caller can tell a failure.
     deleteMatch: async (id) => {
       const deleted = new Set([id]);
-      set((s) => ({ deletingMatchIds: withIds(s.deletingMatchIds, deleted) }));
+      set((s) => ({ deletingMatchIds: withIds(s.deletingMatchIds, deleted), deleteError: null }));
       let outcome: Awaited<ReturnType<typeof apiDeleteMatch>>;
       try {
         outcome = await apiDeleteMatch(id);
@@ -250,7 +280,10 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
         // Failed, or gave up while the core waits out an archive pass (it then finishes the delete
         // and its match.deleted frame reloads the list). Reconcile with the server either way, so a
         // delete that did land never leaves its row listed.
-        set((s) => ({ deletingMatchIds: withoutIds(s.deletingMatchIds, deleted) }));
+        set((s) => ({
+          deletingMatchIds: withoutIds(s.deletingMatchIds, deleted),
+          ...failureReport('recording', [err], 1),
+        }));
         void get().load({ silent: true });
         throw err;
       }
@@ -280,28 +313,32 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
     // So is one that timed out behind a long archive pass: the core still finishes it once its
     // maintenance lock frees, and the rows sent after it then too (the client's delete queue sends
     // them one at a time, so waiting on the lock holds one connection to the core, not one per row).
-    // Every row is in deletingMatchIds from the start until the whole run is done.
+    // Every row is in deletingMatchIds from the start until the whole run is done, and the run's
+    // failures are reported in the banner together.
     deleteMatches: async (ids) => {
-      set((s) => ({ deletingMatchIds: withIds(s.deletingMatchIds, ids) }));
+      set((s) => ({ deletingMatchIds: withIds(s.deletingMatchIds, ids), deleteError: null }));
       const removed = new Set<number>();
       const stubbed = new Set<number>();
       const unknown = new Set<number>(); // no outcome in the response (older core) -> local guess
-      let failed = false;
+      const errors: unknown[] = [];
       for (const id of ids) {
         try {
           const outcome = await apiDeleteMatch(id);
           (outcome === 'deleted' ? removed : outcome === 'stubbed' ? stubbed : unknown).add(id);
-        } catch {
-          failed = true; // skip this one; the rest still delete
+        } catch (err) {
+          errors.push(err); // skip this one; the rest still delete
         }
       }
       // Reconcile a failed (or timed-out, see deleteMatch) delete with the server's list. Started
       // only after invalidatePendingLoad below, which would otherwise drop it as stale.
       const reconcile = (): void => {
-        if (failed) void get().load({ silent: true });
+        if (errors.length > 0) void get().load({ silent: true });
       };
       if (removed.size === 0 && stubbed.size === 0 && unknown.size === 0) {
-        set((s) => ({ deletingMatchIds: withoutIds(s.deletingMatchIds, ids) }));
+        set((s) => ({
+          deletingMatchIds: withoutIds(s.deletingMatchIds, ids),
+          ...failureReport('recording', errors, ids.length),
+        }));
         reconcile();
         return;
       }
@@ -312,6 +349,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
         return {
           ...applyRecordingsDeleted(next, unknown),
           deletingMatchIds: withoutIds(s.deletingMatchIds, ids),
+          ...failureReport('recording', errors, ids.length),
         };
       });
       reconcile();
@@ -325,14 +363,19 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
     // Permanently delete one clip (the Clips bucket's right-click delete, and the player strip's).
     // Pessimistic like deleteMatch: server-side first, then drop the row locally (clearing a clip
     // auto-play that pointed at it) and refresh the Clips badge. The clip is in deletingClipIds until
-    // the delete settles. Rethrows so the caller (the player, for its own strip) can tell a failure.
+    // the delete settles, and a failure is reported in the banner and reconciled as in deleteMatch.
+    // Rethrows so the caller (the player, for its own strip) can tell a failure.
     deleteClip: async (id) => {
       const deleted = new Set([id]);
-      set((s) => ({ deletingClipIds: withIds(s.deletingClipIds, deleted) }));
+      set((s) => ({ deletingClipIds: withIds(s.deletingClipIds, deleted), deleteError: null }));
       try {
         await apiDeleteClip(id);
       } catch (err) {
-        set((s) => ({ deletingClipIds: withoutIds(s.deletingClipIds, deleted) }));
+        set((s) => ({
+          deletingClipIds: withoutIds(s.deletingClipIds, deleted),
+          ...failureReport('clip', [err], 1),
+        }));
+        void get().load({ silent: true });
         throw err;
       }
       invalidatePendingLoad();
@@ -351,25 +394,29 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
     // server-side first — sequentially, bounded by the small selection size — then all removals land
     // in ONE state update with a single counts refresh. A failed or timed-out delete is skipped so the
     // rest still go, as in deleteMatches, and a reconcile reload follows. Every clip is in
-    // deletingClipIds from the start until the whole run is done.
+    // deletingClipIds from the start until the whole run is done, and the run's failures are reported
+    // in the banner together.
     deleteClips: async (ids) => {
-      set((s) => ({ deletingClipIds: withIds(s.deletingClipIds, ids) }));
+      set((s) => ({ deletingClipIds: withIds(s.deletingClipIds, ids), deleteError: null }));
       const removed = new Set<number>();
-      let failed = false;
+      const errors: unknown[] = [];
       for (const id of ids) {
         try {
           await apiDeleteClip(id);
           removed.add(id);
-        } catch {
-          failed = true; // skip this one; the rest still delete
+        } catch (err) {
+          errors.push(err); // skip this one; the rest still delete
         }
       }
       // Started only after invalidatePendingLoad below, which would otherwise drop it as stale.
       const reconcile = (): void => {
-        if (failed) void get().load({ silent: true });
+        if (errors.length > 0) void get().load({ silent: true });
       };
       if (removed.size === 0) {
-        set((s) => ({ deletingClipIds: withoutIds(s.deletingClipIds, ids) }));
+        set((s) => ({
+          deletingClipIds: withoutIds(s.deletingClipIds, ids),
+          ...failureReport('clip', errors, ids.length),
+        }));
         reconcile();
         return;
       }
@@ -377,6 +424,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
       set((s) => ({
         ...applyClipsDeleted(s, removed),
         deletingClipIds: withoutIds(s.deletingClipIds, ids),
+        ...failureReport('clip', errors, ids.length),
       }));
       reconcile();
       try {

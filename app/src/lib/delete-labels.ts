@@ -46,3 +46,20 @@ export function deleteBlockedLabel(matchCount: number, clipCount: number): strin
   const whose = matchCount === 1 ? 'its' : 'their';
   return `Delete ${whose} ${clipCount} clip${clipCount === 1 ? '' : 's'} first`;
 }
+
+/**
+ * The delete-failure banner's line: `failed` of `total` recordings or clips were not deleted, with
+ * the first failure's reason (the core's own message where it sent one). Same wording as the Go
+ * remake's banner, which takes over this data folder.
+ */
+export function deleteFailureMessage(
+  kind: 'recording' | 'clip',
+  failed: number,
+  total: number,
+  reason: unknown,
+): string {
+  const what = total === 1 ? `The ${kind}` : `${failed} of ${total} ${kind}s`;
+  const verb = total === 1 || failed === 1 ? 'was' : 'were';
+  const detail = (reason instanceof Error ? reason.message : String(reason ?? '')).trim();
+  return `${what} ${verb} not deleted${detail === '' ? '.' : `: ${detail}`}`;
+}
