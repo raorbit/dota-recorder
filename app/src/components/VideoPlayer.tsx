@@ -679,7 +679,8 @@ export function VideoPlayer({
         setClips((prev) => prev.filter((c) => c.id !== clip.id));
       }
     } catch {
-      /* leave the row; the next clip.* frame / re-select reconciles */
+      // Leave the row: the banner says why (unless the delete only timed out, which the core still
+      // finishes), and the next clip.* frame / re-select reconciles.
     }
   }
 
@@ -1123,7 +1124,8 @@ export function VideoPlayer({
               role="menuitem"
               onClick={() => {
                 if (clipMenuDeleteArmed) {
-                  // onDeleteClip swallows its own failure (the strip row stays for a retry).
+                  // onDeleteClip swallows its own failure (the strip row stays for a retry, and the
+                  // banner says why).
                   void onDeleteClip(clipMenu.clip);
                   closeClipMenu();
                 } else {

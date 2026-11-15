@@ -115,4 +115,19 @@ describe('delete requests', () => {
       'http://127.0.0.1:3224/matches',
     ]);
   });
+
+  it("fail with the core's reason when it gives one, for the delete-failure banner", async () => {
+    const refusal = (status: number, statusText: string, body: string) => () =>
+      Promise.resolve({ ok: false, status, statusText, text: async () => body });
+    fetchMock
+      .mockImplementationOnce(refusal(404, 'Not Found', JSON.stringify({ message: 'No match 7' })))
+      .mockImplementationOnce(refusal(404, 'Not Found', JSON.stringify({ message: 'No clip 8' })))
+      .mockImplementationOnce(refusal(500, 'Internal Server Error', ''));
+
+    await expect(client.deleteMatch(7)).rejects.toThrow('No match 7');
+    await expect(client.deleteClip(8)).rejects.toThrow('No clip 8');
+    await expect(client.deleteClip(9)).rejects.toThrow(
+      'DELETE /clips/9 failed: 500 Internal Server Error',
+    );
+  });
 });

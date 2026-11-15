@@ -123,6 +123,7 @@ beforeEach(() => {
     loadState: 'idle',
     deletingMatchIds: new Set<number>(),
     deletingClipIds: new Set<number>(),
+    deleteError: null,
     diskWarning: null,
   });
   fetchMock = vi.fn((url: unknown) => {
@@ -407,6 +408,74 @@ describe('startLibrary storage-events wiring', () => {
     await bulk;
     expect(deletingClips()).toEqual([]);
     expect(clipIds()).toEqual([]);
+    teardown();
+  });
+
+  it('says why a delete was not done, until the next delete starts', async () => {
+    serveLibrary(
+      { matches: [{ id: 7 }, { id: 8 }], clips: [{ id: 5, parentMatchId: 7 }] },
+      (url) => (url.endsWith('/matches/8') ? deleted() : refused()),
+    );
+    const teardown = startLibrary();
+    await flush();
+    const deleteError = (): string | null => useLibraryStore.getState().deleteError;
+
+    await expect(useLibraryStore.getState().deleteMatch(7)).rejects.toThrow();
+    expect(deleteError()).toBe(
+      'The recording was not deleted: DELETE /matches/7 failed: 500 Internal Server Error',
+    );
+    await useLibraryStore.getState().deleteMatch(8);
+    expect(deleteError()).toBeNull();
+
+    await expect(useLibraryStore.getState().deleteClip(5)).rejects.toThrow();
+    expect(deleteError()).toBe(
+      'The clip was not deleted: DELETE /clips/5 failed: 500 Internal Server Error',
+    );
+    teardown();
+  });
+
+  it('counts the rows of a bulk delete that were not done, leaving out ones that timed out', async () => {
+    serveLibrary(
+      {
+        matches: [{ id: 7 }, { id: 8 }, { id: 9 }],
+        clips: [5, 6, 7].map((id) => ({ id, parentMatchId: 7 })),
+      },
+      (url) =>
+        url.endsWith('/matches/8') || url.endsWith('/clips/7')
+          ? deleted()
+          : url.endsWith('/clips/6')
+            ? timedOut()
+            : refused(),
+    );
+    const teardown = startLibrary();
+    await flush();
+    const deleteError = (): string | null => useLibraryStore.getState().deleteError;
+
+    await useLibraryStore.getState().deleteMatches([7, 8, 9]);
+    expect(deleteError()).toBe(
+      '2 of 3 recordings were not deleted: DELETE /matches/7 failed: 500 Internal Server Error',
+    );
+    await useLibraryStore.getState().deleteClips([5, 6, 7]);
+    expect(deleteError()).toBe(
+      '1 of 3 clips was not deleted: DELETE /clips/5 failed: 500 Internal Server Error',
+    );
+    teardown();
+  });
+
+  it('does not report a delete that timed out: the core still finishes it', async () => {
+    serveLibrary(
+      { matches: [{ id: 7 }, { id: 8 }], clips: [5, 6].map((id) => ({ id, parentMatchId: 7 })) },
+      timedOut,
+    );
+    const teardown = startLibrary();
+    await flush();
+
+    await expect(useLibraryStore.getState().deleteMatch(7)).rejects.toThrow();
+    await useLibraryStore.getState().deleteMatches([8]);
+    await expect(useLibraryStore.getState().deleteClip(5)).rejects.toThrow();
+    await useLibraryStore.getState().deleteClips([6]);
+
+    expect(useLibraryStore.getState().deleteError).toBeNull();
     teardown();
   });
 
