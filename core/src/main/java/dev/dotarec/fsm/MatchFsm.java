@@ -164,9 +164,12 @@ public class MatchFsm {
     private boolean lastRenderBroken;
 
     /**
-     * How many starts in a row OBS may accept and never start before an auto-picked hardware encoder
-     * is switched to x264. The first one restarts OBS, which clears a dialog left open or a lost
-     * renderer; a fresh OBS failing the same way points at the encoder.
+     * How many runs of OBS in a row may accept a start and never start it before an auto-picked
+     * hardware encoder is switched to x264. The first one restarts OBS, which clears a dialog left
+     * open or a lost renderer; a fresh OBS failing the same way points at the encoder. So a run
+     * counts once however often it fails: while the restarter refuses (it spaces restarts out), the
+     * same OBS fails again, which says nothing new. A video folder OBS can't record into fails every
+     * run too, before any encoder opens; the fallback checks for that itself.
      */
     static final int UNCONFIRMED_STARTS_BEFORE_X264 = 2;
 
@@ -174,10 +177,17 @@ public class MatchFsm {
     private EncoderFallback encoderFallback = EncoderFallback.NONE;
 
     /**
-     * Starts in a row OBS accepted but never confirmed: back to zero on a confirmed start, and after
-     * each time {@link #encoderFallback} is asked.
+     * Runs of OBS in a row that accepted a start but never confirmed it: back to zero on a confirmed
+     * start, and after each time {@link #encoderFallback} is asked.
      */
     private int unconfirmedStarts;
+
+    /**
+     * The OBS process (null when it couldn't be named) and the connection count of the last run
+     * {@link #unconfirmedStarts} counted.
+     */
+    private ObsProcess unconfirmedOnProcess;
+    private long unconfirmedOnEpoch;
 
     // Single constructor: Spring auto-selects it with no @Autowired needed, and the clocks arrive as one
     // injected TimeSource bean (ClockConfig) instead of per-clock test-seam ctor overloads. Those
@@ -670,23 +680,13 @@ public class MatchFsm {
             confirmedNanos = time.nanoTime();
             unconfirmedStarts = 0;
         } catch (ObsStartNotConfirmedException e) {
-            // OBS took the request and did nothing: its outputs are disabled (a dialog left open),
-            // its renderer is gone, or its encoder can't open. A fresh OBS fixes the first two.
+            // Which OBS took the request, read before anything else: the start held the OBS
+            // controller through its wait, and a reconnect takes a whole handshake, so this is
+            // still the connection StartRecord went over.
+            ObsProcess startedOn = obs.connectedObsProcess();
+            long startedOnEpoch = obs.connectionEpoch();
             this.state = MatchState.IDLE;
-            log.warn("Recording not confirmed by OBS: {}; restarting OBS", e.getMessage());
-            // The third fails the fresh OBS too: OBS can offer a hardware encoder it can't open (it
-            // offers QSV on any Intel GPU), and that one fails every record start. So once starts
-            // keep failing, an auto-picked hardware encoder is switched to x264 in the profile first,
-            // and the restart below relaunches OBS on it (or a later failure's restart does, if the
-            // restarter refuses this one for now). The switch is one-way for the rest of the process,
-            // and the restart is the rate-limited one every failure asks for, so this can't loop.
-            // Counting from zero again after asking means a streak that goes on asks again every
-            // second failure, not on every one.
-            if (++unconfirmedStarts >= UNCONFIRMED_STARTS_BEFORE_X264) {
-                unconfirmedStarts = 0;
-                encoderFallback.fallBackToX264();
-            }
-            restartObs("it accepted StartRecord but never started recording");
+            startNotConfirmed(e, startedOn, startedOnEpoch);
             return;
         } catch (ObsException e) {
             this.state = MatchState.IDLE;
@@ -738,6 +738,53 @@ public class MatchFsm {
         this.session = s;
         this.state = MatchState.RECORDING;
         log.info("Recording started (surrogate {}), anchor={}", s.getSurrogateId(), anchor);
+    }
+
+    /**
+     * A start OBS accepted and never confirmed; {@code startedOn} and {@code epoch} are the OBS
+     * process and the connection count it went to.
+     *
+     * <p>OBS took the request and did nothing: its outputs are disabled (a dialog left open), its
+     * renderer is gone, or its encoder can't open. A fresh OBS fixes the first two, so OBS is
+     * restarted. The third fails the fresh OBS too: OBS can offer a hardware encoder it can't open
+     * (it offers QSV on any Intel GPU), and that one fails every record start. So once a second run
+     * of OBS in a row fails this way (a run counts once, see {@link #UNCONFIRMED_STARTS_BEFORE_X264}),
+     * an auto-picked hardware encoder is switched to x264 in the profile first, and the restart
+     * relaunches OBS on it (or a later failure's restart does, if the restarter refuses this one for
+     * now). The switch is one-way for the rest of the process, and the restart is the rate-limited
+     * one every failure asks for, so this can't loop. Counting from zero again after asking means a
+     * streak that goes on asks again every second run, not on every failure.
+     */
+    private void startNotConfirmed(
+            ObsStartNotConfirmedException e, ObsProcess startedOn, long epoch) {
+        log.warn("Recording not confirmed by OBS: {}; restarting OBS", e.getMessage());
+        if (unconfirmedStarts == 0 || startedOnAnotherObs(startedOn, epoch)) {
+            unconfirmedStarts++;
+            unconfirmedOnProcess = startedOn;
+            unconfirmedOnEpoch = epoch;
+        }
+        if (unconfirmedStarts >= UNCONFIRMED_STARTS_BEFORE_X264) {
+            unconfirmedStarts = 0;
+            encoderFallback.fallBackToX264();
+        }
+        restartObs("it accepted StartRecord but never started recording");
+    }
+
+    /**
+     * Whether a start that went to {@code process} over connection {@code epoch} reached another run
+     * of OBS than the last one {@link #unconfirmedStarts} counted. Told as {@link #obsWasRelaunched}
+     * tells a relaunch: by the OBS process when the counted one was named (another one is connected
+     * now, or, when the one connected can't be named, the counted one no longer runs), else by a
+     * newer connection, which a websocket blip to the same OBS makes too.
+     */
+    private boolean startedOnAnotherObs(ObsProcess process, long epoch) {
+        if (unconfirmedOnProcess == null) {
+            return epoch != unconfirmedOnEpoch;
+        }
+        if (process != null) {
+            return !process.equals(unconfirmedOnProcess);
+        }
+        return !obs.isObsRunning(unconfirmedOnProcess);
     }
 
     private void tagAndObserve(GsiFrame frame) {

@@ -18,9 +18,11 @@ import dev.dotarec.data.TestDb;
 import dev.dotarec.fsm.MatchFsmTest.FakeObs;
 import dev.dotarec.fsm.MatchFsmTest.FakeThumbs;
 import dev.dotarec.gsi.GsiFrame;
+import dev.dotarec.obs.ObsProcess;
 import dev.dotarec.obs.setup.EncoderFallback;
 import dev.dotarec.tagger.EventTagger;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
@@ -30,9 +32,9 @@ import org.junit.jupiter.api.io.TempDir;
 
 /**
  * A hardware encoder OBS offers but can't open: OBS accepts every StartRecord and never starts the
- * output, before and after a restart. The FSM restarts OBS on the first such start; on the second in
- * a row it first asks {@link EncoderFallback} to switch an auto-picked hardware encoder to x264, so
- * the OBS that restart relaunches records with x264.
+ * output, before and after a restart. The FSM restarts OBS on the first such start; once a second
+ * run of OBS in a row fails the same way, it first asks {@link EncoderFallback} to switch an
+ * auto-picked hardware encoder to x264, so the OBS that restart relaunches records with x264.
  */
 class MatchFsmEncoderFallbackTest {
 
@@ -44,6 +46,11 @@ class MatchFsmEncoderFallbackTest {
     private final List<String> asked = new ArrayList<>();
     /** What the fallback answers; false models a Settings pick it keeps, or x264 already. */
     private boolean switches = true;
+    /**
+     * What the restarter answers. True ends OBS, and Electron relaunches it: a new process, reached
+     * over a new connection. False models a restart it refuses, since it spaces restarts out.
+     */
+    private boolean restarts = true;
     private final AtomicLong nanos = new AtomicLong(5_000_000_000_000L);
     private FakeObs obs;
     private MatchFsm fsm;
@@ -52,6 +59,7 @@ class MatchFsmEncoderFallbackTest {
     void setUp(@TempDir Path dir) throws Exception {
         var ds = TestDb.migrated(dir);
         obs = new FakeObs();
+        obs.process = new ObsProcess(4_242L, Instant.parse("2026-11-15T18:00:00Z"));
         SettingsStore settings = mock(SettingsStore.class);
         when(settings.get()).thenReturn(new SettingsStore.Settings());
         fsm = new MatchFsm(obs, obs, new FakeThumbs(), new EventTagger(), new MatchRepository(ds),
@@ -60,12 +68,28 @@ class MatchFsmEncoderFallbackTest {
                 new ObjectMapper(), new TimeSource(nanos::get, System::currentTimeMillis),
                 reason -> {
                     asked.add("restart");
-                    return true;
+                    if (restarts) {
+                        relaunchObs();
+                    }
+                    return restarts;
                 });
         fsm.setEncoderFallback(() -> {
             asked.add("x264");
             return switches;
         });
+    }
+
+    /**
+     * The OBS that was running exits and a new one answers over a new connection. A process the
+     * core couldn't name stays unnamed in its relaunch.
+     */
+    private void relaunchObs() {
+        if (obs.process != null) {
+            obs.exited.add(obs.process);
+            obs.process = new ObsProcess(
+                    obs.process.pid() + 1, obs.process.startedAt().plusSeconds(60));
+        }
+        obs.epoch++;
     }
 
     private GsiFrame playing(long matchId) {
@@ -74,7 +98,7 @@ class MatchFsmEncoderFallbackTest {
     }
 
     @Test
-    void secondStartInARowThatNeverStarts_switchesToX264_beforeTheRestart() {
+    void aSecondRunOfObsThatNeverStarts_switchesToX264_beforeTheRestart() {
         obs.startNotConfirmed = true;
 
         fsm.onFrame(playing(MATCH));
@@ -110,7 +134,7 @@ class MatchFsmEncoderFallbackTest {
     }
 
     @Test
-    void startsThatKeepFailing_askEverySecondFailure_notEveryOne() {
+    void startsThatKeepFailing_askEverySecondRun_notOnEveryFailure() {
         // The fallback keeps a Settings pick, so the starts go on failing; the user may set the
         // encoder to Auto meanwhile, so it is asked again, but not on every failure.
         switches = false;
@@ -139,5 +163,73 @@ class MatchFsmEncoderFallbackTest {
         fsm.onFrame(playing(MATCH));
 
         assertThat(asked).containsExactly("restart", "x264", "restart");
+    }
+
+    @Test
+    void theSameObsFailingAgain_afterARefusedRestart_isNoFreshObsFailing() {
+        // A dialog left open fails every start until OBS is restarted, and the restarter spaces
+        // restarts out, so the same OBS keeps failing in the meantime.
+        restarts = false;
+        obs.startNotConfirmed = true;
+
+        for (int i = 0; i < 3; i++) {
+            fsm.onFrame(playing(MATCH));
+        }
+        assertThat(asked).containsExactly("restart", "restart", "restart");
+
+        // A restart goes through at last, and the OBS it relaunches fails the same way.
+        restarts = true;
+        fsm.onFrame(playing(MATCH));
+        fsm.onFrame(playing(MATCH));
+
+        assertThat(asked).containsExactly(
+                "restart", "restart", "restart", "restart", "x264", "restart");
+    }
+
+    @Test
+    void aReconnectToTheSameObs_isNoFreshObs() {
+        restarts = false;
+        obs.startNotConfirmed = true;
+        fsm.onFrame(playing(MATCH));
+
+        obs.epoch++; // a websocket blip: a new connection, to the same OBS process
+        fsm.onFrame(playing(MATCH));
+
+        assertThat(asked).containsExactly("restart", "restart");
+    }
+
+    @Test
+    void whereTheObsCantBeNamed_aNewConnectionTellsTheRuns() {
+        obs.process = null;
+        restarts = false;
+        obs.startNotConfirmed = true;
+        fsm.onFrame(playing(MATCH));
+        fsm.onFrame(playing(MATCH));
+        assertThat(asked).as("still the same connection").containsExactly("restart", "restart");
+
+        obs.epoch++; // reconnected, to the OBS a later restart relaunched
+        fsm.onFrame(playing(MATCH));
+
+        assertThat(asked).containsExactly("restart", "restart", "x264", "restart");
+    }
+
+    @Test
+    void anObsThatCantBeNamed_isAnotherRun_onceTheCountedOneHasExited() {
+        restarts = false;
+        obs.startNotConfirmed = true;
+        ObsProcess counted = obs.process;
+        fsm.onFrame(playing(MATCH));
+
+        // Reconnected, to an OBS the process scan couldn't name.
+        obs.process = null;
+        obs.epoch++;
+        fsm.onFrame(playing(MATCH));
+        assertThat(asked).as("the counted OBS still runs, so this is it").containsExactly(
+                "restart", "restart");
+
+        obs.exited.add(counted);
+        fsm.onFrame(playing(MATCH));
+
+        assertThat(asked).containsExactly("restart", "restart", "x264", "restart");
     }
 }
