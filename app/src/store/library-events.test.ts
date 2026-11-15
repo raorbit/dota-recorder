@@ -161,6 +161,43 @@ describe('startLibrary storage-events wiring', () => {
     teardown();
   });
 
+  it('applies the reconcile reload of a bulk delete in which one delete failed', async () => {
+    // Server state: 7's delete gives up client-side behind an archive pass, but the core still
+    // finishes it; 8's succeeds. Only the reconcile reload can show that 7 went too.
+    let serverMatches = [{ id: 7 }, { id: 8 }, { id: 9 }];
+    fetchMock.mockImplementation((url: unknown, init?: { method?: string }) => {
+      const u = String(url);
+      if (init?.method === 'DELETE') {
+        serverMatches = serverMatches.filter((m) => !u.endsWith(`/matches/${m.id}`));
+        return u.endsWith('/matches/7')
+          ? Promise.reject(new DOMException('The operation timed out.', 'TimeoutError'))
+          : Promise.resolve({ ok: true, json: async () => ({ outcome: 'deleted' }) });
+      }
+      const json = u.includes('/buckets/counts')
+        ? EMPTY_COUNTS
+        : u.includes('/status')
+          ? IDLE_STATUS
+          : u.includes('/clips')
+            ? []
+            : serverMatches;
+      return Promise.resolve({
+        ok: true,
+        json: async () => json,
+        text: async () => JSON.stringify(json),
+      });
+    });
+    const ids = (): number[] => useLibraryStore.getState().matches.map((m) => m.id);
+    const teardown = startLibrary();
+    await flush();
+    expect(ids()).toEqual([7, 8, 9]);
+
+    await useLibraryStore.getState().deleteMatches([7, 8]);
+    await flush();
+
+    expect(ids()).toEqual([9]);
+    teardown();
+  });
+
   it('reconciles with a refetch when the socket reconnects', async () => {
     const teardown = startLibrary();
     await flush();
