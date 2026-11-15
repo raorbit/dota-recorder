@@ -20,8 +20,9 @@ import java.util.function.BooleanSupplier;
  * until then this hand-rolled mapper is the source of truth for matches access.
  *
  * <p>Covers the browse UI (filtered list + per-bucket counts + single-match detail), the star
- * toggle, and the retention sweep helpers (sum of video bytes, oldest-first sweep candidates, and
- * nulling a pruned row's {@code video_path}/{@code thumb_path} while keeping the row).
+ * toggle, the retention sweep helpers (sum of video bytes, oldest-first sweep candidates, and
+ * nulling a pruned row's {@code video_path}/{@code thumb_path} while keeping the row), and the
+ * one-time release of the rows the orphan import adopted before the adoption floors.
  */
 @Repository
 public class MatchRepository {
@@ -208,6 +209,30 @@ public class MatchRepository {
         }
     }
 
+    /**
+     * Deletes a row the orphan import adopted, on a caller-supplied connection, while it is still an
+     * unstarred {@code gsi_only} row pointing at {@code videoPath} with no markers, pauses or clips
+     * (nothing would cascade away with it). Leaves the file on disk, unlike the caller of
+     * {@link #delete}.
+     *
+     * @return true only if the row was deleted
+     */
+    public boolean deleteAdopted(Connection conn, long id, String videoPath) throws SQLException {
+        String sql = "DELETE FROM matches "
+                + "WHERE id = ? AND video_path = ? AND starred = 0 AND enrichment_state = 'gsi_only' "
+                + "AND NOT EXISTS (SELECT 1 FROM markers WHERE match_id = ?) "
+                + "AND NOT EXISTS (SELECT 1 FROM pauses WHERE match_id = ?) "
+                + "AND NOT EXISTS (SELECT 1 FROM clips WHERE parent_match_id = ?)";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, id);
+            ps.setString(2, videoPath);
+            ps.setLong(3, id);
+            ps.setLong(4, id);
+            ps.setLong(5, id);
+            return ps.executeUpdate() == 1;
+        }
+    }
+
     // ---- retention helpers -------------------------------------------------
 
     /**
@@ -233,6 +258,30 @@ public class MatchRepository {
     }
 
     /**
+     * The unstarred match rows the boot's orphan import adopted ({@code gsi_only}: nothing else ever
+     * writes that state) before {@code createdBeforeMs} that still hold a video, oldest first.
+     */
+    public List<MatchSummary> findAdoptedBefore(long createdBeforeMs) {
+        String sql = "SELECT " + COLUMNS + " FROM matches "
+                + "WHERE record_kind = 'match' AND enrichment_state = 'gsi_only' "
+                + "AND video_path IS NOT NULL AND starred = 0 AND created_at < ? "
+                + "ORDER BY created_at ASC, id ASC";
+        List<MatchSummary> out = new ArrayList<>();
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, createdBeforeMs);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    out.add(map(rs));
+                }
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to query adopted orphan rows", e);
+        }
+        return out;
+    }
+
+    /**
      * Marks a row as pruned: nulls {@code video_path}, {@code thumb_path} and {@code file_size_bytes}
      * while KEEPING the row (so markers/stats survive as a browsable record without a playable clip).
      *
@@ -248,6 +297,28 @@ public class MatchRepository {
             return ps.executeUpdate();
         } catch (SQLException e) {
             throw new IllegalStateException("Failed to null video path for match " + id, e);
+        }
+    }
+
+    /**
+     * Drops the video of a row the orphan import adopted like {@link #nullVideoPath}, keeping the row
+     * and what hangs off it, on a caller-supplied connection: only while it is still an unstarred
+     * {@code gsi_only} row pointing at {@code videoPath}, and none of its clips is still to be cut from
+     * that video ({@code pending} or {@code generating}). Leaves the file on disk.
+     *
+     * @return true only if the video was dropped
+     */
+    public boolean dropAdoptedVideo(Connection conn, long id, String videoPath) throws SQLException {
+        String sql = "UPDATE matches "
+                + "SET video_path = NULL, thumb_path = NULL, file_size_bytes = NULL "
+                + "WHERE id = ? AND video_path = ? AND starred = 0 AND enrichment_state = 'gsi_only' "
+                + "AND NOT EXISTS (SELECT 1 FROM clips WHERE parent_match_id = ? "
+                + "AND status IN ('pending', 'generating'))";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, id);
+            ps.setString(2, videoPath);
+            ps.setLong(3, id);
+            return ps.executeUpdate() == 1;
         }
     }
 

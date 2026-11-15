@@ -50,6 +50,17 @@ import org.slf4j.LoggerFactory;
  * orphan written there before that boot stays on disk too. What's left: a personal OBS recording
  * made into the same folder after its floor, with OBS's default name, is still adopted.
  *
+ * <p>Every 0.1.x before the floors adopted orphans with no floor, so the folders an upgraded install
+ * already had may hold the user's own recordings as library rows. Once, on the first boot whose
+ * floors are saved, {@link CrashRecoveryRunner} releases them: it removes from the library each
+ * unstarred row the import adopted ({@code gsi_only}) before the earliest floor the floors file held
+ * when that boot began, or before that boot's scan when there was no file, unless the row is
+ * certainly this app's, and leaves its file where it is, below its folder's floor, as the floors
+ * would have. Then it writes {@value #RELEASE_FILE_NAME} next to the floors, exactly {@code
+ * {"version":1,"releasedAtMs":<epoch millis>,"rows":<rows released>}}, and never releases again
+ * while that file exists, even if the floors file goes. The Go remake can port the step under the
+ * same file name and format.
+ *
  * <p>One exception, for linking alone. When the video folder gets its first floor in a boot that
  * recovers an unfinished recording with no journaled path (the upgrade boot after a crash mid-match,
  * say), the link that claims that recording's file may reach back to the earliest such recording's
@@ -78,6 +89,8 @@ final class OrphanAdoptionFloors {
     private static final Logger log = LoggerFactory.getLogger(OrphanAdoptionFloors.class);
 
     static final String FILE_NAME = "orphan-adoption-floors.json";
+    /** Marks the one-time release of the rows adopted before the floors as done (see the class notes). */
+    static final String RELEASE_FILE_NAME = "orphan-adoption-release.json";
     private static final int VERSION = 1;
 
     /** Strict about trailing content, as Go's json.Unmarshal is, so both apps reject the same files. */
@@ -86,9 +99,31 @@ final class OrphanAdoptionFloors {
 
     /** Null when there's no data folder to keep floors in: then nothing is adopted. */
     private final Path file;
+    private final Path releaseFile;
 
     OrphanAdoptionFloors(Path dataDir) {
         this.file = dataDir == null ? null : dataDir.resolve(FILE_NAME);
+        this.releaseFile = dataDir == null ? null : dataDir.resolve(RELEASE_FILE_NAME);
+    }
+
+    /**
+     * Whether the rows adopted before the floors were already released here, or can't be released at
+     * all for want of a data folder. A marker that can't be checked counts as there.
+     */
+    boolean released() {
+        return releaseFile == null || !Files.notExists(releaseFile);
+    }
+
+    /** Records the release as done, written as the floors are, so it never runs again here. */
+    void markReleased(long releasedAtMs, int rows) throws IOException {
+        if (releaseFile == null) {
+            return;
+        }
+        ObjectNode root = MAPPER.createObjectNode();
+        root.put("version", VERSION);
+        root.put("releasedAtMs", releasedAtMs);
+        root.put("rows", rows);
+        replace(releaseFile, root);
     }
 
     /** One root's floor. {@link #NONE} admits nothing. */
@@ -120,6 +155,14 @@ final class OrphanAdoptionFloors {
         Floor of(Path root) {
             return floorIn(floors, root);
         }
+
+        /**
+         * Whether these floors are on disk: false when they couldn't be saved, or there's no data
+         * folder to keep them in.
+         */
+        boolean saved() {
+            return floors != null;
+        }
     }
 
     /**
@@ -136,19 +179,30 @@ final class OrphanAdoptionFloors {
         private final String videoKey;
         /** The video folder's earlier floor for linking alone, when this plan gives it its first. */
         private final Long videoLinkFrom;
+        /** The earliest floor the file held when this scan read it; null for no file or no floor. */
+        private final Long earliestRead;
 
         private Plan(Path file, Map<String, Long> floors, Set<String> added, boolean rewrite,
-                String videoKey, Long videoLinkFrom) {
+                String videoKey, Long videoLinkFrom, Long earliestRead) {
             this.file = file;
             this.floors = floors;
             this.added = added;
             this.rewrite = rewrite;
             this.videoKey = videoKey;
             this.videoLinkFrom = videoLinkFrom;
+            this.earliestRead = earliestRead;
         }
 
         private static Plan none() {
-            return new Plan(null, null, Set.of(), false, null, null);
+            return new Plan(null, null, Set.of(), false, null, null, null);
+        }
+
+        /**
+         * The earliest floor the floors file held when this scan read it, before any root was added
+         * or dropped; empty when there was no file, it couldn't be read, or it held none.
+         */
+        OptionalLong earliestReadFloor() {
+            return earliestRead == null ? OptionalLong.empty() : OptionalLong.of(earliestRead);
         }
 
         /**
@@ -272,6 +326,7 @@ final class OrphanAdoptionFloors {
             floors = new TreeMap<>();
             rewrite = true;
         }
+        Long earliestRead = floors.values().stream().min(Long::compare).orElse(null);
         Set<String> current = new HashSet<>();
         Set<String> added = new HashSet<>();
         String videoKey = videoDir == null ? null : key(videoDir);
@@ -308,7 +363,7 @@ final class OrphanAdoptionFloors {
                 log.info("Dropped the orphan adoption floor of {}, no longer recorded or archived to", key);
             }
         }
-        return new Plan(file, floors, added, rewrite, videoKey, videoLinkFrom);
+        return new Plan(file, floors, added, rewrite, videoKey, videoLinkFrom, earliestRead);
     }
 
     /**
@@ -381,8 +436,13 @@ final class OrphanAdoptionFloors {
         root.put("version", VERSION);
         ObjectNode stored = root.putObject("floors");
         new TreeMap<>(floors).forEach(stored::put);
+        replace(file, root);
+    }
+
+    /** Writes {@code root} over {@code file} through {@code <file>.tmp} and a move. */
+    private static void replace(Path file, ObjectNode root) throws IOException {
         Files.createDirectories(file.getParent());
-        Path tmp = file.resolveSibling(FILE_NAME + ".tmp");
+        Path tmp = file.resolveSibling(file.getFileName() + ".tmp");
         Files.write(tmp, MAPPER.writerWithDefaultPrettyPrinter().writeValueAsBytes(root));
         try {
             try {

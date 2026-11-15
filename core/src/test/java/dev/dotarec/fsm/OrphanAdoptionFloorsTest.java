@@ -218,6 +218,41 @@ class OrphanAdoptionFloorsTest {
                 .isEqualTo(new OrphanAdoptionFloors.Floor(90_000L, true));
     }
 
+    @Test
+    void aPlanTellsTheEarliestFloorTheFileHeldWhenItWasRead(@TempDir Path dir) throws Exception {
+        Path video = dir.resolve("video");
+        Path file = dir.resolve("data").resolve(OrphanAdoptionFloors.FILE_NAME);
+        OrphanAdoptionFloors floors = new OrphanAdoptionFloors(dir.resolve("data"));
+
+        assertThat(floors.plan(video, List.of(), 50_000L, 50_000L, HOLDS_NOTHING).earliestReadFloor()).isEmpty();
+        OrphanAdoptionFloors.write(file, Map.of("c:\\gone", 2_000L, OrphanAdoptionFloors.key(video), 3_000L));
+        // Read before the scan drops a root's floor or adds one.
+        assertThat(floors.plan(video, List.of(dir.resolve("new")), 50_000L, 50_000L, HOLDS_NOTHING)
+                        .earliestReadFloor())
+                .hasValue(2_000L);
+        Files.writeString(file, "not json");
+        assertThat(floors.plan(video, List.of(), 50_000L, 50_000L, HOLDS_NOTHING).earliestReadFloor()).isEmpty();
+    }
+
+    @Test
+    void theReleaseMarkerIsTheFormatAPortKeeps(@TempDir Path dir) throws Exception {
+        OrphanAdoptionFloors floors = new OrphanAdoptionFloors(dir);
+        assertThat(floors.released()).isFalse();
+
+        floors.markReleased(1_763_100_000_000L, 37);
+
+        JsonNode marker = new ObjectMapper().readTree(dir.resolve(OrphanAdoptionFloors.RELEASE_FILE_NAME).toFile());
+        assertThat(marker.size()).isEqualTo(3);
+        assertThat(marker.get("version").isInt()).isTrue();
+        assertThat(marker.get("version").intValue()).isEqualTo(1);
+        assertThat(marker.get("releasedAtMs").longValue()).isEqualTo(1_763_100_000_000L);
+        assertThat(marker.get("rows").intValue()).isEqualTo(37);
+        assertThat(dir.resolve(OrphanAdoptionFloors.RELEASE_FILE_NAME + ".tmp")).doesNotExist();
+        assertThat(floors.released()).isTrue();
+        // With no data folder there is nowhere to keep the marker, so nothing is released.
+        assertThat(new OrphanAdoptionFloors(null).released()).isTrue();
+    }
+
     /** Plans and saves one scan's floors, as a boot with no pathless recording to recover does. */
     private static OrphanAdoptionFloors.Snapshot scan(
             OrphanAdoptionFloors floors, Path video, List<Path> archives, long startMs,

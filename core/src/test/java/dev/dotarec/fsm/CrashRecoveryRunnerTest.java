@@ -1469,6 +1469,198 @@ class CrashRecoveryRunnerTest {
         assertThat(CrashRecoveryRunner.videoLinkFromMs(List.of(pathless), 10_000_000L)).isEqualTo(10_000_000L);
     }
 
+    // --- Rows adopted before the floors existed ---
+
+    @Test
+    void theUpgradeBootReleasesRowsAdoptedBeforeTheFloorsAndKeepsTheirFiles() throws Exception {
+        // 0.1.20 adopted the user's own OBS recordings from the folder it records into, and the
+        // archiver has since moved one of them. The first boot with floors takes those rows out of
+        // the library and leaves the files where they are, below the floors their folders now get, so
+        // no boot adopts them again. A row the recorder made is untouched.
+        Files.delete(floorsFile());
+        Path archive = chooseArchive("hdd");
+        long monthAgo = System.currentTimeMillis() - 30L * 24 * 60 * 60_000L;
+        Path personal = writeModifiedAt(videoDir.resolve("2024-05-01 18-30-12.mkv"), LONG_AGO_MS);
+        long personalRow = adoptedBeforeTheFloors(personal, monthAgo);
+        long movedRow = adoptedBeforeTheFloors(
+                writeModifiedAt(videoDir.resolve("2024-06-01 18-30-12.mp4"), LONG_AGO_MS), monthAgo);
+        Path moved = writeModifiedAt(archive.resolve(movedRow + "-2024-06-01 18-30-12.mp4"), LONG_AGO_MS);
+        Files.delete(videoDir.resolve("2024-06-01 18-30-12.mp4"));
+        matches.updateVideoPath(movedRow, moved.toString(), null);
+        Path own = writeModifiedAt(videoDir.resolve("2026-11-01 20-00-00.mp4"), LONG_AGO_MS);
+        long recorded = insertMatch(own.toString(), null, Files.size(own));
+
+        runner.run(null);
+
+        assertThat(matches.findAll()).extracting(MatchSummary::id).containsExactly(recorded);
+        assertThat(matches.findById(personalRow)).isEmpty();
+        assertThat(personal).exists();
+        assertThat(moved).exists();
+        com.fasterxml.jackson.databind.JsonNode marker = new ObjectMapper().readTree(releaseMarker().toFile());
+        assertThat(marker.get("version").intValue()).isEqualTo(1);
+        assertThat(marker.get("rows").intValue()).isEqualTo(2);
+        assertThat(marker.get("releasedAtMs").longValue()).isPositive();
+
+        newRunner().run(null);
+
+        assertThat(matches.findAll()).extracting(MatchSummary::id).containsExactly(recorded);
+    }
+
+    @Test
+    void theReleaseKeepsWhatThisAppCertainlyMadeAndWhatTheUserKept() throws Exception {
+        Files.delete(floorsFile());
+        Path archive = chooseArchive("hdd");
+        long monthAgo = System.currentTimeMillis() - 30L * 24 * 60 * 60_000L;
+        // Starred by the user.
+        long starred = adoptedBeforeTheFloors(
+                writeModifiedAt(videoDir.resolve("2024-05-01 18-30-12.mkv"), LONG_AGO_MS), monthAgo);
+        matches.setStarred(starred, true);
+        // Another row's archived name, and a clip's: residue only this app makes.
+        long residue = adoptedBeforeTheFloors(
+                writeModifiedAt(archive.resolve("99-2024-05-02 18-30-12.mp4"), LONG_AGO_MS), monthAgo);
+        long clipFile = adoptedBeforeTheFloors(
+                writeModifiedAt(archive.resolve("clip-7-3-clip-7.mp4"), LONG_AGO_MS), monthAgo);
+        // The source the archiver failed to delete once it had moved another row's recording.
+        long archived = insertMatch("placeholder", null, null);
+        Path copy = writeModifiedAt(archive.resolve(archived + "-2024-05-03 18-30-12.mp4"), LONG_AGO_MS);
+        matches.updateVideoPath(archived, copy.toString(), null);
+        long duplicate = adoptedBeforeTheFloors(
+                writeModifiedAt(videoDir.resolve("2024-05-03 18-30-12.mp4"), LONG_AGO_MS), monthAgo);
+        // One with a clip keeps itself and the clip and drops its video; one with a clip still to be
+        // cut from its video keeps that too.
+        Path clipped = writeModifiedAt(videoDir.resolve("2024-05-04 18-30-12.mp4"), LONG_AGO_MS);
+        long withClip = adoptedBeforeTheFloors(clipped, monthAgo);
+        long clipId = insertClip(withClip, videoDir.resolve("clips").resolve(withClip + "-clip-1.mp4").toString());
+        long cutting = adoptedBeforeTheFloors(
+                writeModifiedAt(videoDir.resolve("2024-05-05 18-30-12.mp4"), LONG_AGO_MS), monthAgo);
+        clips.insert(cutting, "manual", null, 1.0, 5.0, null, null, null, null, "pending", null, 1_000L);
+
+        runner.run(null);
+
+        for (long kept : List.of(starred, residue, clipFile, duplicate, cutting)) {
+            assertThat(matches.findById(kept).orElseThrow().videoPath()).as("row %d", kept).isNotNull();
+        }
+        MatchSummary dropped = matches.findById(withClip).orElseThrow();
+        assertThat(dropped.videoPath()).isNull();
+        assertThat(dropped.fileSizeBytes()).isNull();
+        assertThat(clips.findById(clipId)).isPresent();
+        assertThat(clipped).exists();
+        assertThat(new ObjectMapper().readTree(releaseMarker().toFile()).get("rows").intValue()).isEqualTo(1);
+    }
+
+    @Test
+    void theCutoffIsTheEarliestFloorTheFileHeldWhenTheBootBegan() throws Exception {
+        // The floors file predates the release (an earlier build kept floors but never released, or
+        // its marker couldn't be saved): only a row adopted before its earliest floor predates the
+        // floors. One adopted under them, from a folder recording has since moved off, is the scan's
+        // own and stays.
+        long earliest = System.currentTimeMillis() - 60L * 60_000L;
+        seedAdoptionFloor(videoDir, earliest);
+        long before = adoptedBeforeTheFloors(
+                writeModifiedAt(videoDir.resolve("2024-05-01 18-30-12.mkv"), LONG_AGO_MS), earliest - 60_000L);
+        Path old = Files.createDirectories(dir.resolve("old"));
+        long since = adoptedBeforeTheFloors(
+                writeModifiedAt(old.resolve("2026-11-14 10-00-00.mp4"), earliest + 5L * 60_000L),
+                earliest + 10L * 60_000L);
+
+        runner.run(null);
+
+        assertThat(matches.findById(before)).isEmpty();
+        assertThat(matches.findById(since)).isPresent();
+    }
+
+    @Test
+    void theReleaseRunsOnceEvenWhenTheFloorsFileIsLostLater() throws Exception {
+        Files.delete(floorsFile());
+        runner.run(null);
+        assertThat(releaseMarker()).exists();
+        // A row the scan adopted under the floors, and then the floors file goes.
+        long now = System.currentTimeMillis();
+        long adopted = adoptedBeforeTheFloors(
+                writeModifiedAt(videoDir.resolve("2026-11-14 10-00-00.mp4"), now - 10L * 60_000L), now - 60_000L);
+        Files.delete(floorsFile());
+
+        newRunner().run(null);
+
+        assertThat(matches.findById(adopted)).isPresent();
+    }
+
+    @Test
+    void aBootThatCannotSaveItsFloorsReleasesNothingAndTheNextOneDoes() throws Exception {
+        Files.delete(floorsFile());
+        long row = adoptedBeforeTheFloors(
+                writeModifiedAt(videoDir.resolve("2024-05-01 18-30-12.mkv"), LONG_AGO_MS),
+                System.currentTimeMillis() - 60_000L);
+        Path blocked = Files.createDirectories(floorsFile().resolveSibling(OrphanAdoptionFloors.FILE_NAME + ".tmp"));
+
+        runner.run(null);
+
+        assertThat(matches.findById(row)).isPresent();
+        assertThat(releaseMarker()).doesNotExist();
+        Files.delete(blocked);
+
+        newRunner().run(null);
+
+        assertThat(matches.findById(row)).isEmpty();
+        assertThat(releaseMarker()).exists();
+    }
+
+    @Test
+    void aRowWhoseFileItsFolderFloorAdmitsIsKept() throws Exception {
+        // Modified after its folder's floor (edited in place, say): released, the scan would only
+        // adopt it again, as a new row.
+        long earliest = System.currentTimeMillis() - 60L * 60_000L;
+        seedAdoptionFloor(videoDir, earliest);
+        Path edited = writeModifiedAt(videoDir.resolve("2024-05-01 18-30-12.mkv"), earliest + 10L * 60_000L);
+        long row = adoptedBeforeTheFloors(edited, earliest - 60_000L);
+
+        runner.run(null);
+
+        assertThat(matches.findAll())
+                .singleElement()
+                .satisfies(
+                        kept -> {
+                            assertThat(kept.id()).isEqualTo(row);
+                            assertThat(kept.createdAt()).isEqualTo(earliest - 60_000L);
+                            assertThat(kept.videoPath()).isEqualTo(edited.toString());
+                        });
+    }
+
+    @Test
+    void aFileReleasedOnTheUpgradeBootIsNeverLinkedToTheMatchThatCrashedThen() throws Exception {
+        // The upgrade boot after a crash mid-match: the link reaches back before the video folder's
+        // floor, into a window where the user's own OBS made a recording an earlier boot adopted. The
+        // journal is replayed while that file is still a row's, so the link passes it over.
+        Files.delete(floorsFile());
+        Crash crash = crashedHalfAnHourAgo(null);
+        Path personal = writeModifiedAt(videoDir.resolve("2026-11-14 10-00-00.mp4"), crash.updatedMs());
+        long adopted = adoptedBeforeTheFloors(personal, System.currentTimeMillis() - 5L * 60_000L);
+
+        runner.run(null);
+
+        assertThat(matches.findById(adopted)).isEmpty();
+        assertJournalRowWithoutVideo();
+        assertThat(personal).exists();
+    }
+
+    /**
+     * A row for {@code file} as the orphan import writes one ({@code gsi_only}, played at the file's
+     * modification time), created at {@code createdAt}.
+     */
+    private long adoptedBeforeTheFloors(Path file, long createdAt) throws Exception {
+        return matches.insert(
+                new NewMatch(
+                        null, "match", "gsi_only", null,
+                        null, null, null, null, null, null, null,
+                        null, null, null, null, null, null,
+                        Files.getLastModifiedTime(file).toMillis(), file.toString(), null, Files.size(file),
+                        false, createdAt, null));
+    }
+
+    private Path releaseMarker() {
+        return paths.dataDir().resolve(OrphanAdoptionFloors.RELEASE_FILE_NAME);
+    }
+
     private record Crash(long startedMs, long updatedMs) {}
 
     /**
