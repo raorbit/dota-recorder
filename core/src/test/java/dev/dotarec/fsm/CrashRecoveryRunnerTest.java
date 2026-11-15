@@ -904,6 +904,46 @@ class CrashRecoveryRunnerTest {
     }
 
     @Test
+    void aStrandedArchiveCopyIsRelinkedThoughItPredatesTheArchivesFloor() throws Exception {
+        // The archiver keeps a recording's modification time on its copy, so a recording moved off
+        // before the upgrade is older than the archive's floor. Only the import is held to the floor:
+        // the re-link proves the copy is the row's own by its name and size.
+        Path archive = chooseArchive("hdd");
+        seedAdoptionFloor(archive, System.currentTimeMillis());
+        long id = insertMatch(videoDir.resolve("2026-10-01 20-00-00.mp4").toString(), null, 15L);
+        Path stranded = writeModifiedAt(archive.resolve(id + "-2026-10-01 20-00-00.mp4"), LONG_AGO_MS);
+        long clipId = insertClip(id, videoDir.resolve("clips").resolve(id + "-clip-1.mp4").toString(), 15L);
+        Path strandedClip = writeModifiedAt(archive.resolve("clip-" + clipId + "-" + id + "-clip-1.mp4"), LONG_AGO_MS);
+
+        runner.run(null);
+
+        assertThat(matches.findById(id).orElseThrow().videoPath()).isEqualTo(stranded.toString());
+        assertThat(clips.findById(clipId).orElseThrow().videoPath()).isEqualTo(strandedClip.toString());
+        assertThat(matches.findAll()).hasSize(1);
+    }
+
+    @Test
+    void genuineMoveResidueIsDeletedThoughItPredatesTheArchivesFloor() throws Exception {
+        Path archive = chooseArchive("hdd");
+        seedAdoptionFloor(archive, System.currentTimeMillis());
+        Path intact = writeModifiedAt(videoDir.resolve("2026-10-01 20-00-00.mp4"), LONG_AGO_MS);
+        long id = insertMatch(intact.toString(), null, Files.size(intact));
+        Path residue = writeModifiedAt(archive.resolve(id + "-2026-10-01 20-00-00.mp4"), LONG_AGO_MS);
+        Path clip = writeModifiedAt(
+                Files.createDirectories(videoDir.resolve("clips")).resolve(id + "-clip-1.mp4"), LONG_AGO_MS);
+        long clipId = insertClip(id, clip.toString(), Files.size(clip));
+        Path clipResidue = writeModifiedAt(archive.resolve("clip-" + clipId + "-" + id + "-clip-1.mp4"), LONG_AGO_MS);
+
+        runner.run(null);
+
+        assertThat(residue).doesNotExist();
+        assertThat(clipResidue).doesNotExist();
+        assertThat(intact).exists();
+        assertThat(clip).exists();
+        assertThat(matches.findAll()).hasSize(1);
+    }
+
+    @Test
     void aSourceTheArchiverLeftBehindIsRemovedWhateverItsAge() throws Exception {
         // The archiver copied a recording from before the video folder's floor to the archive drive and
         // repointed its row, but deleting the source failed (a player held it open). The floor keeps
