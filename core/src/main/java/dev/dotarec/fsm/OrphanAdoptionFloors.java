@@ -74,9 +74,12 @@ import org.slf4j.LoggerFactory;
  * when such a recording is still unrecovered then (its recovery rolled back), the folder's first
  * floor isn't saved and the folder adopts nothing this boot, so the next boot reaches back again.
  * A video folder the scan can't read gets no floor, as above, and the recordings that need it wait
- * in the journal for a boot that can read it. The link itself needs no saved floor: a floor that
- * isn't saved only comes later next time. An existing floor is never lowered, and archive drives
- * aren't recorded into, so they never reach back.
+ * in the journal for a boot that can read it. The scan reads the video folder once, floored or not,
+ * and that one read decides both ({@link Plan#cantReadVideoDir}): a second look could find a drive
+ * back that the first missed, and recover such a recording against a folder with no floor, which
+ * links nothing. The link itself needs no saved floor: a floor that isn't saved only comes later
+ * next time. An existing floor is never lowered, and archive drives aren't recorded into, so they
+ * never reach back.
  *
  * <p>The floors live in their own file in the data folder, never in {@code settings.json}: that
  * file is shared ground with the Go remake, and a 0.1.x from before the settings loader kept keys it
@@ -182,9 +185,11 @@ final class OrphanAdoptionFloors {
         private final Long videoLinkFrom;
         /** The earliest floor the file held when this scan read it; null for no file or no floor. */
         private final Long earliestRead;
+        /** Whether a video folder is set and this scan couldn't read it. */
+        private final boolean videoUnreadable;
 
         private Plan(Path file, Map<String, Long> floors, Set<String> added, boolean rewrite,
-                String videoKey, Long videoLinkFrom, Long earliestRead) {
+                String videoKey, Long videoLinkFrom, Long earliestRead, boolean videoUnreadable) {
             this.file = file;
             this.floors = floors;
             this.added = added;
@@ -192,10 +197,20 @@ final class OrphanAdoptionFloors {
             this.videoKey = videoKey;
             this.videoLinkFrom = videoLinkFrom;
             this.earliestRead = earliestRead;
+            this.videoUnreadable = videoUnreadable;
         }
 
-        private static Plan none() {
-            return new Plan(null, null, Set.of(), false, null, null, null);
+        private static Plan none(boolean videoUnreadable) {
+            return new Plan(null, null, Set.of(), false, null, null, null, videoUnreadable);
+        }
+
+        /**
+         * Whether a video folder is set and this scan couldn't read it (a drive not mounted yet), so a
+         * crashed recording whose file would be looked for there waits in the journal for a boot that
+         * can read it. Decided by the same read as the folder's first floor (see the class notes).
+         */
+        boolean cantReadVideoDir() {
+            return videoUnreadable;
         }
 
         /**
@@ -282,7 +297,9 @@ final class OrphanAdoptionFloors {
      * Plans this scan's floors without saving any: gives every root that has no floor one, and drops
      * the floor of any other folder. A root's first floor is {@code startMs}, or 1 ms after the newest
      * file {@code newestHeldMs} reports in it when that is later; a root it reports as unreadable
-     * (empty) gets none yet. A video folder that gets its first floor here may link from {@code
+     * (empty) gets none yet. {@code newestHeldMs} reads the video folder exactly once, floored or not,
+     * and the plan keeps whether it could ({@link Plan#cantReadVideoDir}); another root is read only
+     * when it has no floor. A video folder that gets its first floor here may link from {@code
      * videoLinkFromMs} when that is earlier than {@code startMs} ({@link Plan#linkFloorOf}); that is
      * never stored. Nothing is adopted until {@link Plan#save} has made the floors durable, so no file
      * is adopted against a floor a crash could lose. The roots must be every root the scan reads (the
@@ -295,21 +312,36 @@ final class OrphanAdoptionFloors {
             long startMs,
             long videoLinkFromMs,
             Function<Path, OptionalLong> newestHeldMs) {
+        OptionalLong videoHeld = held(videoDir, newestHeldMs);
+        boolean videoUnreadable = videoDir != null && videoHeld.isEmpty();
         if (file == null) {
             log.warn("No data folder to keep orphan adoption floors in; adopting no orphan recordings");
-            return Plan.none();
+            return Plan.none(videoUnreadable);
         }
         try {
-            return planOrThrow(videoDir, archives, startMs, videoLinkFromMs, newestHeldMs);
+            return planOrThrow(videoDir, videoHeld, archives, startMs, videoLinkFromMs, newestHeldMs);
         } catch (RuntimeException | java.io.IOError e) {
             log.warn("Could not prepare the orphan adoption floors {}; adopting no orphan recordings"
                     + " this time: {}", file, e.toString());
-            return Plan.none();
+            return Plan.none(videoUnreadable);
+        }
+    }
+
+    /** What {@code newestHeldMs} reports for {@code root}, or empty (unreadable) for none or a failure. */
+    private static OptionalLong held(Path root, Function<Path, OptionalLong> newestHeldMs) {
+        if (root == null) {
+            return OptionalLong.empty();
+        }
+        try {
+            return newestHeldMs.apply(root);
+        } catch (RuntimeException | java.io.IOError e) {
+            return OptionalLong.empty();
         }
     }
 
     private Plan planOrThrow(
             Path videoDir,
+            OptionalLong videoHeld,
             Collection<Path> archives,
             long startMs,
             long videoLinkFromMs,
@@ -340,7 +372,7 @@ final class OrphanAdoptionFloors {
             String key = key(root);
             current.add(key);
             if (!floors.containsKey(key)) {
-                OptionalLong newest = newestHeldMs.apply(root);
+                OptionalLong newest = i == 0 ? videoHeld : newestHeldMs.apply(root);
                 if (newest.isEmpty()) {
                     log.info("Can't read {} now; it gets its orphan adoption floor on a boot that can", root);
                     continue;
@@ -364,7 +396,8 @@ final class OrphanAdoptionFloors {
                 log.info("Dropped the orphan adoption floor of {}, no longer recorded or archived to", key);
             }
         }
-        return new Plan(file, floors, added, rewrite, videoKey, videoLinkFrom, earliestRead);
+        return new Plan(file, floors, added, rewrite, videoKey, videoLinkFrom, earliestRead,
+                videoDir != null && videoHeld.isEmpty());
     }
 
     /**

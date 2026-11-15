@@ -1606,6 +1606,46 @@ class CrashRecoveryRunnerTest {
     }
 
     @Test
+    void aPathlessRecordingWaitsWhenThePlanCouldNotReadItsFolder() throws Exception {
+        // The recording folder, new to the scan, is on a drive that comes up while the boot plans the
+        // floors: the plan's read fails, so the folder gets no floor, and the drive is ready a moment
+        // later. Recovered then, the recording would be linked against no floor, which admits nothing,
+        // and committed without its file. The plan's one read decides, so it waits for the next boot.
+        Path usb = chooseVideoDir("usb");
+        Crash crash = crashedHalfAnHourAgo(null);
+        Path crashed = writeModifiedAt(usb.resolve("2026-11-14 10-00-00.mp4"), crash.updatedMs());
+        java.util.concurrent.atomic.AtomicBoolean ready = new java.util.concurrent.atomic.AtomicBoolean();
+        CrashRecoveryRunner slowDrive =
+                new CrashRecoveryRunner(
+                        journal, matches, clips, markers, pauses, ds, new ObjectMapper(), settings,
+                        maintenanceLock, paths) {
+                    @Override
+                    java.util.OptionalLong newestRecorderFileMs(Path root) {
+                        if (root.equals(usb) && !ready.getAndSet(true)) {
+                            return java.util.OptionalLong.empty();
+                        }
+                        return super.newestRecorderFileMs(root);
+                    }
+                };
+
+        slowDrive.run(null);
+
+        assertThat(journal.findUnfinished())
+                .extracting(RecordingSessionRow::sessionId)
+                .containsExactly("session-crash");
+        assertThat(matches.findAll()).isEmpty();
+        assertThat(storedFloor(usb)).isNull();
+
+        newRunner().run(null);
+
+        assertThat(journal.findUnfinished()).isEmpty();
+        assertThat(matches.findAll())
+                .singleElement()
+                .satisfies(row -> assertThat(row.videoPath()).isEqualTo(crashed.toString()));
+        assertThat(storedFloor(usb)).isNotNull();
+    }
+
+    @Test
     void withNoVideoFolderSetAPathlessRecordingIsRecoveredAtOnce() {
         // Only a folder that is set but can't be read is worth waiting for.
         settings.update(

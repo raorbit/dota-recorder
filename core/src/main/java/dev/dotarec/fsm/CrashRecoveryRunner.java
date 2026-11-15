@@ -208,9 +208,11 @@ public class CrashRecoveryRunner implements ApplicationRunner {
         log.warn("Recovering {} unfinished recording session(s)", unfinished.size());
         // A recording with no journaled path has its file found by listing the video folder. While the
         // folder can't be read (a drive not mounted yet), recovering it would commit it without its
-        // file and delete the journal a later boot could link that file from. With no folder set,
-        // there is none to wait for.
-        boolean waitForVideoDir = videoDir != null && !listable(videoDir);
+        // file and delete the journal a later boot could link that file from. The plan's read of the
+        // folder decides, the read its first floor came from: a second look could find the drive back
+        // with the folder still unfloored, which links nothing. With no folder set, there is none to
+        // wait for.
+        boolean waitForVideoDir = plan.cantReadVideoDir();
         for (RecordingSessionRow session : unfinished) {
             if (waitForVideoDir && hasNoPath(session)) {
                 log.warn("Leaving recording session {} in the journal for a boot that can read {}",
@@ -254,15 +256,6 @@ public class CrashRecoveryRunner implements ApplicationRunner {
 
     private static boolean hasNoPath(RecordingSessionRow session) {
         return session.videoPath() == null || session.videoPath().isBlank();
-    }
-
-    /** Whether {@code dir} is a folder this boot can list. */
-    private static boolean listable(Path dir) {
-        try (Stream<Path> entries = Files.list(dir)) {
-            return true;
-        } catch (Exception e) {
-            return false;
-        }
     }
 
     private void recover(RecordingSessionRow session, OrphanAdoptionFloors.Plan floors) {
@@ -623,9 +616,12 @@ public class CrashRecoveryRunner implements ApplicationRunner {
      * The newest last-modified time of the recorder-named recordings directly in {@code root}, which
      * {@link OrphanAdoptionFloors} keeps a root's first floor after: {@link Long#MIN_VALUE} when it
      * holds none, and empty when {@code root} isn't a folder this boot can read, so it gets no floor
-     * until a boot can check what it holds.
+     * until a boot can check what it holds. For the video folder it is also this boot's one answer to
+     * whether a crashed recording's file can be looked for at all ({@link
+     * OrphanAdoptionFloors.Plan#cantReadVideoDir}). Package-private so a test can stand in for a
+     * drive that is not ready when the plan reads it.
      */
-    private OptionalLong newestRecorderFileMs(Path root) {
+    OptionalLong newestRecorderFileMs(Path root) {
         try (Stream<Path> stream = Files.list(root)) {
             return OptionalLong.of(
                     stream.filter(Files::isRegularFile)
@@ -635,7 +631,7 @@ public class CrashRecoveryRunner implements ApplicationRunner {
                             .max()
                             .orElse(Long.MIN_VALUE));
         } catch (Exception e) {
-            log.debug("Could not read {} for its first adoption floor: {}", root, e.toString());
+            log.debug("Could not read {} to plan its adoption floor: {}", root, e.toString());
             return OptionalLong.empty();
         }
     }
