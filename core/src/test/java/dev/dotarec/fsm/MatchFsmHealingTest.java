@@ -351,6 +351,31 @@ class MatchFsmHealingTest {
     }
 
     @Test
+    void aStopOnTheConnectionABlipMoved_isLeftForPostGame() {
+        // A websocket blip moves the still-recording output onto a new connection; later OBS stops
+        // it on that same connection while still rendering (a full disk, a stop in the OBS window).
+        // That is no relaunch: re-arming against it would only loop junk rows (or, on a full disk,
+        // fail the start and restart OBS mid-match).
+        fsm.onFrame(playing());
+        advanceSeconds(300);
+        obs.epoch++;
+        obs.recordStatus = new MatchFsm.RecordOutputStatus(true, 300_000L, 50_000_000L);
+        fsm.superviseRecording();
+
+        advanceSeconds(60);
+        obsStoppedTheOutput("C:\\videos\\stopped-after-blip.mkv");
+        fsm.superviseRecording();
+
+        assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
+        assertThat(restarter.reasons).isEmpty();
+
+        fsm.onFrame(frame().state(POST_GAME).matchId(MATCH).mono(nanos.get()).build());
+        assertThat(matches.findAll()).singleElement()
+                .satisfies(r -> assertThat(r.videoPath())
+                        .isEqualTo("C:\\videos\\stopped-after-blip.mkv"));
+    }
+
+    @Test
     void outputStoppedWhileObsStillRenders_isLeftForPostGame() {
         // The user stopped it in the OBS window, or the disk filled: a restart can't fix either,
         // and re-arming against them would only loop junk rows.
