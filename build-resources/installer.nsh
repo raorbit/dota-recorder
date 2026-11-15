@@ -13,7 +13,7 @@
 ; The two netsh calls are chained in a single elevated cmd (delete-any-stale then add) so install
 ; raises at most one UAC prompt.
 ;
-; Every program the installer starts is named by its full path. Windows can find a bare name in the
+; Every program these hooks start is named by its full path. Windows can find a bare name in the
 ; installer's own folder (Downloads, for a downloaded installer) or the folder it works in (the
 ; install folder, which the user can write to) before the system's, so anything the user ran could
 ; have its own cmd.exe or netsh.exe started there, elevated. After /c, cmd drops the first and last
@@ -22,8 +22,14 @@
 ; The elevated cmd also gets /d, which skips the AutoRun commands cmd otherwise runs from the
 ; registry before anything else. Anything the user runs can set HKCU's, and without /d cmd would run
 ; it with the administrator rights the prompt just granted, before either netsh call. /d doesn't
-; change how cmd reads the quotes after /c. scripts/check-packaging-config.mjs fails CI on a bare
-; name, or on a cmd without /d.
+; change how cmd reads the quotes after /c. scripts/check-packaging-config.mjs fails CI on a program
+; these hooks start by a bare name, or a cmd they start without /d; its comments list the ways of
+; starting a program it reads.
+;
+; Both rules cover these hooks, not the rest of the installer, which is electron-builder's: the
+; check doesn't read it, and it isn't ours to change. Its check for a running app, for one, starts
+; PowerShell without -NoProfile, or cmd without /d running tasklist and taskkill by bare names, and
+; in an install or uninstall for every user it can run elevated.
 ;
 ; Both macros are skipped when the installer/uninstaller runs with --updated (electron-updater's
 ; silent auto-update path; ${isUpdated} is electron-builder's generated LogicLib predicate for
