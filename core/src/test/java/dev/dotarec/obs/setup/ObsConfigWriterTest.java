@@ -11,6 +11,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.dotarec.config.AppPaths;
 import dev.dotarec.config.SettingsStore;
+import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -19,6 +20,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.slf4j.LoggerFactory;
+import org.springframework.test.util.ReflectionTestUtils;
 
 class ObsConfigWriterTest {
 
@@ -322,6 +324,111 @@ class ObsConfigWriterTest {
         Files.delete(tmp);
         assertThat(writer.fallBackToX264()).isTrue();
         assertThat(Files.readString(ini)).contains("StreamEncoder=x264");
+    }
+
+    @Test
+    void fallBackToX264_leavesTheEncoderAlone_whileTheVideoFolderIsMissing(@TempDir Path dir)
+            throws Exception {
+        // The video drive is unplugged. OBS turns every start down before it opens any encoder, a
+        // relaunched one too, so the starts fail just as a broken encoder's do. Switched anyway, the
+        // rest of the process would CPU-encode every match once the drive is back.
+        AppPaths paths = paths(dir);
+        SettingsStore settings = new SettingsStore(paths);
+        Path videos = dir.resolve("unplugged").resolve("DotaVODs");
+        settings.update(
+                s -> {
+                    s.videoDir = videos.toString();
+                    return s;
+                });
+        ObsConfigWriter writer = writer(paths, settings, "", "0");
+        writer.configure();
+        Path ini = new ObsLayout(paths.obsDir()).profileIni();
+
+        List<ILoggingEvent> logged = logsOf(() -> assertThat(writer.fallBackToX264()).isFalse());
+
+        assertThat(Files.readString(ini)).contains("RecEncoder=nvenc").contains("StreamEncoder=nvenc");
+        assertThat(logged)
+                .as("the log names what stops recording, not the GPU driver")
+                .filteredOn(e -> e.getLevel() == Level.WARN)
+                .singleElement()
+                .satisfies(e -> assertThat(e.getFormattedMessage())
+                        .contains(videos.toString())
+                        .contains("doesn't exist")
+                        .doesNotContain("driver"));
+
+        // With the drive back, starts that still fail are the encoder's.
+        Files.createDirectories(videos);
+        assertThat(writer.fallBackToX264()).isTrue();
+        assertThat(Files.readString(ini)).contains("StreamEncoder=x264");
+    }
+
+    @Test
+    void fallBackToX264_leavesTheEncoderAlone_whileTheVideoDriveHasUnder50MbFree(@TempDir Path dir)
+            throws Exception {
+        // OBS turns a start down with under 50 MB free on the folder's drive, before it opens any
+        // encoder. Exactly 50 MB is enough for it, and then a failing start is the encoder's.
+        AppPaths paths = paths(dir);
+        SettingsStore settings = new SettingsStore(paths);
+        ObsConfigWriter writer = writer(paths, settings, "", "0");
+        long[] free = {ObsConfigWriter.OBS_MIN_FREE_BYTES - 1};
+        ReflectionTestUtils.setField(
+                writer, "usableSpace", (ObsConfigWriter.UsableSpace) folder -> free[0]);
+        writer.configure();
+        Path ini = new ObsLayout(paths.obsDir()).profileIni();
+
+        List<ILoggingEvent> logged = logsOf(() -> assertThat(writer.fallBackToX264()).isFalse());
+
+        assertThat(Files.readString(ini)).contains("StreamEncoder=nvenc");
+        assertThat(logged)
+                .filteredOn(e -> e.getLevel() == Level.WARN)
+                .singleElement()
+                .satisfies(e -> assertThat(e.getFormattedMessage())
+                        .contains(paths.videoDir().toString())
+                        .contains("49 MB free"));
+
+        free[0] = ObsConfigWriter.OBS_MIN_FREE_BYTES;
+        assertThat(writer.fallBackToX264()).isTrue();
+        assertThat(Files.readString(ini)).contains("StreamEncoder=x264");
+    }
+
+    @Test
+    void fallBackToX264_blamesAMissingFolder_beforeAnEncoderPickedInSettings(@TempDir Path dir) {
+        // Advice to change the encoder would send the user after the wrong thing.
+        AppPaths paths = paths(dir);
+        SettingsStore settings = new SettingsStore(paths);
+        settings.update(
+                s -> {
+                    s.encoder = "amd";
+                    s.videoDir = dir.resolve("gone").toString();
+                    return s;
+                });
+        ObsConfigWriter writer = writer(paths, settings, "", "0");
+        writer.configure();
+
+        List<ILoggingEvent> logged = logsOf(() -> assertThat(writer.fallBackToX264()).isFalse());
+
+        assertThat(logged)
+                .filteredOn(e -> e.getLevel() == Level.WARN)
+                .singleElement()
+                .satisfies(e -> assertThat(e.getFormattedMessage())
+                        .contains("doesn't exist")
+                        .doesNotContain("picked in Settings"));
+    }
+
+    @Test
+    void fallBackToX264_stillSwitches_whenTheFreeSpaceCantBeRead(@TempDir Path dir) throws Exception {
+        // A check that can't be made blames nothing, so a broken encoder still gets x264.
+        AppPaths paths = paths(dir);
+        SettingsStore settings = new SettingsStore(paths);
+        ObsConfigWriter writer = writer(paths, settings, "", "0");
+        ReflectionTestUtils.setField(writer, "usableSpace", (ObsConfigWriter.UsableSpace) folder -> {
+            throw new IOException("the volume went away");
+        });
+        writer.configure();
+
+        assertThat(writer.fallBackToX264()).isTrue();
+        assertThat(Files.readString(new ObsLayout(paths.obsDir()).profileIni()))
+                .contains("StreamEncoder=x264");
     }
 
     /** What {@link ObsConfigWriter} logs while {@code action} runs. */

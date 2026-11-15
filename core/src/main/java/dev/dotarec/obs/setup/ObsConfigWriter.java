@@ -9,7 +9,9 @@ import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.FileStore;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.security.SecureRandom;
@@ -70,6 +72,17 @@ public class ObsConfigWriter implements EncoderFallback {
     private volatile String resolvedAutoEncoder;
     private final ObjectMapper mapper =
             new ObjectMapper().enable(SerializationFeature.INDENT_OUTPUT);
+
+    /** Free bytes on the drive holding a folder, for this user. Seam for tests. */
+    interface UsableSpace {
+        long usableBytes(Path dir) throws IOException;
+    }
+
+    /**
+     * Reads the free space OBS checks before a record start (see {@link #folderRefusal}); a test
+     * swaps it to fake a nearly full drive.
+     */
+    private UsableSpace usableSpace = dir -> Files.getFileStore(dir).getUsableSpace();
 
     public ObsConfigWriter(
             AppPaths paths,
@@ -163,17 +176,29 @@ public class ObsConfigWriter implements EncoderFallback {
      * recording and the streaming encoder (the default Stream quality records with the latter), so
      * both switch.
      *
+     * <p>Nothing is switched while OBS can't record into the profile's video folder at all: the
+     * folder is missing (an unplugged drive), or its drive has under {@link #OBS_MIN_FREE_BYTES}
+     * free. OBS turns a start down for either before it opens any encoder, on every run, so it looks
+     * just like an encoder that can't open; switching then would only CPU-encode every match for the
+     * rest of the process once the folder is back. That is logged instead, and the next call checks
+     * again.
+     *
      * <p>Only "auto" is switched. An encoder picked in Settings is the user's: it is kept, and the
      * failure logged. Settings are not touched, so the UI keeps showing Auto, and the next launch
      * probes the GPU again (a driver update may have fixed the encoder by then).
      *
      * @return true when the profile now names x264 where it named a hardware encoder; false when
-     *     there was nothing to switch, or the profile could not be written (the probed encoder is
-     *     then kept, so the next call tries again)
+     *     there was nothing to switch, OBS can't record into the video folder, or the profile could
+     *     not be written (the probed encoder is then kept, so the next call tries again)
      */
     @Override
     public synchronized boolean fallBackToX264() {
         SettingsStore.Settings s = settings.get();
+        String folderRefusal = folderRefusal(recordingFolder(s));
+        if (folderRefusal != null) {
+            log.warn("Not switching the OBS encoder to x264: {}", folderRefusal);
+            return false;
+        }
         if (s.encoder != null && !s.encoder.isBlank()) {
             if (!EncoderProbe.X264.equals(s.encoder)) {
                 log.warn(
@@ -205,6 +230,46 @@ public class ObsConfigWriter implements EncoderFallback {
                         + " it offers but can't open, e.g. on an outdated GPU driver)",
                 probed);
         return true;
+    }
+
+    /**
+     * OBS 32.1.2 turns a record start down when the folder's drive has less than this free: 50 MB
+     * ({@code MBYTES_LEFT_STOP_REC}, in MiB, in OBSBasic_Recording.cpp).
+     */
+    static final long OBS_MIN_FREE_BYTES = 50L * 1024 * 1024;
+
+    /**
+     * Why OBS would turn down a record start into {@code folder} before it opens any encoder, or
+     * null when it wouldn't, or when that can't be told. OBS 32.1.2's StartRecording checks two
+     * things first: that the folder exists ({@code OutputPathValid}, which asks
+     * {@code QDir(path).exists()}), and that its drive has at least {@link #OBS_MIN_FREE_BYTES}
+     * free to this user ({@code LowDiskSpace}, which reads what {@link FileStore#getUsableSpace()}
+     * reads). Either failing shows an error dialog in OBS and starts nothing. A check that can't be
+     * made here blames nothing, so a broken encoder is still switched.
+     */
+    private String folderRefusal(String folder) {
+        Path dir;
+        try {
+            dir = Path.of(folder);
+        } catch (InvalidPathException e) {
+            return null;
+        }
+        if (!Files.isDirectory(dir)) {
+            return "the video folder " + folder + " doesn't exist (is its drive unplugged?), and OBS"
+                    + " won't record into a missing folder, whatever the encoder";
+        }
+        long free;
+        try {
+            free = usableSpace.usableBytes(dir);
+        } catch (IOException | RuntimeException e) {
+            log.debug("Could not read the free space for {}: {}", folder, e.toString());
+            return null;
+        }
+        if (free < OBS_MIN_FREE_BYTES) {
+            return "the drive holding the video folder " + folder + " has " + free / (1024 * 1024)
+                    + " MB free, and OBS won't record with under 50 MB free, whatever the encoder";
+        }
+        return null;
     }
 
     /** 24-char URL-safe token (144 bits of entropy) — ample for a loopback-only server. */
@@ -386,10 +451,7 @@ public class ObsConfigWriter implements EncoderFallback {
         // when blank ("auto"). The blank sentinel is never persisted, so the UI keeps showing Auto and a
         // GPU swap re-probes next launch; this never mutates/saves settings.
         String encoder = resolveEncoder(s);
-        String recPath =
-                (s.videoDir == null || s.videoDir.isBlank())
-                        ? paths.videoDir().toString()
-                        : s.videoDir;
+        String recPath = recordingFolder(s);
         // OBS stores SimpleOutput.FilePath in Qt QSettings INI form, where a single backslash is an
         // escape character -- a Windows path written with single backslashes (C:\Users\...) is
         // mangled on read (\U, \r, ... become bogus escapes), so OBS rejects it as a "bad output
@@ -418,6 +480,13 @@ public class ObsConfigWriter implements EncoderFallback {
         tokens.put("REC_FORMAT", (s.format == null || s.format.isBlank()) ? "hybrid_mp4" : s.format);
         String ini = substituteTokens(loadTemplate(PROFILE_TEMPLATE), tokens);
         writeAtomically(layout.profileIni(), ini);
+    }
+
+    /** The folder the profile has OBS record into: the one set in Settings, else the default. */
+    private String recordingFolder(SettingsStore.Settings s) {
+        return (s.videoDir == null || s.videoDir.isBlank())
+                ? paths.videoDir().toString()
+                : s.videoDir;
     }
 
     /** Matches a {@code @TOKEN@} placeholder ({@code A-Z}, {@code 0-9}, {@code _}) in the template. */
