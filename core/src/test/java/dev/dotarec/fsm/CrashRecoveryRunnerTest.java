@@ -983,6 +983,71 @@ class CrashRecoveryRunnerTest {
     }
 
     @Test
+    void aVideoFolderChosenAgainAdoptsNothingItGainedMeanwhile() throws Exception {
+        // Recording moves off the user's Videos folder and later back. Meanwhile their own OBS kept
+        // saving there, all of it newer than the floor Videos had the first time, so that floor must
+        // not come back.
+        Path videos = chooseVideoDir("Videos");
+        long first = System.currentTimeMillis() - 60L * 60_000L; // the boot that first read Videos
+        seedAdoptionFloor(videos, first);
+        chooseVideoDir("Dota2Rec");
+        runner.run(null); // a boot that records elsewhere
+        assertThat(storedFloor(videos)).isNull();
+        Path gained = writeModifiedAt(videos.resolve("2026-11-14 12-00-00.mp4"), first + 30L * 60_000L);
+        chooseVideoDir("Videos");
+        long before = System.currentTimeMillis();
+
+        newRunner().run(null);
+
+        assertThat(matches.findAll()).isEmpty();
+        assertThat(gained).exists();
+        assertThat(storedFloor(videos)).isNotNull().isGreaterThanOrEqualTo(before);
+    }
+
+    @Test
+    void anArchiveAddedBackAdoptsNothingItGainedMeanwhile() throws Exception {
+        Path archive = chooseArchive("hdd");
+        long first = System.currentTimeMillis() - 60L * 60_000L;
+        seedAdoptionFloor(archive, first);
+        removeArchive("hdd");
+        runner.run(null);
+        assertThat(storedFloor(archive)).isNull();
+        Path gained = writeModifiedAt(archive.resolve("2026-11-14 12-00-00.mkv"), first + 30L * 60_000L);
+        chooseArchive("hdd");
+
+        newRunner().run(null);
+
+        assertThat(matches.findAll()).isEmpty();
+        assertThat(gained).exists();
+        // The folder that stayed a root throughout keeps its floor.
+        assertThat(storedFloor(videoDir)).isZero();
+    }
+
+    @Test
+    void anUnpluggedArchiveKeepsItsFloor() throws Exception {
+        // A drive that is configured but unplugged is still a root: it keeps its floor, and what the
+        // recorder left on it is adopted once it's back.
+        Path archive = chooseArchive("hdd");
+        long first = System.currentTimeMillis() - 60L * 60_000L;
+        seedAdoptionFloor(archive, first);
+        Files.delete(archive);
+        runner.run(null);
+        assertThat(storedFloor(archive)).isEqualTo(first);
+        Files.createDirectories(archive);
+        Path leftover = writeModifiedAt(archive.resolve("2026-11-14 12-00-00.mkv"), first + 30L * 60_000L);
+
+        newRunner().run(null);
+
+        assertThat(matches.findAll())
+                .singleElement()
+                .satisfies(
+                        row -> {
+                            assertThat(row.videoPath()).isEqualTo(leftover.toString());
+                            assertThat(row.enrichmentState()).isEqualTo("gsi_only");
+                        });
+    }
+
+    @Test
     void theFloorsFileIsTheFormatBothAppsKeep() throws Exception {
         // The file the Go remake writes, laid out the way its json.MarshalIndent lays it out, and this
         // app's additions read back as plain JSON.
@@ -1215,6 +1280,15 @@ class CrashRecoveryRunnerTest {
                     return s;
                 });
         return archiveDir;
+    }
+
+    /** Removes the archive storage location {@code id} from the settings, leaving its folder. */
+    void removeArchive(String id) {
+        settings.update(
+                s -> {
+                    s.storageLocations.removeIf(location -> id.equals(location.id()));
+                    return s;
+                });
     }
 
     /** Inserts a minimal finalized match row pointing at {@code videoPath} and returns its id. */

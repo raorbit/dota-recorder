@@ -11,7 +11,10 @@ import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.Collection;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -25,6 +28,10 @@ import org.slf4j.LoggerFactory;
  * folder chosen where the user's own OBS saves (Videos, say) is full of names that pass. An adopted
  * file becomes a match row, and retention then deletes it or moves it to an archive drive. So each
  * root also gets a floor the first time a scan reads it, and nothing modified before it is adopted.
+ * A boot scan that no longer reads a folder drops its floor, so a folder chosen again, or an archive
+ * drive added back, starts from a new floor: what it gained while it wasn't ours is never adopted. A
+ * drive that is configured but unplugged is still a root and keeps its floor. Only a boot sees the
+ * roots, so a folder left and chosen again within one run keeps its old floor.
  *
  * <p>The cost is lopsided on purpose. An orphan the floor turns away only stays on disk, where the
  * user can still find it; adopting the user's file hands it to deletion. So an upgraded install
@@ -94,9 +101,11 @@ final class OrphanAdoptionFloors {
     }
 
     /**
-     * Gives every root that has no floor one at {@code startMs} and makes that durable before
-     * returning, so no file is adopted against a floor a crash could lose. Never throws: whatever
-     * goes wrong, the answer is to adopt nothing.
+     * Gives every root that has no floor one at {@code startMs}, drops the floor of any folder not in
+     * {@code roots}, and makes that durable before returning, so no file is adopted against a floor a
+     * crash could lose. {@code roots} must be every root the scan reads (the Go remake prunes only in
+     * its full scan, never in its separate link pass). Never throws: whatever goes wrong, the answer
+     * is to adopt nothing.
      */
     Snapshot prepare(Collection<Path> roots, long startMs) {
         if (file == null) {
@@ -123,15 +132,25 @@ final class OrphanAdoptionFloors {
             floors = new TreeMap<>();
             changed = true;
         }
+        Set<String> current = new HashSet<>();
         for (Path root : roots) {
             if (root == null) {
                 continue;
             }
             String key = key(root);
+            current.add(key);
             if (!floors.containsKey(key)) {
                 floors.put(key, startMs);
                 changed = true;
                 log.info("Only recordings written to {} from now on can be adopted as orphans", root);
+            }
+        }
+        for (Iterator<String> keys = floors.keySet().iterator(); keys.hasNext(); ) {
+            String key = keys.next();
+            if (!current.contains(key)) {
+                keys.remove();
+                changed = true;
+                log.info("Dropped the orphan adoption floor of {}, no longer recorded or archived to", key);
             }
         }
         if (changed) {

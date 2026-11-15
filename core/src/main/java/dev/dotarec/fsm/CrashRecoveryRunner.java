@@ -155,7 +155,8 @@ public class CrashRecoveryRunner implements ApplicationRunner {
         maintenanceLock.lock();
         try {
             // Before anything is linked or adopted, so a root new to this scan (the first boot after
-            // the upgrade, or a newly chosen folder) adopts nothing it already held.
+            // the upgrade, or a newly chosen folder) adopts nothing it already held. These are all the
+            // roots, so a folder that has stopped being one loses its floor here.
             OrphanAdoptionFloors.Snapshot floors =
                     adoptionFloors.prepare(scanRoots(), System.currentTimeMillis());
             List<RecordingSessionRow> unfinished = journal.findUnfinished();
