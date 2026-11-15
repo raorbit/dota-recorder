@@ -38,7 +38,9 @@ import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BooleanSupplier;
 import java.util.function.LongSupplier;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
@@ -560,25 +562,39 @@ class ObsControllerTest {
     }
 
     @Test
-    void ensureConnected_namesTheObsProcessEachConnectionReached_andKeepsItOnceItDrops() {
+    void ensureConnected_namesTheObsProcessEachConnectionReached_andKeepsItThroughADropAndAFailedReconnect() {
         // A relaunched OBS is told from a websocket blip by this, and the recording flag outlives a
-        // dropped connection only as long as the OBS process it names still runs.
+        // dropped connection only as long as the OBS process it names still runs. So the name has to
+        // outlast the drop itself and the scheduler's reconnects that fail while the relaunch's
+        // websocket is still coming up. Cleared at either, the scheduler would fall back on any
+        // process running the exe, find the relaunch, and keep the stale flag until that websocket
+        // came up.
         ObsProcess first = new ObsProcess(4_242L, Instant.parse("2026-11-15T18:00:00Z"));
         ObsProcess relaunched = new ObsProcess(5_120L, Instant.parse("2026-11-15T18:40:00Z"));
         ObsHealth health = new ObsHealth();
         ObsHealer healer = healerNaming(first, relaunched);
-        ObsController controller =
-                identifyingController(health, mock(OBSRemoteController.class), healer);
+        AtomicBoolean websocketUp = new AtomicBoolean(true);
+        ObsController controller = identifyingController(
+                health, mock(OBSRemoteController.class), healer, websocketUp::get);
 
-        controller.ensureConnected();
+        assertThat(controller.ensureConnected()).isTrue();
         assertThat(controller.connectedObsProcess()).isEqualTo(first);
 
-        health.setConnected(false); // OBS crashed
+        // OBS crashed: its socket closes, and onClose reports the drop.
+        websocketUp.set(false);
+        ReflectionTestUtils.invokeMethod(controller, "onConnectionLost");
         assertThat(controller.connectedObsProcess())
                 .as("still names the OBS that held any output")
                 .isEqualTo(first);
 
-        controller.ensureConnected(); // its relaunch's websocket came up
+        // The scheduler's next tick, while the relaunch's websocket isn't up yet.
+        assertThat(controller.ensureConnected()).isFalse();
+        assertThat(controller.connectedObsProcess())
+                .as("a reconnect that failed reached no OBS, so it names none in its place")
+                .isEqualTo(first);
+
+        websocketUp.set(true); // the relaunch's websocket came up
+        assertThat(controller.ensureConnected()).isTrue();
         assertThat(controller.connectedObsProcess()).isEqualTo(relaunched);
         assertThat(controller.isObsRunning(first)).isFalse();
         assertThat(controller.isObsRunning(relaunched)).isTrue();
@@ -619,6 +635,17 @@ class ObsControllerTest {
      */
     private static ObsController identifyingController(
             ObsHealth health, OBSRemoteController obs, ObsHealer healer) {
+        return identifyingController(health, obs, healer, () -> true);
+    }
+
+    /**
+     * As {@link #identifyingController(ObsHealth, OBSRemoteController, ObsHealer)}, but a connect
+     * attempt completes the handshake only while {@code websocketUp} holds. Otherwise it fails the
+     * way a refused connection does: its latch is released and onReady never fires.
+     */
+    private static ObsController identifyingController(
+            ObsHealth health, OBSRemoteController obs, ObsHealer healer,
+            BooleanSupplier websocketUp) {
         SettingsStore settings = mock(SettingsStore.class);
         when(settings.get()).thenReturn(new SettingsStore.Settings());
         GetVersionResponse version = mock(GetVersionResponse.class);
@@ -630,7 +657,9 @@ class ObsControllerTest {
                 sceneConfigurer(), healer) {
             @Override
             OBSRemoteController buildController(SettingsStore.Settings s, CountDownLatch latch) {
-                ReflectionTestUtils.setField(this, "connectionReady", true);
+                if (websocketUp.getAsBoolean()) {
+                    ReflectionTestUtils.setField(this, "connectionReady", true);
+                }
                 latch.countDown();
                 return obs;
             }
