@@ -79,12 +79,22 @@ check(
 // installer to start instead, and the firewall step starts both elevated. So everything the
 // installer starts, and everything a cmd line it starts runs, has to be named by its full path.
 // This ports the Go remake's guard (build/windows/installer_windows_test.go); this reader also
-// reads the switches cmd is given before its /c.
+// reads the switches cmd is given before its /c, NSIS's comments, LogicLib's one-liners, and cmd's
+// quotes, escapes, redirections, groups and own commands.
 //
 // Every cmd the installer starts also has to be given /d before its /c. Without it cmd first runs
 // the AutoRun commands in the registry, and anything the user runs can set HKCU's. The firewall
 // step's cmd runs elevated ("runas"), and an install for every user of the PC runs the whole
 // installer elevated, so any cmd it starts could run them with administrator rights.
+//
+// The check reads Exec, ExecWait, ExecShell, ExecShellWait and nsExec::Exec, ExecToLog and
+// ExecToStack, each on a line of its own or as the statement of a LogicLib one-liner (${IfThen},
+// ${IfNotThen} or ${IfCmd}), and every command of a cmd /c (or /k) line. For ExecShell it checks
+// the path of the file to open, not the program its type opens with, and lets a URL through, since
+// Windows doesn't look a URL up on disk. It doesn't read a program started any other way: through
+// a plugin, a !define, System::Call or a macro from outside build-resources (StdUtils' or UAC's).
+// Nor does it read what a program other than cmd runs (a PowerShell command, say). A command run
+// through cmd's call, start, if or for fails the check, since the check doesn't read it.
 const buildResources = path.join(repoRoot, 'build-resources');
 
 // The folders a program may be named from: the system's, and the ones the installer fills itself.
@@ -99,18 +109,21 @@ function hasFullPath(program) {
   );
 }
 
-// The script's lines, numbered. NSIS carries a line that ends in a backslash on to the next one.
+// The script's lines, numbered. NSIS carries a line that ends in a backslash (spaces after it
+// don't count) on to the next one, without the next one's indent.
 function scriptLines(text) {
   const lines = [];
   let start = null;
   let joined = '';
   text.split(/\r?\n/).forEach((line, i) => {
-    start ??= i + 1;
-    if (line.endsWith('\\')) {
-      joined += line.slice(0, -1);
+    let part = line.replace(/[ \t]+$/, '');
+    if (start == null) start = i + 1;
+    else part = part.replace(/^[ \t]+/, '');
+    if (part.endsWith('\\')) {
+      joined += part.slice(0, -1);
       return;
     }
-    lines.push({ number: start, text: joined + line });
+    lines.push({ number: start, text: joined + part });
     start = null;
     joined = '';
   });
@@ -118,39 +131,69 @@ function scriptLines(text) {
   return lines;
 }
 
-// One line split into its instruction and arguments, each unquoted. NSIS quotes with double quotes,
-// single quotes or backticks; inside one, $\" (or $\' or $\`) is a quote and $$ a dollar sign. A
-// comment line has none.
-function nsisArgs(line) {
-  const args = [];
-  let rest = line.trim();
-  while (rest !== '') {
-    if (args.length === 0 && (rest[0] === ';' || rest[0] === '#')) return [];
-    const quote = rest[0];
-    if (quote === '"' || quote === "'" || quote === '`') {
-      let arg = '';
-      let i = 1;
-      for (; i < rest.length && rest[i] !== quote; i++) {
-        const next = rest.slice(i, i + 3);
-        if (next.startsWith('$$')) {
-          arg += '$$';
-          i += 1;
-        } else if (/^\$\\["'`]$/.test(next)) {
-          arg += next[2];
-          i += 2;
-        } else {
-          arg += rest[i];
-        }
-      }
-      args.push(arg);
-      rest = rest.slice(i + 1).trim();
+// LogicLib's one-liners: ${IfThen} a == b ${|} statement ${|}, ${IfNotThen} the same, and
+// ${IfCmd} statement ${||} statement ${|}. ${|} stands for ' and ${||} for ' ', and ${IfCmd}
+// ends in a ${|} of its own, so each statement is a word in quotes, which NSIS later runs as a
+// line. NSIS doesn't mind the case of a ${name}.
+const oneLiner = /^\$\{(IfThen|IfNotThen|IfCmd)\}$/i;
+
+function withOneLinersQuoted(line) {
+  return line
+    .replace(/\$\{IfCmd\}/gi, (ifCmd) => ifCmd + " '")
+    .replaceAll('${||}', "' '")
+    .replaceAll('${|}', "'");
+}
+
+// One line's words, without their quotes or comments. NSIS quotes a word with double quotes,
+// single quotes or backticks, and $\" (or $\' or $\`) is a quote that doesn't end it; the word
+// keeps it as written, since a one-liner's statement is only unescaped when it runs. A word that
+// starts with ; or # comments out the rest of the line, and one that starts with /* everything up
+// to the next */, even on a later line: `comment` carries that on from one line to the next.
+function nsisWords(line, comment = { open: false }) {
+  const words = [];
+  let i = 0;
+  while (i < line.length) {
+    if (comment.open) {
+      const end = line.indexOf('*/', i);
+      if (end < 0) break;
+      comment.open = false;
+      i = end + 2;
+    } else if (line[i] === ' ' || line[i] === '\t') {
+      i++;
+    } else if (line[i] === ';' || line[i] === '#') {
+      break;
+    } else if (line.startsWith('/*', i)) {
+      comment.open = true;
+      i += 2;
     } else {
-      const end = rest.search(/\s/);
-      args.push(end < 0 ? rest : rest.slice(0, end));
-      rest = end < 0 ? '' : rest.slice(end).trim();
+      const quote = ['"', "'", '`'].includes(line[i]) ? line[i++] : null;
+      let word = '';
+      while (i < line.length && (quote == null ? !' \t'.includes(line[i]) : line[i] !== quote)) {
+        const escape = /^\$\\["'`]/.test(line.slice(i, i + 3)) ? 3 : 1;
+        word += line.slice(i, i + escape);
+        i += escape;
+      }
+      if (quote != null) i++; // past the closing quote
+      words.push(word);
     }
   }
-  return args;
+  return words;
+}
+
+// A word as NSIS hands it to an instruction, each $\" (or $\' or $\`) a plain quote.
+function unescaped(word) {
+  return word.replace(/\$\\(["'`])/g, '$1');
+}
+
+// The script's instructions, each as its words and the number of the line it starts on.
+function scriptInstructions(text) {
+  const comment = { open: false };
+  return scriptLines(text)
+    .map(({ number, text: line }) => ({
+      number,
+      words: nsisWords(withOneLinersQuoted(line), comment),
+    }))
+    .filter(({ words }) => words.length > 0);
 }
 
 // The options an instruction takes before its arguments, such as /TIMEOUT= or /INVOKEIDLIST.
@@ -170,13 +213,21 @@ function splitCommandLine(line) {
   return end < 0 ? [trimmed, ''] : [trimmed.slice(0, end), trimmed.slice(end)];
 }
 
-// The programs one line of script starts: the one an exec instruction names and, when that is cmd,
-// each one in the command it runs.
-function programsStarted(line) {
-  const args = nsisArgs(line);
-  if (args.length === 0) return [];
-  const rest = withoutFlags(args.slice(1));
-  switch (args[0].toLowerCase()) {
+// A URL (https:, mailto:, ms-settings: ...) opens in whatever handles it, so Windows doesn't look
+// it up on disk. Its scheme has two letters or more, which keeps C:\ a path.
+function isUrl(target) {
+  return /^[a-z][a-z\d+.-]+:/i.test(target);
+}
+
+// The programs one instruction starts: the one an exec instruction names and, when that is cmd,
+// each one in the command it runs. A LogicLib one-liner starts what its statements start.
+function programsStarted(words) {
+  if (words.length === 0) return [];
+  if (oneLiner.test(words[0])) {
+    return words.slice(1).flatMap((statement) => programsStarted(nsisWords(statement)));
+  }
+  const rest = withoutFlags(words.slice(1).map(unescaped));
+  switch (words[0].toLowerCase()) {
     case 'exec':
     case 'execwait':
     case 'nsexec::exec':
@@ -186,7 +237,7 @@ function programsStarted(line) {
     case 'execshell':
     case 'execshellwait':
       // The verb, then the file, then its parameters.
-      return rest.length < 2 ? [] : withCmdCommands(rest[1], rest[2] ?? '');
+      return rest.length < 2 || isUrl(rest[1]) ? [] : withCmdCommands(rest[1], rest[2] ?? '');
     default:
       return [];
   }
@@ -213,41 +264,134 @@ function withCmdCommands(program, commandLine) {
   if (command.startsWith('"') && last > 0) {
     command = command.slice(1, last) + command.slice(last + 1);
   }
-  for (const part of command.split(/[&|]/)) {
-    if (part.trim() !== '') started.push(...withCmdCommands(...splitCommandLine(part)));
-  }
+  for (const part of cmdCommands(command)) started.push(...cmdCommandStarts(part));
   return started;
 }
 
-let programsFound = 0;
-for (const name of readdirSync(buildResources).filter((n) => /\.ns[ih]$/i.test(n))) {
-  for (const line of scriptLines(readFileSync(path.join(buildResources, name), 'utf8'))) {
-    const where = `build-resources/${name}:${line.number}`;
-    for (const { program, switches, command } of programsStarted(line.text)) {
-      programsFound++;
-      check(
-        hasFullPath(program),
-        `${where} starts "${program}" without its full path, so Windows could start a copy left in the installer's folder or the install folder instead. Name it from ${programRoots.join(', ')}.`,
-      );
-      check(
-        switches == null || command != null,
-        `${where} starts cmd with no /c command this check can read, so it can't vouch for the programs that cmd runs.`,
-      );
-      check(
-        switches == null || switches.includes('/d'),
-        `${where} starts cmd without /d before its /c, so that cmd would first run the AutoRun commands in the registry, which anything the user runs can set, with its own rights (an administrator's, when elevated). Add /d.`,
-      );
+// The commands in a cmd command line. cmd splits it at each &, &&, | and || and around a group in
+// parentheses, but not at one in quotes, after a ^ (an escape, which cmd drops), or in a
+// redirection to a handle such as 2>&1. Each command comes back without its escapes, which is how
+// a cmd it starts would get it.
+function cmdCommands(line) {
+  const commands = [];
+  let command = '';
+  let quoted = false;
+  let groups = 0; // parentheses open around the command
+  let redirect = false; // the last character was a > or <, so a & names a handle
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    const handle = redirect && c === '&';
+    redirect = false;
+    if (c === '"' || quoted) {
+      if (c === '"') quoted = !quoted;
+      command += c;
+    } else if (c === '^') {
+      command += line[++i] ?? '';
+    } else if ((c === '&' && !handle) || c === '|') {
+      if (line[i + 1] === c) i++;
+      commands.push(command);
+      command = '';
+    } else if (c === '(' && /^[\s@,;=]*$/.test(command)) {
+      // Where a command's name would go, a ( opens a group.
+      groups++;
+      command = '';
+    } else if (c === ')' && groups > 0) {
+      groups--;
+      commands.push(command);
+      command = '';
+    } else {
+      redirect = c === '>' || c === '<';
+      command += c;
     }
   }
+  commands.push(command);
+  return commands;
 }
-// The installer edits the firewall on install and on uninstall, each time through cmd and netsh, so
-// a check that found fewer than four programs isn't reading the script.
-check(
-  programsFound >= 4,
-  `the installer check found only ${programsFound} programs started by the NSIS scripts in build-resources; is programsStarted still reading them?`,
-);
 
-// The reader has to keep seeing every way of starting a program, and a bare name has to stay bare.
+// cmd's own commands. Windows doesn't look these up, so they need no path, but call, start, if
+// and for run another command, which this check doesn't read.
+const cmdOwnCommands = new Set(
+  [
+    'assoc break cd chdir cls color copy date del dir dpath echo endlocal erase exit ftype goto',
+    'keys md mkdir mklink move path pause popd prompt pushd rd rem ren rename rmdir set setlocal',
+    'shift time title type ver verify vol',
+  ]
+    .join(' ')
+    .split(' '),
+);
+const cmdCommandRunners = new Set(['call', 'start', 'if', 'for']);
+
+// What one command of a cmd line starts. cmd skips an @, and the separators , ; and =, before a
+// command, and a redirection can come first too. It takes a name for one of its own commands even
+// with one of . ( / \ : + [ ] < > straight after it (echo.exe runs echo), but not in quotes.
+function cmdCommandStarts(command) {
+  let rest = command;
+  for (;;) {
+    rest = rest.replace(/^[\s@,;=]+/, '');
+    const redirection = /^\d?(>>?|<)(\s*&\s*\d|\s*"[^"]*"?|\s*[^\s"<>]*)/.exec(rest);
+    if (redirection == null) break;
+    rest = rest.slice(redirection[0].length);
+  }
+  if (rest === '') return [];
+  const own = /^[a-z]+(?=$|[\s.(;,=+[\]:\\/<>])/i.exec(rest)?.[0].toLowerCase();
+  if (cmdCommandRunners.has(own)) return [{ runs: own }];
+  if (cmdOwnCommands.has(own)) return [];
+  return withCmdCommands(...splitCmdCommand(rest));
+}
+
+// A cmd command's program, unquoted, and the rest of the command. cmd ends a name that isn't in
+// quotes at a space or at one of ; , = ( < > / after its first character.
+function splitCmdCommand(command) {
+  if (command.startsWith('"')) return splitCommandLine(command);
+  const end = command.slice(1).search(/[\s;,=(<>/]/) + 1;
+  return end > 0 ? [command.slice(0, end), command.slice(end)] : [command, ''];
+}
+
+// Every program a script starts, and every command cmd's call, start, if or for runs.
+function programsIn(text) {
+  return scriptInstructions(text).flatMap(({ words }) => programsStarted(words));
+}
+
+// What breaks the rules in a script, each problem with its line's number, what it is, and the
+// program (or cmd's own command) it is about. `programs` counts the programs the script starts.
+function installerProblems(text) {
+  const problems = [];
+  let programs = 0;
+  for (const { number, words } of scriptInstructions(text)) {
+    for (const { program, switches, command, runs } of programsStarted(words)) {
+      if (runs != null) {
+        problems.push({ number, problem: 'unread', name: runs });
+        continue;
+      }
+      programs++;
+      if (!hasFullPath(program)) problems.push({ number, problem: 'bare', name: program });
+      if (switches != null && command == null) {
+        problems.push({ number, problem: 'no /c', name: program });
+      }
+      if (switches != null && !switches.includes('/d')) {
+        problems.push({ number, problem: 'no /d', name: program });
+      }
+    }
+  }
+  return { programs, problems };
+}
+
+const problemMessages = {
+  bare: (program) =>
+    `starts "${program}" without its full path, so Windows could start a copy left in the installer's folder or the install folder instead. Name it from ${programRoots.join(', ')}.`,
+  'no /c': () =>
+    `starts cmd with no /c command this check can read, so it can't vouch for the programs that cmd runs.`,
+  'no /d': () =>
+    `starts cmd without /d before its /c, so that cmd would first run the AutoRun commands in the registry, which anything the user runs can set, with its own rights (an administrator's, when elevated). Add /d.`,
+  unread: (command) =>
+    `runs a command through cmd's ${command}, which this check doesn't read, so it can't vouch for the program that command starts. Start that program as a command of its own.`,
+};
+
+// The reader and the rules are checked first, on scripts whose programs and problems are known, so
+// a change that stops the reader seeing a program, or makes it see one that isn't there, fails here
+// before it can pass or fail the real scripts.
+//
+// The programs each script starts. The Go table's cases come first.
 const readerCases = [
   [
     String.raw`  nsExec::Exec 'cmd /c tasklist /FI "IMAGENAME eq x.exe" /NH | find /I "x.exe" >nul'`,
@@ -278,14 +422,32 @@ const readerCases = [
   [`Exec powershell.exe`, ['powershell.exe']],
   [`; nsExec::Exec 'taskkill /F'`, []],
   [`DetailPrint "Exec cmd"`, []],
+  // A comment can start after an instruction's first word too.
+  [`ExecShell "open" ;"netsh.exe"`, []],
+  // cmd's escapes, redirections, groups and own commands (a quoted "ver" isn't one), where cmd ends
+  // a name, and LogicLib's one-liners, whose statement can follow its ${|} with no space.
+  [
+    String.raw`ExecWait 'cmd /c echo a 2>&1 ^& b & (>nul netsh c) & @netsh d || "ver"'`,
+    ['cmd', 'netsh', 'netsh', 'ver'],
+  ],
+  [
+    String.raw`ExecWait 'cmd /c $SYSDIR\cmd.exe/d /c netsh>nul a ^& netsh,b'`,
+    ['cmd', '$SYSDIR\\cmd.exe', 'netsh', 'netsh'],
+  ],
+  [
+    '${IfThen} ${isUpdated} ${|} ExecShellWait "runas" "cmd.exe" "/c netsh a" SW_HIDE ${|}',
+    ['cmd.exe', 'netsh'],
+  ],
+  ['${IfCmd} MessageBox MB_YESNO "Stop?" IDYES ${||}Exec "taskkill x"${|}', ['taskkill']],
 ];
 for (const [script, want] of readerCases) {
-  const got = scriptLines(script).flatMap((l) => programsStarted(l.text).map((p) => p.program));
+  const got = programsIn(script).map((started) => started.program);
   check(
     JSON.stringify(got) === JSON.stringify(want),
     `the installer check reads ${JSON.stringify(script)} as starting ${JSON.stringify(got)}, not ${JSON.stringify(want)}.`,
   );
 }
+// A bare name has to stay bare.
 for (const bare of ['cmd', 'cmd.exe', '.\\cmd.exe', '$EXEDIR\\cmd.exe', '$CmdPath']) {
   check(!hasFullPath(bare), `the installer check takes "${bare}" for a full path.`);
 }
@@ -298,10 +460,106 @@ const autoRunCases = [
 ];
 for (const [line, givenD] of autoRunCases) {
   check(
-    programsStarted(line)[0].switches.includes('/d') === givenD,
+    programsIn(line)[0].switches.includes('/d') === givenD,
     `the installer check reads ${JSON.stringify(line)} as ${givenD ? 'not ' : ''}giving cmd /d.`,
   );
 }
+// Scripts the check must pass or fail, each with its problems as "line problem name".
+const problemCases = [
+  // cmd syntax that starts nothing more: a redirection, a & in quotes or after a ^, cmd's own
+  // commands, and a group with a redirection in it.
+  [
+    String.raw`ExecShellWait "runas" "$SYSDIR\cmd.exe" '/d /c ""$SYSDIR\netsh.exe" a name="x & y" b=c^&d >>"$PLUGINSDIR\fw.log" 2>&1"' SW_HIDE`,
+    [],
+  ],
+  [
+    String.raw`ExecWait '"$SYSDIR\cmd.exe" /d /c ("$SYSDIR\netsh.exe" a & 2>"%TEMP%\fw log.txt" "$SYSDIR\netsh.exe" b & ver) 2>nul & exit /b 0 || ver >nul & @echo done'`,
+    [],
+  ],
+  // A URL isn't looked up on disk, though a path on a drive is still a path. A comment isn't run,
+  // nor is the line after a comment that ends in a backslash.
+  [`ExecShell "open" "https://example.com/welcome"`, []],
+  [String.raw`ExecShell "open" "C:\Tools\x.exe"`, ['1 bare C:\\Tools\\x.exe']],
+  [
+    [
+      '/*',
+      `  ExecWait 'cmd /c netsh a'`,
+      '*/',
+      String.raw`Exec /* "cmd" */ '"$INSTDIR\app.exe"' ; or cmd /c netsh`,
+      '; a note \\',
+      `ExecShellWait "runas" "cmd.exe" '/c netsh a' SW_HIDE`,
+    ].join('\n'),
+    [],
+  ],
+  // The firewall step's line before full paths and /d, and a bare name where one can hide: after a
+  // ^, in quotes, behind a comment, and in a cmd the first one starts, which gets a & the first one
+  // was given escaped.
+  [
+    `ExecShellWait "runas" "cmd.exe" '/c netsh a' SW_HIDE`,
+    ['1 bare cmd.exe', '1 no /d cmd.exe', '1 bare netsh'],
+  ],
+  [
+    String.raw`ExecWait '"$SYSDIR\cmd.exe" /d /c ne^tsh a & "ver" & "$SYSDIR\cmd.exe" /d /c "$SYSDIR\netsh.exe" b ^& netsh c'`,
+    ['1 bare netsh', '1 bare ver', '1 bare netsh'],
+  ],
+  [String.raw`/* was: cmd */ ExecWait '"$SYSDIR\cmd.exe" /d /c netsh a'`, ['1 bare netsh']],
+  // cmd's call, start, if and for run a command this check doesn't read.
+  [
+    String.raw`ExecWait '"$SYSDIR\cmd.exe" /d /c call x.cmd & start "" y & if exist z "$SYSDIR\netsh.exe" a & for %i in (a) do w'`,
+    ['1 unread call', '1 unread start', '1 unread if', '1 unread for'],
+  ],
+  // LogicLib's one-liners. A $\" stays escaped until the statement runs.
+  [
+    '${IfThen} ${isUpdated} ${|} ExecShellWait "runas" "cmd.exe" "/c netsh a" SW_HIDE ${|}',
+    ['1 bare cmd.exe', '1 no /d cmd.exe', '1 bare netsh'],
+  ],
+  ['${IfNotThen} ${Silent} ${|}nsExec::Exec "taskkill /F /IM x.exe"${|}', ['1 bare taskkill']],
+  [
+    '${IfThen} $0 == 1 ${|} ExecWait "$\\"$SYSDIR\\cmd.exe$\\" /c $\\"$SYSDIR\\netsh.exe$\\" a" ${|}',
+    ['1 no /d $SYSDIR\\cmd.exe'],
+  ],
+  [
+    '${IfCmd} MessageBox MB_YESNO "Stop it?" IDYES ${||} ExecWait `"$SYSDIR\\cmd.exe" /d /c netsh a` ${|}',
+    ['1 bare netsh'],
+  ],
+  // A /* in quotes opens no comment. A line carried on past a backslash (with spaces after it, the
+  // first time here) loses the next line's indent, even inside a name, and keeps its first line's
+  // number. A document is looked up like a program.
+  [
+    [
+      String.raw`ExecWait '"$SYSDIR\netsh.exe" /*'`,
+      String.raw`ExecShellWait "runas" "$SYSDIR\cmd.exe" \  `,
+      '    \'/c "$SYSDIR\\netsh.exe" a & net\\',
+      String.raw`    sh b' SW_HIDE`,
+      `ExecShell "open" "readme.txt"`,
+    ].join('\n'),
+    ['2 no /d $SYSDIR\\cmd.exe', '2 bare netsh', '5 bare readme.txt'],
+  ],
+];
+for (const [script, want] of problemCases) {
+  const got = installerProblems(script).problems.map((p) => `${p.number} ${p.problem} ${p.name}`);
+  check(
+    JSON.stringify(got) === JSON.stringify(want),
+    `the installer check finds ${JSON.stringify(got)} in ${JSON.stringify(script)}, not ${JSON.stringify(want)}.`,
+  );
+}
+
+let programsFound = 0;
+for (const file of readdirSync(buildResources).filter((n) => /\.ns[ih]$/i.test(n))) {
+  const { programs, problems } = installerProblems(
+    readFileSync(path.join(buildResources, file), 'utf8'),
+  );
+  programsFound += programs;
+  for (const { number, problem, name } of problems) {
+    failures.push(`build-resources/${file}:${number} ${problemMessages[problem](name)}`);
+  }
+}
+// The installer edits the firewall on install and on uninstall, each time through cmd and netsh, so
+// a check that found fewer than four programs isn't reading the script.
+check(
+  programsFound >= 4,
+  `the installer check found only ${programsFound} programs started by the NSIS scripts in build-resources; is programsStarted still reading them?`,
+);
 
 // --- version-source parity -----------------------------------------------------------------------
 // The app version has TWO independent readers: core/build.gradle.kts reads the ROOT package.json for
