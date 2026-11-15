@@ -344,6 +344,12 @@ public class MatchRepository {
      * snapshotted video, not on starred: a star PATCH that lands during the unlink stars a row whose
      * file is gone, and the prune catches that row up all the same.
      *
+     * <p>Having no transaction also keeps the claim whole on a pooled connection that another
+     * caller's failed BEGIN IMMEDIATE left with sqlite-jdbc's auto-commit flag off and no transaction
+     * open (Hikari never sees that state, so it hands the connection out as it is): a transaction
+     * begun on it commits statement by statement, but each step here commits on its own either way.
+     * Nor can this call leave such a connection behind, as it never turns auto-commit off.
+     *
      * @param unlink deletes the row's video and reports whether it is gone
      * @return true only if THIS call claimed the row, {@code unlink} removed its video, and the prune
      *     changed the row
