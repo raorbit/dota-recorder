@@ -106,17 +106,23 @@ class OrphanAdoptionFloorsTest {
     }
 
     @Test
-    void onlyAVideoFolderWithoutAFloorTakesTheJournalsEarlierFirstFloor(@TempDir Path dir) throws Exception {
+    void onlyAVideoFolderFlooredThisScanLinksFromTheJournalsEarlierStart(@TempDir Path dir) throws Exception {
         Path video = dir.resolve("video");
         Path archive = dir.resolve("archive");
         OrphanAdoptionFloors floors = new OrphanAdoptionFloors(dir.resolve("data"));
 
         OrphanAdoptionFloors.Snapshot first = floors.prepare(video, List.of(archive), 50_000L, 20_000L);
 
-        assertThat(first.of(video)).isEqualTo(new OrphanAdoptionFloors.Floor(20_000L, true));
-        assertThat(first.of(archive)).isEqualTo(new OrphanAdoptionFloors.Floor(50_000L, true));
-        // An existing floor is never lowered.
-        assertThat(floors.prepare(video, List.of(archive), 90_000L, 1_000L).of(video))
-                .isEqualTo(new OrphanAdoptionFloors.Floor(20_000L, true));
+        // The link reaches back; the floor every adoption is held to, and the stored one, don't.
+        assertThat(first.linkFloorOf(video)).isEqualTo(new OrphanAdoptionFloors.Floor(20_000L, true));
+        assertThat(first.of(video)).isEqualTo(new OrphanAdoptionFloors.Floor(50_000L, true));
+        assertThat(OrphanAdoptionFloors.read(dir.resolve("data").resolve(OrphanAdoptionFloors.FILE_NAME)))
+                .containsEntry(OrphanAdoptionFloors.key(video), 50_000L);
+        assertThat(first.linkFloorOf(archive)).isEqualTo(new OrphanAdoptionFloors.Floor(50_000L, true));
+        // A later scan finds the floor already there: it is never lowered, and the link no longer
+        // reaches back.
+        OrphanAdoptionFloors.Snapshot later = floors.prepare(video, List.of(archive), 90_000L, 1_000L);
+        assertThat(later.of(video)).isEqualTo(new OrphanAdoptionFloors.Floor(50_000L, true));
+        assertThat(later.linkFloorOf(video)).isEqualTo(new OrphanAdoptionFloors.Floor(50_000L, true));
     }
 }

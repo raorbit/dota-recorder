@@ -12,6 +12,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
@@ -43,13 +44,17 @@ import org.slf4j.LoggerFactory;
  * stays on disk too. What's left: a personal OBS recording made into the same folder after its
  * floor, with OBS's default name, is still adopted.
  *
- * <p>One exception, for the video folder only. When it gets its first floor in a boot that recovers
- * an unfinished recording with no journaled path (the upgrade boot after a crash mid-match, say),
- * the floor starts at the earliest such recording's start, less the link window's grace, rather than
- * at the scan: the journal is evidence this app was recording there from then, and a floor at the
- * scan would turn away the very file the journal is about to claim, on this boot and every later
- * one. An existing floor is never lowered, and archive drives aren't recorded into, so their first
- * floor is always the scan's.
+ * <p>One exception, for linking alone. When the video folder gets its first floor in a boot that
+ * recovers an unfinished recording with no journaled path (the upgrade boot after a crash mid-match,
+ * say), the link that claims that recording's file may reach back to the earliest such recording's
+ * start, less the link window's grace: the journal is evidence this app was recording then, and a
+ * floor at the scan would turn away the very file the journal is about to claim. The link is still
+ * held to its recording's own window. The reach-back is never stored, and the folder's floor is the
+ * scan's like any other, because the floor also gates the import of unclaimed orphans: stored, it
+ * would admit every default-named file the user's own OBS wrote there from the crashed match on. So
+ * a recording whose recovery fails on that boot can't link a file from before the floor on a later
+ * one; the file stays on disk. An existing floor is never lowered, and archive drives aren't
+ * recorded into, so they never reach back.
  *
  * <p>The floors live in their own file in the data folder, never in {@code settings.json}: that
  * file is shared ground with the Go remake, and this app's settings loader rejects a key it doesn't
@@ -91,11 +96,19 @@ final class OrphanAdoptionFloors {
      */
     static final class Snapshot {
         private final Map<String, Long> floors;
+        /** Earlier floors for linking alone, by root key, for roots that got their floor this scan. */
+        private final Map<String, Long> linkFrom;
 
-        private Snapshot(Map<String, Long> floors) {
+        private Snapshot(Map<String, Long> floors, Map<String, Long> linkFrom) {
             this.floors = floors;
+            this.linkFrom = linkFrom;
         }
 
+        private static Snapshot none() {
+            return new Snapshot(null, Map.of());
+        }
+
+        /** The root's floor, which every adoption is held to. */
         Floor of(Path root) {
             if (floors == null || root == null) {
                 return Floor.NONE;
@@ -108,31 +121,50 @@ final class OrphanAdoptionFloors {
                 return Floor.NONE;
             }
         }
+
+        /**
+         * The floor a link to a crashed recording is held to: {@link #of}, or earlier for a video
+         * folder that got its floor in this very scan while the journal held a pathless recording that
+         * started before it (see the class notes). Only the link may use it.
+         */
+        Floor linkFloorOf(Path root) {
+            Floor stored = of(root);
+            if (!stored.set() || linkFrom.isEmpty()) {
+                return stored;
+            }
+            try {
+                Long from = linkFrom.get(key(root));
+                return from == null ? stored : new Floor(Math.min(from, stored.fromMs()), true);
+            } catch (RuntimeException | java.io.IOError e) {
+                return stored;
+            }
+        }
     }
 
     /**
-     * Gives every root that has no floor one, at {@code startMs} for an archive and at {@code
-     * firstVideoFloorMs} for the video folder, drops the floor of any other folder, and makes that
-     * durable before returning, so no file is adopted against a floor a crash could lose. The roots
-     * must be every root the scan reads (the Go remake prunes only in its full scan, never in its
-     * separate link pass). Never throws: whatever goes wrong, the answer is to adopt nothing.
+     * Gives every root that has no floor one, at {@code startMs}, drops the floor of any other folder,
+     * and makes that durable before returning, so no file is adopted against a floor a crash could
+     * lose. A video folder that gets its floor here may link from {@code videoLinkFromMs} when that is
+     * earlier ({@link Snapshot#linkFloorOf}); that is never stored. The roots must be every root the
+     * scan reads (the Go remake prunes only in its full scan, never in its separate link pass). Never
+     * throws: whatever goes wrong, the answer is to adopt nothing.
      */
-    Snapshot prepare(Path videoDir, Collection<Path> archives, long startMs, long firstVideoFloorMs) {
+    Snapshot prepare(Path videoDir, Collection<Path> archives, long startMs, long videoLinkFromMs) {
         if (file == null) {
             log.warn("No data folder to keep orphan adoption floors in; adopting no orphan recordings");
-            return new Snapshot(null);
+            return Snapshot.none();
         }
         try {
-            return prepareOrThrow(videoDir, archives, startMs, firstVideoFloorMs);
+            return prepareOrThrow(videoDir, archives, startMs, videoLinkFromMs);
         } catch (RuntimeException | java.io.IOError e) {
             log.warn("Could not prepare the orphan adoption floors {}; adopting no orphan recordings"
                     + " this time: {}", file, e.toString());
-            return new Snapshot(null);
+            return Snapshot.none();
         }
     }
 
     private Snapshot prepareOrThrow(
-            Path videoDir, Collection<Path> archives, long startMs, long firstVideoFloorMs) {
+            Path videoDir, Collection<Path> archives, long startMs, long videoLinkFromMs) {
         List<Path> roots = new ArrayList<>();
         roots.add(videoDir);
         roots.addAll(archives);
@@ -147,6 +179,7 @@ final class OrphanAdoptionFloors {
             changed = true;
         }
         Set<String> current = new HashSet<>();
+        Map<String, Long> linkFrom = new HashMap<>();
         for (int i = 0; i < roots.size(); i++) {
             Path root = roots.get(i);
             if (root == null) {
@@ -155,10 +188,14 @@ final class OrphanAdoptionFloors {
             String key = key(root);
             current.add(key);
             if (!floors.containsKey(key)) {
-                long first = i == 0 ? firstVideoFloorMs : startMs;
-                floors.put(key, first);
+                floors.put(key, startMs);
                 changed = true;
-                log.info("Only recordings written to {} from {} on can be adopted as orphans", root, first);
+                log.info("Only recordings written to {} from {} on can be adopted as orphans", root, startMs);
+                if (i == 0 && videoLinkFromMs < startMs) {
+                    linkFrom.put(key, videoLinkFromMs);
+                    log.info("A crashed recording's file in {} can still be linked from {} on", root,
+                            videoLinkFromMs);
+                }
             }
         }
         for (Iterator<String> keys = floors.keySet().iterator(); keys.hasNext(); ) {
@@ -175,10 +212,10 @@ final class OrphanAdoptionFloors {
             } catch (Exception e) {
                 log.warn("Could not save the orphan adoption floors {}; adopting no orphan recordings"
                         + " this time: {}", file, e.toString());
-                return new Snapshot(null);
+                return Snapshot.none();
             }
         }
-        return new Snapshot(floors);
+        return new Snapshot(floors, linkFrom);
     }
 
     /**
