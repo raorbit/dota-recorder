@@ -16,8 +16,11 @@ import java.time.Instant;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
+import java.util.function.Predicate;
+import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 /**
@@ -142,6 +145,19 @@ public class ObsController implements ObsRecorder, MatchFsm.RecordStatusProbe {
     private volatile long connectionEpoch;
 
     /**
+     * The OBS process the last identified connection talks to, or null when it couldn't be named;
+     * see {@link ObsRecorder#connectedObsProcess()}. Kept once that connection drops: it names the
+     * OBS that holds any output the recording flag still reports.
+     */
+    private volatile ObsProcess connectedProcess;
+
+    /** Names the OBS process a new connection talks to ({@link ObsHealer#findObsProcess()}). */
+    private final Supplier<ObsProcess> findObsProcess;
+
+    /** Whether an OBS process still runs ({@link ObsHealer#isObsRunning(ObsProcess)}). */
+    private final Predicate<ObsProcess> obsProcessRunning;
+
+    /**
      * Whether the audio captures should be in OBS: set by {@link #attachAudio()}, cleared by {@link
      * #detachIdleAudio()}. The scene setup on (re)connect applies it, so a reconnect mid-recording
      * keeps the audio and one between matches doesn't bring it back.
@@ -168,15 +184,42 @@ public class ObsController implements ObsRecorder, MatchFsm.RecordStatusProbe {
      */
     private Long audioFailedAtNanos;
 
+    @Autowired
     public ObsController(
             SettingsStore settings,
             ObsHealth health,
             ObsEvents events,
+            ObsSceneConfigurer sceneConfigurer,
+            ObsHealer healer) {
+        this(settings, health, events, sceneConfigurer, healer::findObsProcess,
+                healer::isObsRunning);
+    }
+
+    /**
+     * For tests that don't care which OBS a connection reached: no process is ever named, so callers
+     * fall back on the connection count.
+     */
+    ObsController(
+            SettingsStore settings,
+            ObsHealth health,
+            ObsEvents events,
             ObsSceneConfigurer sceneConfigurer) {
+        this(settings, health, events, sceneConfigurer, () -> null, process -> true);
+    }
+
+    private ObsController(
+            SettingsStore settings,
+            ObsHealth health,
+            ObsEvents events,
+            ObsSceneConfigurer sceneConfigurer,
+            Supplier<ObsProcess> findObsProcess,
+            Predicate<ObsProcess> obsProcessRunning) {
         this.settings = settings;
         this.health = health;
         this.events = events;
         this.sceneConfigurer = sceneConfigurer;
+        this.findObsProcess = findObsProcess;
+        this.obsProcessRunning = obsProcessRunning;
     }
 
     /**
@@ -361,10 +404,16 @@ public class ObsController implements ObsRecorder, MatchFsm.RecordStatusProbe {
             // the socket. A protocol mismatch otherwise surfaces as a confusing generic failure.
             verifyProtocol();
             connectionEpoch++;
+            // Which OBS this connection reached, named before it counts as connected so a reader
+            // that sees the connection sees its process too. A reconnect to the same OBS then names
+            // the same process, and a relaunched OBS a different one.
+            ObsProcess process = findObsProcess.get();
+            connectedProcess = process;
             health.setConnected(true);
             refreshSceneActive();
             refreshRecordingActive();
-            log.info("OBS connected at {}:{}", settings.get().obsHost, settings.get().obsPort);
+            log.info("OBS connected at {}:{} ({})", settings.get().obsHost, settings.get().obsPort,
+                    process == null ? "its process unknown" : "pid " + process.pid());
             return true;
         } catch (ObsException e) {
             // verifyProtocol() threw: a real connection but the wrong protocol. Surface the clear
@@ -663,6 +712,16 @@ public class ObsController implements ObsRecorder, MatchFsm.RecordStatusProbe {
     @Override
     public long connectionEpoch() {
         return connectionEpoch;
+    }
+
+    @Override
+    public ObsProcess connectedObsProcess() {
+        return connectedProcess;
+    }
+
+    @Override
+    public boolean isObsRunning(ObsProcess process) {
+        return obsProcessRunning.test(process);
     }
 
     @Override

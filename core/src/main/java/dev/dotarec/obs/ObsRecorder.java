@@ -120,12 +120,31 @@ public interface ObsRecorder {
     }
 
     /**
-     * Counts the identified connections made so far; each reconnect, and so each relaunched OBS,
-     * gets a new value. A recording started under another value is not the connected OBS's own: if
-     * that OBS reports no active output, the one that was recording is gone.
+     * Counts the identified connections made so far; each reconnect gets a new value, whether it
+     * reached a relaunched OBS or the same one after a websocket blip. Only where the OBS process
+     * can't be named (see {@link #connectedObsProcess()}) does the FSM fall back on it to tell a
+     * relaunch, and a blip then looks like one too.
      */
     default long connectionEpoch() {
         return 0L;
+    }
+
+    /**
+     * The OBS process the current connection talks to, or, once that connection dropped, the one
+     * the last connection did; null when it couldn't be named (see
+     * {@link ObsHealer#findObsProcess()}). Unlike {@link #connectionEpoch()} it stays the same
+     * across a reconnect to the same OBS, so it tells a relaunched OBS from a websocket blip.
+     */
+    default ObsProcess connectedObsProcess() {
+        return null;
+    }
+
+    /**
+     * Whether {@code process} still runs. True whenever that can't be told, so a caller never acts
+     * on a guess that OBS is gone.
+     */
+    default boolean isObsRunning(ObsProcess process) {
+        return true;
     }
 
     /**
