@@ -3,8 +3,10 @@ package dev.dotarec.bridge;
 import dev.dotarec.retention.StorageMaintenanceLock;
 import jakarta.annotation.PreDestroy;
 import java.time.Duration;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -39,7 +41,8 @@ import org.springframework.stereotype.Component;
  * so every window shows those rows as being deleted, one opened after the delete was asked for
  * included. A second delete of a pending one runs nothing and is answered as queued: the first finishes
  * it. A delete's own frame ({@code match.deleted}, {@code clip.deleted}) goes out once it is done,
- * wherever it ran.
+ * wherever it ran. A queued one that fails says so in a {@code delete.failed} frame, since no request is
+ * left to carry the reason.
  *
  * <p>The queue lives only in memory. A delete still queued when the core exits (the app quits, or the
  * core crashes and is restarted) is lost, and its row is listed again as an ordinary one.
@@ -63,7 +66,7 @@ public class DeleteQueue {
             this.wire = wire;
         }
 
-        /** Its name in the log. */
+        /** Its name in the log and in a {@code delete.failed} frame. */
         String wire() {
             return wire;
         }
@@ -72,7 +75,7 @@ public class DeleteQueue {
     private record Key(Kind kind, long id) {}
 
     private final StorageMaintenanceLock maintenanceLock;
-    /** Publishes the status frames; null in tests that don't observe them. */
+    /** Publishes the status and failure frames; null in tests that don't observe them. */
     private final EventPublisher events;
     private final Duration lockWait;
     /** Every delete accepted and not finished, in the order they came. Guarded by itself. */
@@ -203,6 +206,7 @@ public class DeleteQueue {
             announce.accept(result);
         } else if (failure != null) {
             log.warn("The queued delete of {} {} failed", key.kind().wire(), key.id(), failure);
+            publishFailure(key, failure);
         } else {
             log.info("Dropped the queued delete of {} {}: the core is shutting down", key.kind().wire(),
                     key.id());
@@ -252,5 +256,18 @@ public class DeleteQueue {
         } catch (RuntimeException e) {
             log.debug("Status broadcast after a delete-queue change failed: {}", e.toString());
         }
+    }
+
+    /** {@code delete.failed}: what a queued delete was, and why it failed. */
+    private void publishFailure(Key key, RuntimeException failure) {
+        if (events == null) {
+            return;
+        }
+        Map<String, Object> payload = new HashMap<>(3);
+        payload.put("kind", key.kind().wire());
+        payload.put("id", key.id());
+        String message = failure.getMessage();
+        payload.put("message", message == null || message.isBlank() ? failure.toString() : message);
+        events.publish("delete.failed", payload);
     }
 }

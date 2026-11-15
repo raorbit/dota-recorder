@@ -13,6 +13,7 @@ import dev.dotarec.bridge.DeleteQueue.Kind;
 import dev.dotarec.retention.StorageMaintenanceLock;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
@@ -173,7 +174,7 @@ class DeleteQueueTest {
     }
 
     @Test
-    void aQueuedDeleteThatFails_isNoLongerPending() throws Exception {
+    void aQueuedDeleteThatFails_saysSoInADeleteFailedFrame() throws Exception {
         try (HeldLock pass = HeldLock.hold(lock)) {
             queue.run(Kind.CLIP, 5, () -> {
                 throw new IllegalStateException("database is locked");
@@ -182,6 +183,8 @@ class DeleteQueueTest {
             queue.drain(WORKER);
         }
 
+        verify(events).publish("delete.failed",
+                Map.of("kind", "clip", "id", 5L, "message", "database is locked"));
         verify(events, never()).publish(eq("clip.deleted"), any());
         verify(events, times(2)).publishStatus();
         assertThat(log).isEmpty();
