@@ -94,6 +94,15 @@ export interface StatusSnapshot {
   readonly storage?: {
     readonly lowDisk: LowDiskStatus | null;
   };
+  // The recordings and clips whose delete the core has accepted and not finished: queued behind its
+  // storage-maintenance lock, or running. A window shows those rows as being deleted, one opened after
+  // the delete was asked for too. Optional only for a core predating it; the parser fills it in.
+  readonly deletes?: PendingDeletes;
+}
+
+export interface PendingDeletes {
+  readonly matchIds: readonly number[];
+  readonly clipIds: readonly number[];
 }
 
 // A low-disk observation as /status carries it: the warning fields plus the wall-clock time of the
@@ -810,7 +819,19 @@ function parseStatusSnapshot(payload: unknown): StatusSnapshot | null {
     // storage is optional on the wire (an older core omits it); a missing or malformed lowDisk reads
     // as healthy rather than rejecting the frame.
     storage: { lowDisk: parseLowDiskStatus(payload.storage) },
+    // deletes likewise: absent (an older core) or malformed reads as none pending.
+    deletes: parsePendingDeletes(payload.deletes),
   };
+}
+
+// deletes from a status payload: the recording and clip ids with a delete pending in the core. A list
+// that is absent or malformed reads as empty, and an entry that isn't a number is left out.
+function parsePendingDeletes(deletes: unknown): PendingDeletes {
+  const ids = (list: unknown): number[] =>
+    Array.isArray(list) ? list.filter((id): id is number => typeof id === 'number') : [];
+  return isRecord(deletes)
+    ? { matchIds: ids(deletes.matchIds), clipIds: ids(deletes.clipIds) }
+    : { matchIds: [], clipIds: [] };
 }
 
 // storage.lowDisk from a /status body: the DiskWarning fields plus observedAtMs, or null when the

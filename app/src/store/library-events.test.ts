@@ -495,6 +495,80 @@ describe('startLibrary storage-events wiring', () => {
     teardown();
   });
 
+  it('marks what the core says it is deleting, in a window opened after the deletes were asked for', async () => {
+    // The window was closed to the tray while the core waited on its maintenance lock with these
+    // queued: the new one learns of them from GET /status, then from each status frame.
+    const statusWith = (matchIds: number[], clipIds: number[]) => ({
+      ...IDLE_STATUS,
+      deletes: { matchIds, clipIds },
+    });
+    let status = statusWith([7], [5]);
+    const serve = fetchMock.getMockImplementation() as (url: unknown) => Promise<unknown>;
+    fetchMock.mockImplementation((url: unknown) =>
+      String(url).includes('/status')
+        ? Promise.resolve({ ok: true, json: async () => status })
+        : serve(url),
+    );
+    const teardown = startLibrary();
+    await flush();
+    expect(queuedMatches()).toEqual([7]);
+    expect(queuedClips()).toEqual([5]);
+
+    const ws = FakeWebSocket.instances[0];
+    status = statusWith([7, 8], []);
+    ws.emitMessage({ type: 'status', payload: status });
+    expect(queuedMatches()).toEqual([7, 8]);
+    expect(queuedClips()).toEqual([]);
+
+    // A status that changes nothing keeps the very same sets: no re-render every five seconds.
+    const before = useLibraryStore.getState().queuedMatchIds;
+    ws.emitMessage({ type: 'status', payload: status });
+    expect(useLibraryStore.getState().queuedMatchIds).toBe(before);
+
+    // A dropped socket says nothing about them: the core most likely still has them.
+    ws.close();
+    expect(useLibraryStore.getState().status).toBeNull();
+    expect(queuedMatches()).toEqual([7, 8]);
+    teardown();
+  });
+
+  it('keeps a delete that timed out marked while the core still lists it', async () => {
+    // The core didn't answer in time but has the delete still (its status says so), so the row must
+    // not look like an ordinary one that can be deleted again.
+    serveLibrary({ matches: [{ id: 7 }, { id: 8 }], clips: [] }, timedOut);
+    const teardown = startLibrary();
+    await flush();
+    const ws = FakeWebSocket.instances[0];
+    ws.emitMessage({
+      type: 'status',
+      payload: { ...IDLE_STATUS, deletes: { matchIds: [7], clipIds: [] } },
+    });
+
+    await expect(useLibraryStore.getState().deleteMatch(7)).rejects.toThrow();
+    expect(deletingMatches()).toEqual([]);
+    expect(queuedMatches()).toEqual([7]);
+    expect(useLibraryStore.getState().deleteError).toBeNull();
+
+    // The core lets go of it (it finished it and its frame was missed, or it was restarted).
+    ws.emitMessage({
+      type: 'status',
+      payload: { ...IDLE_STATUS, deletes: { matchIds: [], clipIds: [] } },
+    });
+    expect(queuedMatches()).toEqual([]);
+    teardown();
+  });
+
+  it('marks nothing from an older core whose status has no deletes', async () => {
+    const teardown = startLibrary();
+    await flush();
+    useLibraryStore.setState({ queuedMatchIds: new Set([7]) });
+
+    FakeWebSocket.instances[0].emitMessage({ type: 'status', payload: IDLE_STATUS });
+
+    expect(queuedMatches()).toEqual([]);
+    teardown();
+  });
+
   it('marks clips as deleting while their delete requests are in flight, one at a time or in bulk', async () => {
     const held = heldDelete();
     const clips = [5, 6, 7].map((id) => ({ id, parentMatchId: 1 }));
