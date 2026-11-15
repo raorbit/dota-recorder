@@ -1051,6 +1051,13 @@ class CrashRecoveryRunnerTest {
         Path sameFolder = writeModifiedAt(videoDir.resolve(here + "-2026-10-03 20-00-00.mp4"), LONG_AGO_MS);
         matches.updateVideoPath(here, sameFolder.toString(), null);
         Path besideIt = writeModifiedAt(videoDir.resolve("2026-10-03 20-00-00.mp4"), LONG_AGO_MS);
+        // A name this recorder never writes, beside the archived copy of a row an early 0.1.x adopted
+        // under it (no name gate before v0.1.9): the same name less "<id>-" and the same bytes, but
+        // the boot deletes only what this recorder names. The user's own file is never touched.
+        long foreignRow = insertMatch("placeholder", null, null);
+        Path foreignCopy = writeModifiedAt(archive.resolve(foreignRow + "-family.mp4"), LONG_AGO_MS);
+        matches.updateVideoPath(foreignRow, foreignCopy.toString(), null);
+        Path foreign = writeModifiedAt(videoDir.resolve("family.mp4"), LONG_AGO_MS);
 
         runner.run(null);
 
@@ -1058,7 +1065,9 @@ class CrashRecoveryRunnerTest {
         assertThat(shown).exists();
         assertThat(uncompared).exists();
         assertThat(besideIt).exists();
-        assertThat(matches.findAll()).hasSize(4);
+        assertThat(foreign).exists();
+        assertThat(matches.findById(foreignRow).orElseThrow().videoPath()).isEqualTo(foreignCopy.toString());
+        assertThat(matches.findAll()).hasSize(5);
     }
 
     @Test
