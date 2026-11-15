@@ -1,5 +1,6 @@
-// Pure decision logic for the video player's VOD-availability handling. Kept React/DOM-free so it
-// unit-tests in plain Node (see video-availability.test.ts); VideoPlayer.tsx is a thin consumer.
+// Pure decision logic for the video player's VOD-availability handling, and for what a clip delete
+// from its strip still changes once it finishes. Kept React/DOM-free so it unit-tests in plain Node
+// (see video-availability.test.ts); VideoPlayer.tsx is a thin consumer.
 
 // Whether to render the "no video · recording removed" placeholder. Show it ONLY when there is neither
 // a playable full VOD nor a clip currently playing: a swept/pruned match (no VOD) that is playing a
@@ -42,6 +43,20 @@ export function releaseStaleMedia(media: ReleasableMedia | null, src: string | u
   media.removeAttribute('src');
   media.load();
   return true;
+}
+
+// What a clip delete asked for from the player's strip should still change once it has gone through.
+// That can be minutes after the click (the delete waits behind an archive pass), so it is judged
+// against what the player shows by then, not at the click: the strip drops the clip only while it
+// still lists that clip's match (dropping it means discarding any strip fetch in flight, which by then
+// may be another match's), and playback leaves the clip for the full VOD only if the deleted clip is
+// still the one playing.
+export function afterStripClipDelete(
+  deleted: { readonly id: number; readonly parentMatchId: number },
+  now: { readonly matchId: number | null; readonly activeClipId: number | null },
+): { readonly dropFromStrip: boolean; readonly leaveClip: boolean } {
+  const dropFromStrip = now.matchId === deleted.parentMatchId;
+  return { dropFromStrip, leaveClip: dropFromStrip && now.activeClipId === deleted.id };
 }
 
 // Whether a library event took the given match's VOD away: a retention.swept that pruned it, or a
