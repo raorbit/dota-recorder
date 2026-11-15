@@ -2,11 +2,14 @@ package dev.dotarec.bridge;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -21,6 +24,7 @@ import dev.dotarec.data.TestDb;
 import dev.dotarec.retention.StorageMaintenanceLock;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 import javax.sql.DataSource;
@@ -372,6 +376,56 @@ class ClipControllerTest {
         t.join(2_000);
         assertThat(t.isAlive()).as("delete must not leak a maintenance-lock hold").isFalse();
         assertThat(acquired).isTrue();
+    }
+
+    @Test
+    void delete_answersNoContent_onceDone() throws Exception {
+        long clipId = insertClip("ready", dir.resolve("done.mp4").toString(), null);
+
+        ResponseEntity<MatchController.DeleteOutcome> answer = controller.delete(clipId);
+
+        assertThat(answer.getStatusCode()).isEqualTo(HttpStatus.NO_CONTENT);
+        assertThat(answer.getBody()).isNull();
+    }
+
+    @Test
+    void delete_answersQueued_whileAPassHoldsTheLock_andDeletesOnceItFrees() throws Exception {
+        // The archiver moves clips too, holding the maintenance lock through the copies. The request
+        // waits only a bounded time, then hands the delete to the queue and answers 202 at once; the
+        // queue deletes the clip once the pass ends and announces it.
+        Path vod = dir.resolve("queued.mp4");
+        Files.write(vod, new byte[] {1, 2, 3});
+        long clipId = insertClip("ready", vod.toString(), null);
+        StorageMaintenanceLock lock = new StorageMaintenanceLock();
+        DeleteQueue deletes = new DeleteQueue(lock, events, Duration.ofMillis(100));
+        ClipController c = new ClipController(clips, clipService, matches, settings, deletes, events);
+        // The backstop ends the pass after 3 s: a request that waited for it fails here, not hangs.
+        try (HeldLock pass = HeldLock.hold(lock).releaseAfter(Duration.ofSeconds(3))) {
+            ResponseEntity<MatchController.DeleteOutcome> answer = c.delete(clipId);
+
+            assertThat(answer.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+            assertThat(answer.getBody()).isEqualTo(new MatchController.DeleteOutcome("queued"));
+            assertThat(clips.findById(clipId)).isPresent();
+            assertThat(Files.exists(vod)).isTrue();
+            // A second ask while it waits is answered the same and queues nothing more.
+            assertThat(c.delete(clipId).getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+            verify(events, never()).publish(eq("clip.deleted"), any());
+
+            pass.release();
+            deletes.drain(Duration.ofSeconds(5));
+        } finally {
+            deletes.shutdown();
+        }
+        ArgumentCaptor<Object> payload = ArgumentCaptor.forClass(Object.class);
+        verify(events, times(1)).publish(eq("clip.deleted"), payload.capture());
+        assertThat(payload.getValue())
+                .asInstanceOf(InstanceOfAssertFactories.MAP)
+                .containsEntry("clipId", clipId)
+                .containsEntry("parentMatchId", matchId);
+        // Queued, then done: the second ask queued nothing of its own.
+        verify(events, times(2)).publishStatus();
+        assertThat(clips.findById(clipId)).isEmpty();
+        assertThat(Files.exists(vod)).isFalse();
     }
 
     @Test

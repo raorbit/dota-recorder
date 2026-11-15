@@ -1,6 +1,7 @@
 package dev.dotarec.bridge;
 
 import dev.dotarec.retention.LowDiskState;
+import java.util.List;
 
 /**
  * Immutable snapshot of live recorder status, serialized to JSON for the {@code GET /status} REST
@@ -18,9 +19,12 @@ import dev.dotarec.retention.LowDiskState;
  *       persistence lands.</li>
  *   <li>{@code storage} -- sourced from {@code LowDiskState}; {@code lowDisk} is null while the
  *       video drive is healthy.</li>
+ *   <li>{@code deletes} -- sourced from {@code DeleteQueue}; both lists are empty while no delete is
+ *       pending.</li>
  * </ul>
  */
-public record StatusSnapshot(GsiStatus gsi, ObsStatus obs, FsmStatus fsm, StorageStatus storage) {
+public record StatusSnapshot(
+        GsiStatus gsi, ObsStatus obs, FsmStatus fsm, StorageStatus storage, DeleteStatus deletes) {
 
     /** GSI feed liveness. {@code lastFrameAgoMs} is null before any frame has been received. */
     public record GsiStatus(boolean connected, Long lastFrameAgoMs) {}
@@ -50,4 +54,12 @@ public record StatusSnapshot(GsiStatus gsi, ObsStatus obs, FsmStatus fsm, Storag
      * the shell can raise its own low-disk notification without a WebSocket of its own.
      */
     public record StorageStatus(LowDiskState.LowDisk lowDisk) {}
+
+    /**
+     * The recordings ({@code matchIds}) and clips ({@code clipIds}) whose delete the core has accepted
+     * and not finished, oldest first: queued behind the storage-maintenance lock, or running (see
+     * {@code DeleteQueue}). Carried here so a window opened while a delete waits (one closed to the
+     * tray and opened again, say) still shows those rows as being deleted.
+     */
+    public record DeleteStatus(List<Long> matchIds, List<Long> clipIds) {}
 }

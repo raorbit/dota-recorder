@@ -28,7 +28,8 @@ class StatusWebSocketTest {
                 new StatusSnapshot.GsiStatus(false, null),
                 new StatusSnapshot.ObsStatus(false, false, false, false, false),
                 new StatusSnapshot.FsmStatus("IDLE", null),
-                new StatusSnapshot.StorageStatus(null));
+                new StatusSnapshot.StorageStatus(null),
+                new StatusSnapshot.DeleteStatus(List.of(), List.of()));
     }
 
     @Test

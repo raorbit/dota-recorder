@@ -19,7 +19,6 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
-import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
@@ -46,7 +45,9 @@ import java.util.Map;
  *       manual clip and dispatches async generation; returns 202 Accepted with the freshly inserted
  *       {@code pending} {@link ClipRow}. 404 when the match is unknown.</li>
  *   <li>{@code DELETE /clips/{clipId}} -- permanently removes a clip: best-effort unlinks the
- *       rendered .mp4 + thumbnail on disk, then the row. 404 when the id is unknown. No undo.</li>
+ *       rendered .mp4 + thumbnail on disk, then the row. 204 once done, or 202
+ *       {@code {"outcome":"queued"}} while it waits for the storage-maintenance lock (see
+ *       {@link #delete}). 404 when the id is unknown. No undo.</li>
  *   <li>{@code GET /clips/{clipId}/video/stream} -- streams the rendered clip .mp4 bytes with HTTP
  *       Range support so a renderer {@code <video>} element can play + seek over the authed loopback
  *       bridge (mirrors {@code GET /matches/{id}/video/stream}). 404 when the clip is unknown, not yet
@@ -69,19 +70,28 @@ public class ClipController {
     private final ClipService clipService;
     private final MatchRepository matches;
     private final SettingsStore settings;
-    private final StorageMaintenanceLock maintenanceLock;
+    /** Runs a delete under the storage-maintenance lock, now or once it frees. */
+    private final DeleteQueue deletes;
     private final EventPublisher events;
 
     @Autowired
     public ClipController(ClipRepository clips, ClipService clipService, MatchRepository matches,
-                          SettingsStore settings, StorageMaintenanceLock maintenanceLock,
-                          EventPublisher events) {
+                          SettingsStore settings, DeleteQueue deletes, EventPublisher events) {
         this.clips = clips;
         this.clipService = clipService;
         this.matches = matches;
         this.settings = settings;
-        this.maintenanceLock = maintenanceLock;
+        this.deletes = deletes;
         this.events = events;
+    }
+
+    /**
+     * Test constructor: deletes take a shared maintenance lock (waiting for it as long as production
+     * does before they are queued). Package-private so only the tests can build one.
+     */
+    ClipController(ClipRepository clips, ClipService clipService, MatchRepository matches,
+                   SettingsStore settings, StorageMaintenanceLock maintenanceLock, EventPublisher events) {
+        this(clips, clipService, matches, settings, new DeleteQueue(maintenanceLock, events), events);
     }
 
     /**
@@ -162,32 +172,47 @@ public class ClipController {
      * archived clip for {@code CrashRecoveryRunner} to re-adopt as a spurious match. Under the lock the
      * row's CURRENT paths are RE-READ (by id) immediately before unlinking, so the files removed are
      * always the row's present locations even if the archiver just repointed them.
+     *
+     * <p>The archiver holds that lock through a whole pass of cross-drive copies, so the delete goes
+     * through {@link DeleteQueue}, as a recording delete does: it waits here for the lock at most half a
+     * minute, and is then queued to run once the lock frees, answered at once with 202
+     * {@code {"outcome":"queued"}}. A second delete of one still pending gets the same answer. Its
+     * {@code clip.deleted} frame goes out once it is done, wherever it ran.
      */
     @DeleteMapping("/clips/{clipId}")
-    @ResponseStatus(HttpStatus.NO_CONTENT)
-    public void delete(@PathVariable long clipId) {
+    public ResponseEntity<MatchController.DeleteOutcome> delete(@PathVariable long clipId) {
         // Existence probe outside the lock so an unknown id is a cheap 404 without serializing on
-        // maintenance; the authoritative paths are re-read under the lock below.
+        // maintenance; the authoritative paths are re-read under the lock (deleteUnderLock).
         ClipRow probe = clips.findById(clipId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "No clip " + clipId));
-        maintenanceLock.lock();
-        try {
-            // Re-read the CURRENT row inside the lock: the archiver may have repointed video_path/
-            // thumb_path to an archive drive since the probe above, so unlink the present locations, not
-            // the pre-move ones (which would be a no-op leaving the moved file stranded). A row deleted
-            // by a concurrent pass leaves nothing to unlink; the row delete below is then a no-op.
-            clips.findById(clipId).ifPresent(c -> {
-                deleteFileQuietly(c.videoPath());
-                deleteFileQuietly(c.thumbPath());
-            });
-            clips.delete(clipId);
-        } finally {
-            maintenanceLock.unlock();
-        }
+        long parentMatchId = probe.parentMatchId();
+        return deletes.run(DeleteQueue.Kind.CLIP, clipId, () -> deleteUnderLock(clipId),
+                        done -> announceDeleted(clipId, parentMatchId))
+                .map(done -> ResponseEntity.noContent().<MatchController.DeleteOutcome>build())
+                .orElseGet(() -> ResponseEntity.status(HttpStatus.ACCEPTED)
+                        .body(MatchController.DeleteOutcome.QUEUED));
+    }
+
+    /** The delete itself, run with the maintenance lock held. */
+    private boolean deleteUnderLock(long clipId) {
+        // Re-read the CURRENT row inside the lock: the archiver may have repointed video_path/
+        // thumb_path to an archive drive since the probe, so unlink the present locations, not the
+        // pre-move ones (which would be a no-op leaving the moved file stranded). A row deleted by a
+        // concurrent pass, or while this delete was queued, leaves nothing to unlink; the row delete
+        // below is then a no-op.
+        clips.findById(clipId).ifPresent(c -> {
+            deleteFileQuietly(c.videoPath());
+            deleteFileQuietly(c.thumbPath());
+        });
+        clips.delete(clipId);
+        return true;
+    }
+
+    private void announceDeleted(long clipId, long parentMatchId) {
         // Tell every UI view the clip is gone — a delete can originate from the player's clip strip OR
         // the library's Clips bucket, and the other view has no way to notice otherwise (there's no
         // polling on clips). Mirrors ClipService's clip.created/clip.ready frames.
-        events.publish("clip.deleted", deleted(clipId, probe.parentMatchId()));
+        events.publish("clip.deleted", deleted(clipId, parentMatchId));
     }
 
     /** {@code clip.deleted} payload, mirroring {@link ClipService}'s frame helpers. */
