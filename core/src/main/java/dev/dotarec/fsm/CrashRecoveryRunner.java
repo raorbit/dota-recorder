@@ -21,9 +21,11 @@ import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
@@ -52,9 +54,10 @@ import org.springframework.stereotype.Component;
  *       can't read stays in the journal for a boot that can;</li>
  *   <li>saves the floors, holding a new video folder's first floor back while a recording its link
  *       reached back for is still unrecovered;</li>
- *   <li>scans the roots for files no row references: an archive drive's leftover from an interrupted
- *       move is re-linked to its row or deleted, and a recorder-named file written since its folder's
- *       floor is adopted as a {@code gsi_only} row.</li>
+ *   <li>scans the roots for files no row references: a source the archiver failed to delete from the
+ *       video folder is deleted, an archive drive's leftover from an interrupted move is re-linked to
+ *       its row or deleted, and a recorder-named file written since its folder's floor is adopted as
+ *       a {@code gsi_only} row.</li>
  * </ol>
  */
 @Component
@@ -420,10 +423,20 @@ public class CrashRecoveryRunner implements ApplicationRunner {
         // Active drive: an unreferenced recording here is a crash that lost its journaled path; adopt it
         // as a standalone gsi_only row (its OBS name carries no match id to tie it back to). Adoption is
         // provenance-gated (recorder-produced basenames only, written since the folder's adoption
-        // floor) so a user's own videos are never claimed.
+        // floor) so a user's own videos are never claimed. First, though, it may be a source the
+        // archiver left behind (see deleteIfArchivedSource), which goes whatever its age.
         Path videoDir = videoDir();
         OrphanAdoptionFloors.Floor videoFloor = floors.of(videoDir);
-        scanOrphans(videoDir, referenced, path -> importOrphanVod(path, videoFloor));
+        ArchivedCopies archived = archivedCopies();
+        scanOrphans(
+                videoDir,
+                referenced,
+                path -> {
+                    if (!(hasRecorderProvenance(path) && deleteIfArchivedSource(path, archived.videos()))) {
+                        importOrphanVod(path, videoFloor);
+                    }
+                });
+        deleteArchivedThumbSources(videoDir, archived);
         // Archive drives: an unreferenced recording here is the residue of an interrupted cross-store
         // move (copied across, but the row's repoint or the source delete didn't finish before a crash).
         // The destination name is {@code <matchId>-...}, so we recover the ORIGINAL row rather than
@@ -676,6 +689,118 @@ public class CrashRecoveryRunner implements ApplicationRunner {
             return null;
         }
         return fileName.substring(prefix.length());
+    }
+
+    /**
+     * Each match row's archived video and thumbnail by the name its source had (the archived name less
+     * the row's {@code <matchId>-}), and the thumbnails a row or journaled session points at.
+     */
+    private record ArchivedCopies(
+            Map<String, List<Path>> videos, Map<String, List<Path>> thumbs, Set<String> referencedThumbs) {}
+
+    private ArchivedCopies archivedCopies() {
+        Map<String, List<Path>> videos = new HashMap<>();
+        Map<String, List<Path>> thumbs = new HashMap<>();
+        Set<String> referencedThumbs = new HashSet<>();
+        for (MatchSummary row : matches.findAll()) {
+            indexArchivedCopy(videos, row.id(), row.videoPath());
+            indexArchivedCopy(thumbs, row.id(), row.thumbPath());
+            addNormalized(referencedThumbs, row.thumbPath());
+        }
+        for (ClipRow clip : clips.findAll()) {
+            addNormalized(referencedThumbs, clip.thumbPath());
+        }
+        for (RecordingSessionRow session : journal.findUnfinished()) {
+            addNormalized(referencedThumbs, session.thumbPath());
+        }
+        return new ArchivedCopies(videos, thumbs, referencedThumbs);
+    }
+
+    private static void indexArchivedCopy(Map<String, List<Path>> index, long matchId, String stored) {
+        Path copy = safePath(stored);
+        if (copy == null || copy.getFileName() == null) {
+            return;
+        }
+        String original = leftoverRemainder(copy.getFileName().toString(), matchId + "-");
+        if (original != null) {
+            index.computeIfAbsent(original, name -> new ArrayList<>()).add(copy);
+        }
+    }
+
+    private static void addNormalized(Set<String> paths, String stored) {
+        Path p = safePath(stored);
+        if (p != null) {
+            paths.add(normalize(p));
+        }
+    }
+
+    /**
+     * Deletes {@code file}, unreferenced in the folder the archiver moves recordings off, when it is
+     * provably the source of a row's archived copy, and returns whether it was. The archiver copies a
+     * recording across drives, checks the copy's size, repoints the row at it and only then deletes the
+     * source, so a delete that failed (another program holding the file, say) leaves the source with no
+     * row. A file named as a row's archived copy is less its {@code <matchId>-}, in another folder, and
+     * the same size is that source: the attribution is exact, so it needs no adoption floor, which the
+     * source's original modification time would fail. Nothing else would ever reclaim it, and no row
+     * counts it against a drive's cap. A delete that fails is tried again next boot; the file is never
+     * imported.
+     */
+    private boolean deleteIfArchivedSource(Path file, Map<String, List<Path>> copiesByName) {
+        List<Path> copies = copiesByName.get(file.getFileName().toString());
+        if (copies == null) {
+            return false;
+        }
+        for (Path copy : copies) {
+            if (isSourceOf(file, copy)) {
+                try {
+                    Files.deleteIfExists(file);
+                    log.warn("Removed {}, left behind when it was archived to {}", file, copy);
+                } catch (Exception e) {
+                    log.warn("Could not remove {}, left behind when it was archived to {}: {}",
+                            file, copy, e.toString());
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Whether {@code file} and {@code copy} sit in different folders and are the same size. */
+    private static boolean isSourceOf(Path file, Path copy) {
+        try {
+            Path folder = file.getParent();
+            Path copyFolder = copy.getParent();
+            if (folder == null || copyFolder == null || normalize(folder).equals(normalize(copyFolder))) {
+                return false;
+            }
+            return Files.size(file) == Files.size(copy);
+        } catch (Exception e) {
+            // Can't confirm the sizes match (the archive drive is unplugged, say) -> keep the file.
+            return false;
+        }
+    }
+
+    /**
+     * The thumbnails' counterpart of {@link #deleteIfArchivedSource}: the archiver moves a recording's
+     * thumbnail off {@code <videoDir>/thumbs} alongside it, deleting the source after the same repoint.
+     */
+    private void deleteArchivedThumbSources(Path videoDir, ArchivedCopies archived) {
+        if (videoDir == null || archived.thumbs().isEmpty()) {
+            return;
+        }
+        Path thumbDir = videoDir.resolve("thumbs");
+        try {
+            if (!Files.isDirectory(thumbDir)) {
+                return;
+            }
+            try (Stream<Path> stream = Files.list(thumbDir)) {
+                stream.filter(Files::isRegularFile)
+                        .filter(path -> !archived.referencedThumbs().contains(normalize(path)))
+                        .forEach(path -> deleteIfArchivedSource(path, archived.thumbs()));
+            }
+        } catch (Exception e) {
+            log.warn("Could not check {} for archived thumbnails' sources: {}", thumbDir, e.toString());
+        }
     }
 
     /**

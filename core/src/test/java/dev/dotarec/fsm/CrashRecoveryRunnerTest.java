@@ -904,6 +904,75 @@ class CrashRecoveryRunnerTest {
     }
 
     @Test
+    void aSourceTheArchiverLeftBehindIsRemovedWhateverItsAge() throws Exception {
+        // The archiver copied a recording from before the video folder's floor to the archive drive and
+        // repointed its row, but deleting the source failed (a player held it open). The floor keeps
+        // that source from ever being adopted, and no row counts it against the cap, so the boot
+        // removes it, and its thumbnail's left-behind source too.
+        Path archive = configureArchive("hdd");
+        seedAdoptionFloor(videoDir, System.currentTimeMillis());
+        long id = insertMatch("placeholder", null, null);
+        Path copy = writeModifiedAt(archive.resolve(id + "-2026-10-01 20-00-00.mp4"), LONG_AGO_MS);
+        Path thumbCopy = writeModifiedAt(
+                Files.createDirectories(archive.resolve("thumbs")).resolve(id + "-surrogate-1.jpg"), LONG_AGO_MS);
+        matches.updateVideoPath(id, copy.toString(), thumbCopy.toString());
+        Path source = writeModifiedAt(videoDir.resolve("2026-10-01 20-00-00.mp4"), LONG_AGO_MS);
+        Path thumbSource = writeModifiedAt(
+                Files.createDirectories(videoDir.resolve("thumbs")).resolve("surrogate-1.jpg"), LONG_AGO_MS);
+
+        runner.run(null);
+
+        assertThat(source).doesNotExist();
+        assertThat(thumbSource).doesNotExist();
+        assertThat(copy).exists();
+        assertThat(thumbCopy).exists();
+        assertThat(matches.findAll())
+                .singleElement()
+                .satisfies(
+                        row -> {
+                            assertThat(row.videoPath()).isEqualTo(copy.toString());
+                            assertThat(row.thumbPath()).isEqualTo(thumbCopy.toString());
+                        });
+    }
+
+    @Test
+    void onlyAProvableSourceOfAnArchivedCopyIsRemoved() throws Exception {
+        Path archive = configureArchive("hdd");
+        seedAdoptionFloor(videoDir, System.currentTimeMillis());
+        Path thumbs = Files.createDirectories(videoDir.resolve("thumbs"));
+        // The archived copy's name, but other bytes.
+        long id = insertMatch("placeholder", null, null);
+        Path copy = writeModifiedAt(archive.resolve(id + "-2026-10-01 20-00-00.mp4"), LONG_AGO_MS);
+        Path thumbCopy = writeModifiedAt(
+                Files.createDirectories(archive.resolve("thumbs")).resolve(id + "-surrogate-1.jpg"), LONG_AGO_MS);
+        matches.updateVideoPath(id, copy.toString(), thumbCopy.toString());
+        Path otherBytes = videoDir.resolve("2026-10-01 20-00-00.mp4");
+        Files.writeString(otherBytes, "a longer, different set of bytes entirely");
+        makeStale(otherBytes);
+        // The archived thumbnail's name and size, but another row still shows it.
+        Path shown = writeModifiedAt(thumbs.resolve("surrogate-1.jpg"), LONG_AGO_MS);
+        insertMatch(videoDir.resolve("2026-09-01 20-00-00.mp4").toString(), shown.toString(), null);
+        // A copy on a drive that isn't plugged in can't be compared.
+        long unplugged = insertMatch("placeholder", null, null);
+        matches.updateVideoPath(
+                unplugged, dir.resolve("usb").resolve(unplugged + "-2026-10-02 20-00-00.mp4").toString(), null);
+        Path uncompared = writeModifiedAt(videoDir.resolve("2026-10-02 20-00-00.mp4"), LONG_AGO_MS);
+        // A "copy" in the same folder is no archived copy.
+        long here = insertMatch("placeholder", null, null);
+        Path sameFolder = writeModifiedAt(videoDir.resolve(here + "-2026-10-03 20-00-00.mp4"), LONG_AGO_MS);
+        matches.updateVideoPath(here, sameFolder.toString(), null);
+        Path besideIt = writeModifiedAt(videoDir.resolve("2026-10-03 20-00-00.mp4"), LONG_AGO_MS);
+
+        runner.run(null);
+
+        assertThat(otherBytes).exists();
+        assertThat(shown).exists();
+        assertThat(uncompared).exists();
+        assertThat(besideIt).exists();
+        assertThat(matches.findAll()).hasSize(4);
+    }
+
+    @Test
     void reconciliationWaitsForTheStorageMaintenanceLock() throws Exception {
         // The archiver/sweeper @Scheduled clocks start at context refresh while this runner executes
         // after it, so a locked maintenance pass can overlap recovery. Mid-move, the archiver's fresh
