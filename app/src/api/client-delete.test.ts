@@ -1,25 +1,29 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { deleteClip, deleteMatch, fetchMatches } from './client';
 
-// The recording and clip delete requests. A delete waits for the core's storage-maintenance lock,
-// which an archive pass holds through all its cross-drive copies, so it gets 10 minutes where every
-// other request gets 5 or 10 seconds, and the deletes go out one at a time so that waiting ones hold
-// one connection to the core between them. Runs in Node: fetch and AbortSignal.timeout are stubbed.
+// The recording and clip delete requests. The core answers a delete within about half a minute: it
+// waits that long for its storage-maintenance lock, which an archive pass holds through all its
+// cross-drive copies, and then queues the delete and says so. So a delete gets 90 seconds where every
+// other request gets 5 or 10, and each goes straight out: one the core is still waiting on holds back
+// nothing else. Runs in Node: fetch and AbortSignal.timeout are stubbed.
 
-// The client's delete queue is module state: every test gets a fresh copy of the module.
-let client: typeof import('./client');
 let fetchMock: ReturnType<typeof vi.fn>;
 // What each AbortSignal.timeout call asked for, and the signal it handed back.
 let timeouts: number[];
 let signals: AbortSignal[];
 
 const done = (): Promise<unknown> =>
-  Promise.resolve({ ok: true, json: async () => ({ outcome: 'deleted' }) });
+  Promise.resolve({ ok: true, status: 200, json: async () => ({ outcome: 'deleted' }) });
 
-// A response the test hands back by hand: a delete waiting on the core's maintenance lock.
+// What the core answers a delete it queued behind its maintenance lock.
+const queued = (): Promise<unknown> =>
+  Promise.resolve({ ok: true, status: 202, json: async () => ({ outcome: 'queued' }) });
+
+// A response the test hands back by hand: a delete the core is still waiting on.
 function heldResponse(): { promise: Promise<unknown>; release: () => void } {
   let release!: () => void;
   const promise = new Promise<unknown>((resolve) => {
-    release = () => resolve({ ok: true, json: async () => ({ outcome: 'deleted' }) });
+    release = () => resolve({ ok: true, status: 200, json: async () => ({ outcome: 'deleted' }) });
   });
   return { promise, release };
 }
@@ -32,9 +36,7 @@ const sentDeletes = (): string[] =>
     .filter((c) => (c[1] as RequestInit | undefined)?.method === 'DELETE')
     .map((c) => String(c[0]));
 
-beforeEach(async () => {
-  vi.resetModules();
-  client = await import('./client');
+beforeEach(() => {
   vi.stubGlobal('window', {});
   fetchMock = vi.fn(done);
   vi.stubGlobal('fetch', fetchMock);
@@ -55,11 +57,11 @@ afterEach(() => {
 });
 
 describe('delete requests', () => {
-  it('give a recording delete and a clip delete 10 minutes to finish', async () => {
-    await client.deleteMatch(7);
-    await client.deleteClip(8);
+  it("give a recording delete and a clip delete 90 seconds, well past the core's half-minute wait", async () => {
+    await deleteMatch(7);
+    await deleteClip(8);
 
-    expect(timeouts).toEqual([10 * 60_000, 10 * 60_000]);
+    expect(timeouts).toEqual([90_000, 90_000]);
     // Each request carries the signal made for it.
     expect(fetchMock).toHaveBeenCalledTimes(2);
     fetchMock.mock.calls.forEach((call, i) => {
@@ -67,53 +69,56 @@ describe('delete requests', () => {
     });
   });
 
-  it('go out one at a time, each timed from when it is sent', async () => {
+  it('go out at once, so one the core is still waiting on holds back no other delete', async () => {
     const held = heldResponse();
     fetchMock.mockImplementationOnce(() => held.promise);
 
-    const match = client.deleteMatch(7);
-    const clip = client.deleteClip(8);
+    const match = deleteMatch(7);
+    const clip = deleteClip(8);
     await settle();
-    // The clip delete waits its turn without a clock running on it.
-    expect(sentDeletes()).toEqual(['http://127.0.0.1:3224/matches/7']);
-    expect(timeouts).toHaveLength(1);
 
-    held.release();
-    await match;
-    await clip;
     expect(sentDeletes()).toEqual([
       'http://127.0.0.1:3224/matches/7',
       'http://127.0.0.1:3224/clips/8',
     ]);
-    expect(timeouts).toHaveLength(2);
-  });
-
-  it('join a second delete of a row whose delete is still waiting instead of sending another', async () => {
-    const held = heldResponse();
-    fetchMock.mockImplementationOnce(() => held.promise);
-
-    const first = client.deleteMatch(7);
-    await settle();
-    const again = client.deleteMatch(7);
-    expect(again).toBe(first);
-
+    await expect(clip).resolves.toBe('deleted');
     held.release();
-    await expect(again).resolves.toBe('deleted');
-    expect(sentDeletes()).toEqual(['http://127.0.0.1:3224/matches/7']);
+    await expect(match).resolves.toBe('deleted');
   });
 
   it('hold back no other request while one waits', async () => {
     fetchMock.mockImplementationOnce(() => heldResponse().promise); // never released
 
-    void client.deleteMatch(7);
+    void deleteMatch(7);
     await settle();
-    void client.fetchMatches();
+    void fetchMatches();
     await settle();
 
     expect(fetchMock.mock.calls.map((c) => String(c[0]))).toEqual([
       'http://127.0.0.1:3224/matches/7',
       'http://127.0.0.1:3224/matches',
     ]);
+  });
+
+  it('say so when the core queued the delete behind its maintenance lock', async () => {
+    fetchMock.mockImplementation(queued);
+
+    await expect(deleteMatch(7)).resolves.toBe('queued');
+    await expect(deleteClip(8)).resolves.toBe('queued');
+  });
+
+  it('say which branch a done recording delete took, or nothing when the core does not', async () => {
+    const answer = (status: number, body: unknown) => () =>
+      Promise.resolve({ ok: true, status, json: async () => body });
+    fetchMock
+      .mockImplementationOnce(answer(200, { outcome: 'stubbed' }))
+      .mockImplementationOnce(answer(200, {}))
+      .mockImplementationOnce(answer(204, null));
+
+    await expect(deleteMatch(7)).resolves.toBe('stubbed');
+    await expect(deleteMatch(8)).resolves.toBeNull();
+    // A clip delete that is done answers 204.
+    await expect(deleteClip(9)).resolves.toBe('deleted');
   });
 
   it("fail with the core's reason when it gives one, for the delete-failure banner", async () => {
@@ -124,9 +129,9 @@ describe('delete requests', () => {
       .mockImplementationOnce(refusal(404, 'Not Found', JSON.stringify({ message: 'No clip 8' })))
       .mockImplementationOnce(refusal(500, 'Internal Server Error', ''));
 
-    await expect(client.deleteMatch(7)).rejects.toThrow('No match 7');
-    await expect(client.deleteClip(8)).rejects.toThrow('No clip 8');
-    await expect(client.deleteClip(9)).rejects.toThrow(
+    await expect(deleteMatch(7)).rejects.toThrow('No match 7');
+    await expect(deleteClip(8)).rejects.toThrow('No clip 8');
+    await expect(deleteClip(9)).rejects.toThrow(
       'DELETE /clips/9 failed: 500 Internal Server Error',
     );
   });

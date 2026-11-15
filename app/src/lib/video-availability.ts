@@ -64,11 +64,11 @@ export function releaseStaleMedia(
 }
 
 // What a clip delete asked for from the player's strip should still change once it has gone through.
-// That can be minutes after the click (the delete waits behind an archive pass), so it is judged
-// against what the player shows by then, not at the click: the strip drops the clip only while it
-// still lists that clip's match (dropping it means discarding any strip fetch in flight, which by then
-// may be another match's), and playback leaves the clip for the full VOD only if the deleted clip is
-// still the one playing.
+// That can be half a minute after the click (the delete waits that long for the core's maintenance
+// lock before the core queues it), so it is judged against what the player shows by then, not at the
+// click: the strip drops the clip only while it still lists that clip's match (dropping it means
+// discarding any strip fetch in flight, which by then may be another match's), and playback leaves the
+// clip for the full VOD only if the deleted clip is still the one playing.
 export function afterStripClipDelete(
   deleted: { readonly id: number; readonly parentMatchId: number },
   now: { readonly matchId: number | null; readonly activeClipId: number | null },

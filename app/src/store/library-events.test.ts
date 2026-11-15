@@ -61,18 +61,34 @@ interface CoreLibrary {
   clips: { id: number; parentMatchId: number }[];
 }
 
+// The answer to a DELETE the core queued behind its maintenance lock: it keeps the row until it does
+// the delete, which a test plays by dropping the row from its CoreLibrary and sending the frame.
+const QUEUED = Symbol('queued');
+
 // Stubs fetch with a core holding `core`. A DELETE drops its row there first, as the core does once
 // it gets its maintenance lock (even when the request has given up by then), and is then answered
-// with whatever `answer` returns for its URL. Returns the URLs of the DELETEs sent, in order.
-function serveLibrary(core: CoreLibrary, answer: (url: string) => Promise<unknown>): string[] {
+// with whatever `answer` returns for its URL; one answered QUEUED drops nothing yet and gets the
+// core's 202. Returns the URLs of the DELETEs sent, in order.
+function serveLibrary(
+  core: CoreLibrary,
+  answer: (url: string) => Promise<unknown> | typeof QUEUED,
+): string[] {
   const deletes: string[] = [];
   fetchMock.mockImplementation((url: unknown, init?: { method?: string }) => {
     const u = String(url);
     if (init?.method === 'DELETE') {
       deletes.push(u);
+      const answered = answer(u);
+      if (answered === QUEUED) {
+        return Promise.resolve({
+          ok: true,
+          status: 202,
+          json: async () => ({ outcome: 'queued' }),
+        });
+      }
       core.matches = core.matches.filter((m) => !u.endsWith(`/matches/${m.id}`));
       core.clips = core.clips.filter((c) => !u.endsWith(`/clips/${c.id}`));
-      return answer(u);
+      return answered;
     }
     const json = u.includes('/buckets/counts')
       ? EMPTY_COUNTS
@@ -92,14 +108,14 @@ function serveLibrary(core: CoreLibrary, answer: (url: string) => Promise<unknow
 
 // The answers a DELETE can get: done, refused (a locked file, say), or given up on behind the lock.
 const deleted = (): Promise<unknown> =>
-  Promise.resolve({ ok: true, json: async () => ({ outcome: 'deleted' }) });
+  Promise.resolve({ ok: true, status: 200, json: async () => ({ outcome: 'deleted' }) });
 const refused = (): Promise<unknown> =>
   Promise.resolve({ ok: false, status: 500, statusText: 'Internal Server Error' });
 const timedOut = (): Promise<unknown> =>
   Promise.reject(new DOMException('The operation timed out.', 'TimeoutError'));
 
-// A DELETE still waiting on the core's maintenance lock, answered when the test releases it. Every
-// test releases what it holds: the client's delete queue is shared by the whole file.
+// A DELETE the core is still waiting on (its half-minute wait for the maintenance lock), answered when
+// the test releases it.
 function heldDelete(): { answer: Promise<unknown>; release: () => void } {
   let release!: () => void;
   const answer = new Promise<void>((resolve) => (release = resolve)).then(deleted);
@@ -111,6 +127,8 @@ const clipIds = (): number[] => useLibraryStore.getState().clips.map((c) => c.id
 const byId = (a: number, b: number): number => a - b;
 const deletingMatches = (): number[] => [...useLibraryStore.getState().deletingMatchIds].sort(byId);
 const deletingClips = (): number[] => [...useLibraryStore.getState().deletingClipIds].sort(byId);
+const queuedMatches = (): number[] => [...useLibraryStore.getState().queuedMatchIds].sort(byId);
+const queuedClips = (): number[] => [...useLibraryStore.getState().queuedClipIds].sort(byId);
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -123,6 +141,8 @@ beforeEach(() => {
     loadState: 'idle',
     deletingMatchIds: new Set<number>(),
     deletingClipIds: new Set<number>(),
+    queuedMatchIds: new Set<number>(),
+    queuedClipIds: new Set<number>(),
     deleteError: null,
     diskWarning: null,
   });
@@ -331,25 +351,111 @@ describe('startLibrary storage-events wiring', () => {
     teardown();
   });
 
-  it('marks a recording as deleting while its delete waits, and sends it once', async () => {
+  it('marks a recording as deleting while its delete request is in flight', async () => {
     const held = heldDelete();
     const deletes = serveLibrary({ matches: [{ id: 7 }, { id: 8 }], clips: [] }, () => held.answer);
     const teardown = startLibrary();
     await flush();
 
-    const first = useLibraryStore.getState().deleteMatch(7);
+    const run = useLibraryStore.getState().deleteMatch(7);
     await flush();
     expect(deletingMatches()).toEqual([7]);
-    // Asked for again while it waits (another view, a second click): it joins the one in flight.
-    const again = useLibraryStore.getState().deleteMatch(7);
-    await flush();
+    expect(matchIds()).toEqual([7, 8]);
 
     held.release();
-    await first;
-    await again;
+    await run;
     expect(deletes).toEqual(['http://127.0.0.1:3224/matches/7']);
     expect(deletingMatches()).toEqual([]);
     expect(matchIds()).toEqual([8]);
+    teardown();
+  });
+
+  it('keeps a recording the core queued marked until its match.deleted frame drops it', async () => {
+    // The core waited out its half minute for the maintenance lock and queued the delete: the row is
+    // still there, and nothing but the frame will say when it goes.
+    const core = { matches: [{ id: 7 }, { id: 8 }], clips: [] };
+    serveLibrary(core, () => QUEUED);
+    const teardown = startLibrary();
+    await flush();
+
+    await useLibraryStore.getState().deleteMatch(7);
+    expect(deletingMatches()).toEqual([]);
+    expect(queuedMatches()).toEqual([7]);
+    expect(matchIds()).toEqual([7, 8]);
+    expect(useLibraryStore.getState().deleteError).toBeNull();
+
+    // The lock frees and the core does the delete.
+    core.matches = [{ id: 8 }];
+    FakeWebSocket.instances[0].emitMessage({
+      type: 'match.deleted',
+      payload: { id: 7, outcome: 'deleted' },
+    });
+    // Gone at once, before the frame's reload, so it never shows as an ordinary row meanwhile.
+    expect(matchIds()).toEqual([8]);
+    expect(queuedMatches()).toEqual([]);
+    await vi.advanceTimersByTimeAsync(200);
+    await flush();
+    expect(matchIds()).toEqual([8]);
+    teardown();
+  });
+
+  it('keeps the stub of a queued recording with clips once its frame says it was stubbed', async () => {
+    const core = {
+      matches: [{ id: 7, videoPath: 'C:/vods/7.mp4' }],
+      clips: [{ id: 5, parentMatchId: 7 }],
+    };
+    serveLibrary(core, () => QUEUED);
+    const teardown = startLibrary();
+    await flush();
+
+    await useLibraryStore.getState().deleteMatch(7);
+    FakeWebSocket.instances[0].emitMessage({
+      type: 'match.deleted',
+      payload: { id: 7, outcome: 'stubbed' },
+    });
+
+    expect(useLibraryStore.getState().matches).toEqual([
+      expect.objectContaining({ id: 7, videoPath: null }),
+    ]);
+    expect(clipIds()).toEqual([5]);
+    expect(queuedMatches()).toEqual([]);
+    teardown();
+  });
+
+  it('keeps a clip the core queued marked until its clip.deleted frame drops it', async () => {
+    const core = { matches: [{ id: 1 }], clips: [5, 6].map((id) => ({ id, parentMatchId: 1 })) };
+    serveLibrary(core, () => QUEUED);
+    const teardown = startLibrary();
+    await flush();
+
+    await expect(useLibraryStore.getState().deleteClip(5)).resolves.toBe('queued');
+    expect(deletingClips()).toEqual([]);
+    expect(queuedClips()).toEqual([5]);
+    expect(clipIds()).toEqual([5, 6]);
+
+    core.clips = [{ id: 6, parentMatchId: 1 }];
+    FakeWebSocket.instances[0].emitMessage({
+      type: 'clip.deleted',
+      payload: { clipId: 5, parentMatchId: 1 },
+    });
+    expect(clipIds()).toEqual([6]);
+    expect(queuedClips()).toEqual([]);
+    teardown();
+  });
+
+  it('marks the rows of a bulk delete the core queued, and drops the ones it did', async () => {
+    serveLibrary({ matches: [{ id: 7 }, { id: 8 }, { id: 9 }], clips: [] }, (url) =>
+      url.endsWith('/matches/7') ? QUEUED : deleted(),
+    );
+    const teardown = startLibrary();
+    await flush();
+
+    await useLibraryStore.getState().deleteMatches([7, 8]);
+
+    expect(matchIds()).toEqual([7, 9]);
+    expect(deletingMatches()).toEqual([]);
+    expect(queuedMatches()).toEqual([7]);
+    expect(useLibraryStore.getState().deleteError).toBeNull();
     teardown();
   });
 
@@ -389,7 +495,7 @@ describe('startLibrary storage-events wiring', () => {
     teardown();
   });
 
-  it('marks clips as deleting while their delete waits, one at a time or in bulk', async () => {
+  it('marks clips as deleting while their delete requests are in flight, one at a time or in bulk', async () => {
     const held = heldDelete();
     const clips = [5, 6, 7].map((id) => ({ id, parentMatchId: 1 }));
     serveLibrary({ matches: [{ id: 1 }], clips }, (url) =>
@@ -400,12 +506,13 @@ describe('startLibrary storage-events wiring', () => {
 
     const one = useLibraryStore.getState().deleteClip(5);
     const bulk = useLibraryStore.getState().deleteClips([6, 7]);
-    await flush();
-    expect(deletingClips()).toEqual([5, 6, 7]);
+    // 5's request is still out; 6 and 7 went straight to the core behind it and are done.
+    await bulk;
+    expect(deletingClips()).toEqual([5]);
+    expect(clipIds()).toEqual([5]);
 
     held.release();
     await one;
-    await bulk;
     expect(deletingClips()).toEqual([]);
     expect(clipIds()).toEqual([]);
     teardown();

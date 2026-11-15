@@ -23,6 +23,7 @@ import {
   StatusSocket,
   type MatchSummary,
   type Clip,
+  type ClipDeleteOutcome,
   type BucketCounts,
   type Status,
   type DiskWarning,
@@ -35,9 +36,10 @@ import {
   applyMatchesDeleted,
   applyMatchVideosDeleted,
   applyRecordingsDeleted,
+  applyRecordingsOutcome,
   applyClipDeleted,
   applyClipsDeleted,
-  type DeleteSlice,
+  matchDeleteDone,
 } from '../lib/library-delete';
 export type { Bucket } from './buckets';
 
@@ -64,16 +66,22 @@ export interface LibraryState {
   readonly counts: BucketCounts;
   readonly status: Status | null;
   readonly loadState: LoadState;
-  // Recordings and clips whose delete is queued or in flight. A delete can wait minutes for the core's
-  // maintenance lock (an archive pass holds it), so the tables dim these rows ("Deleting…") and offer
-  // no second delete for them; one asked for anyway joins the first (see the client's delete queue). A
-  // row leaves its set when its delete settles: done, refused, or timed out (the core can still finish
-  // a timed-out one, and its match.deleted / clip.deleted frame reloads the list when it does).
+  // Recordings and clips this window has a delete request in flight for. The core answers one within
+  // about half a minute (it waits that long for its maintenance lock, then queues the delete), and the
+  // tables dim these rows ("Deleting…") and offer no second delete for them meanwhile. A row leaves
+  // its set when the request settles: done, queued (it moves to the queued set below), refused, or
+  // timed out.
   readonly deletingMatchIds: ReadonlySet<number>;
   readonly deletingClipIds: ReadonlySet<number>;
+  // Recordings and clips whose delete the core has queued: it waits for the core's maintenance lock (an
+  // archive pass holds it) and is done once that frees, however long that takes and whether or not this
+  // window is still open. Shown as being deleted, like the in-flight ones, until the core's
+  // match.deleted / clip.deleted frame says the delete is done (and drops or stubs the row).
+  readonly queuedMatchIds: ReadonlySet<number>;
+  readonly queuedClipIds: ReadonlySet<number>;
   // Why the last recording or clip delete failed, or null. Backs the delete-failure banner; cleared
-  // when the banner is dismissed or another delete starts. A delete that timed out isn't reported:
-  // the core still finishes it once its maintenance lock frees (see isRequestTimeout).
+  // when the banner is dismissed or another delete starts. A delete the core queued isn't a failure, nor
+  // is one that timed out: the core may still be doing it (see isRequestTimeout).
   readonly deleteError: string | null;
   // The latest low-disk warning: pushed by the core's "error" frame (scope "disk") and seeded from
   // GET /status (storage.lowDisk) on mount/reconnect, or null when none is outstanding. Backs the
@@ -120,10 +128,16 @@ export interface LibraryState {
   // then applies the same rule to all survivors and refreshes counts in one shot.
   readonly deleteMatches: (ids: readonly number[]) => Promise<void>;
   // Permanently delete one clip (the Clips bucket's right-click delete, and the player strip's).
-  readonly deleteClip: (id: number) => Promise<void>;
+  // Resolves 'queued' when the core does it later (its clip.deleted frame then says so).
+  readonly deleteClip: (id: number) => Promise<ClipDeleteOutcome>;
   // Bulk-delete several clips at once (the Clips bucket's multi-select), mirroring deleteMatches:
   // each deletes server-side, then one state update + one counts refresh for all of them.
   readonly deleteClips: (ids: readonly number[]) => Promise<void>;
+  // The core's word that a recording or clip delete is done (its match.deleted / clip.deleted frame),
+  // wherever it was asked for: drops (or, for a recording, possibly stubs) the row at once and takes
+  // it off the queued set. For a delete the core queued, nothing else says it is done.
+  readonly recordingDeleteDone: (id: number, outcome: 'deleted' | 'stubbed' | null) => void;
+  readonly clipDeleteDone: (id: number) => void;
   readonly setDeleteError: (message: string | null) => void;
   readonly setDiskWarning: (warning: DiskWarning | null) => void;
   readonly setUpdate: (update: UpdateState | null) => void;
@@ -154,9 +168,10 @@ function withoutIds(from: ReadonlySet<number>, ids: Iterable<number>): ReadonlyS
 }
 
 // Whether a request gave up on its own timeout (AbortSignal.timeout rejects with a TimeoutError). For
-// a delete that means the core held its maintenance lock (or hung) for all ten minutes, not that it
-// refused: it still finishes the delete once the lock frees, and the frame it sends then reloads the
-// list. So a timeout is reconciled like a failure, but not reported as one.
+// a delete that means the core didn't answer at all within the client's timeout, though it answers one
+// within about half a minute even while its maintenance lock is held: it hung, or was too slow. That
+// isn't a refusal, and the core may still finish the delete, its frame then dropping the row. So a
+// timeout is reconciled like a failure, but not reported as one.
 function isRequestTimeout(err: unknown): boolean {
   return (
     typeof err === 'object' && err !== null && (err as { name?: unknown }).name === 'TimeoutError'
@@ -187,6 +202,112 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
     if (get().loadState === 'loading') set({ loadState: 'ready' });
   };
 
+  // Sends each recording's delete in turn, past any that fails (the rest still go), then lands what
+  // they did in ONE update and refreshes the counts once. Pessimistic: each row is mirrored only once
+  // the SERVER said which branch it took (it decides stub-vs-delete from the clip table under its
+  // maintenance lock; our own clips list can lag it by the ~200ms clip.created reload window, so
+  // guessing locally can drop a row the server stubbed). Only a missing outcome (older core) falls back
+  // to the local guess, and a delete the core queued is mirrored once its match.deleted frame says what
+  // it did. Every row is in deletingMatchIds from the start until the whole run is done, and one the
+  // core queued is then in queuedMatchIds. The run's failures are reported in the banner together and
+  // reconciled with a reload. Returns them.
+  const runMatchDeletes = async (ids: readonly number[]): Promise<readonly unknown[]> => {
+    set((s) => ({ deletingMatchIds: withIds(s.deletingMatchIds, ids), deleteError: null }));
+    const removed = new Set<number>();
+    const stubbed = new Set<number>();
+    const unknown = new Set<number>(); // no outcome in the response (older core) -> local guess
+    const queued = new Set<number>();
+    const refused = new Set<number>();
+    const errors: unknown[] = [];
+    for (const id of ids) {
+      try {
+        const outcome = await apiDeleteMatch(id);
+        (outcome === 'deleted'
+          ? removed
+          : outcome === 'stubbed'
+            ? stubbed
+            : outcome === 'queued'
+              ? queued
+              : unknown
+        ).add(id);
+      } catch (err) {
+        errors.push(err); // skip this one; the rest still delete
+        if (!isRequestTimeout(err)) refused.add(id);
+      }
+    }
+    const done = new Set([...removed, ...stubbed, ...unknown]);
+    // A coalesced match.* frame fires load() every ~200ms, so a load() that fetched the list BEFORE
+    // these deletes committed server-side may still be in flight; invalidate it so it can't resurrect
+    // a just-deleted row (and so it doesn't leave the table wedged on the spinner).
+    if (done.size > 0) invalidatePendingLoad();
+    set((s) => ({
+      ...(done.size > 0
+        ? applyRecordingsDeleted(
+            applyMatchesDeleted(applyMatchVideosDeleted(s, stubbed), removed),
+            unknown,
+          )
+        : {}),
+      deletingMatchIds: withoutIds(s.deletingMatchIds, ids),
+      // Done or refused, the core no longer has the delete; queued, it does until its frame.
+      queuedMatchIds: withIds(withoutIds(s.queuedMatchIds, [...done, ...refused]), queued),
+      ...failureReport('recording', errors, ids.length),
+    }));
+    // Reconcile a failed or timed-out delete with the server's list: one that did land must not leave
+    // its row listed. Started only after invalidatePendingLoad above, which would drop it as stale.
+    if (errors.length > 0) void get().load({ silent: true });
+    if (done.size > 0) {
+      try {
+        set({ counts: await fetchBucketCounts() });
+      } catch {
+        /* leave the stale badge; the next load() reconciles */
+      }
+    }
+    return errors;
+  };
+
+  // The clip twin of runMatchDeletes: a clip delete that is done drops the row (clearing a clip
+  // auto-play that pointed at it). Returns the failures and the clips the core queued.
+  const runClipDeletes = async (
+    ids: readonly number[],
+  ): Promise<{ readonly errors: readonly unknown[]; readonly queued: ReadonlySet<number> }> => {
+    set((s) => ({ deletingClipIds: withIds(s.deletingClipIds, ids), deleteError: null }));
+    const removed = new Set<number>();
+    const queued = new Set<number>();
+    const refused = new Set<number>();
+    const errors: unknown[] = [];
+    for (const id of ids) {
+      try {
+        ((await apiDeleteClip(id)) === 'queued' ? queued : removed).add(id);
+      } catch (err) {
+        errors.push(err); // skip this one; the rest still delete
+        if (!isRequestTimeout(err)) refused.add(id);
+      }
+    }
+    if (removed.size > 0) invalidatePendingLoad();
+    set((s) => ({
+      ...(removed.size > 0 ? applyClipsDeleted(s, removed) : {}),
+      deletingClipIds: withoutIds(s.deletingClipIds, ids),
+      queuedClipIds: withIds(withoutIds(s.queuedClipIds, [...removed, ...refused]), queued),
+      ...failureReport('clip', errors, ids.length),
+    }));
+    if (errors.length > 0) void get().load({ silent: true });
+    if (removed.size > 0) {
+      try {
+        set({ counts: await fetchBucketCounts() });
+      } catch {
+        /* leave the stale badge; the next load() reconciles */
+      }
+    }
+    return { errors, queued };
+  };
+
+  // A load() in flight may have fetched the list before a delete the core just announced as done;
+  // keep it from bringing the row back (the frame's own reload follows). Not the first load, though:
+  // dropping that one would show an empty library until the reload lands.
+  const invalidateLoadForFrame = (): void => {
+    if (get().loadState !== 'loading') invalidatePendingLoad();
+  };
+
   return {
     matches: [],
     clips: [],
@@ -195,6 +316,8 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
     loadState: 'idle',
     deletingMatchIds: new Set<number>(),
     deletingClipIds: new Set<number>(),
+    queuedMatchIds: new Set<number>(),
+    queuedClipIds: new Set<number>(),
     deleteError: null,
     diskWarning: null,
     update: null,
@@ -264,174 +387,49 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
     },
 
     // Delete a recording (never its clips — the server leaves a videoless stub row when clips
-    // exist, else drops the row). Pessimistic: delete server-side FIRST, then mirror the branch the
-    // SERVER reports it took (its decision is made from the clip table under its maintenance lock;
-    // our own clips list can lag it by the ~200ms clip.created reload window, so guessing locally can
-    // drop a row the server stubbed). Only a missing outcome (older core) falls back to the local
-    // guess. The row is in deletingMatchIds until the delete settles, and a failure is reported in
-    // the banner (deleteError). Rethrows so the caller can tell a failure.
+    // exist, else drops the row). See runMatchDeletes. Rethrows a failure so the caller can tell.
     deleteMatch: async (id) => {
-      const deleted = new Set([id]);
-      set((s) => ({ deletingMatchIds: withIds(s.deletingMatchIds, deleted), deleteError: null }));
-      let outcome: Awaited<ReturnType<typeof apiDeleteMatch>>;
-      try {
-        outcome = await apiDeleteMatch(id);
-      } catch (err) {
-        // Failed, or gave up while the core waits out an archive pass (it then finishes the delete
-        // and its match.deleted frame reloads the list). Reconcile with the server either way, so a
-        // delete that did land never leaves its row listed.
-        set((s) => ({
-          deletingMatchIds: withoutIds(s.deletingMatchIds, deleted),
-          ...failureReport('recording', [err], 1),
-        }));
-        void get().load({ silent: true });
-        throw err;
-      }
-      // A coalesced match.* frame fires load() every ~200ms, so a load() that fetched the list BEFORE
-      // this delete committed server-side may still be in flight; invalidate it so it can't resurrect
-      // the just-deleted row (and so it doesn't leave the table wedged on the spinner).
-      invalidatePendingLoad();
-      set((s) => ({
-        ...(outcome === 'stubbed'
-          ? applyMatchVideosDeleted(s, deleted)
-          : outcome === 'deleted'
-            ? applyMatchesDeleted(s, deleted)
-            : applyRecordingsDeleted(s, deleted)),
-        deletingMatchIds: withoutIds(s.deletingMatchIds, deleted),
-      }));
-      try {
-        set({ counts: await fetchBucketCounts() });
-      } catch {
-        /* leave the stale badge; the next load() reconciles */
-      }
+      const errors = await runMatchDeletes([id]);
+      if (errors.length > 0) throw errors[0];
     },
 
-    // Bulk-delete (table multi-select). Deletes each server-side first — sequentially, bounded by the
-    // small selection size — then applies the server-reported branches for all survivors in ONE state
-    // update and refreshes counts once (rather than the per-row count fetch deleteMatch does). A
-    // single failed delete is skipped so the rest still go; the next load() reconciles any straggler.
-    // So is one that timed out behind a long archive pass: the core still finishes it once its
-    // maintenance lock frees, and the rows sent after it then too (the client's delete queue sends
-    // them one at a time, so waiting on the lock holds one connection to the core, not one per row).
-    // Every row is in deletingMatchIds from the start until the whole run is done, and the run's
-    // failures are reported in the banner together.
+    // Bulk-delete (table multi-select): each delete in turn — sequentially, so at most one of them
+    // waits on the core's maintenance lock (it answers within about half a minute, queueing the delete
+    // if the lock stays held, and queues the rest at once behind it) — past any that fails, so the rest
+    // still go. See runMatchDeletes.
     deleteMatches: async (ids) => {
-      set((s) => ({ deletingMatchIds: withIds(s.deletingMatchIds, ids), deleteError: null }));
-      const removed = new Set<number>();
-      const stubbed = new Set<number>();
-      const unknown = new Set<number>(); // no outcome in the response (older core) -> local guess
-      const errors: unknown[] = [];
-      for (const id of ids) {
-        try {
-          const outcome = await apiDeleteMatch(id);
-          (outcome === 'deleted' ? removed : outcome === 'stubbed' ? stubbed : unknown).add(id);
-        } catch (err) {
-          errors.push(err); // skip this one; the rest still delete
-        }
-      }
-      // Reconcile a failed (or timed-out, see deleteMatch) delete with the server's list. Started
-      // only after invalidatePendingLoad below, which would otherwise drop it as stale.
-      const reconcile = (): void => {
-        if (errors.length > 0) void get().load({ silent: true });
-      };
-      if (removed.size === 0 && stubbed.size === 0 && unknown.size === 0) {
-        set((s) => ({
-          deletingMatchIds: withoutIds(s.deletingMatchIds, ids),
-          ...failureReport('recording', errors, ids.length),
-        }));
-        reconcile();
-        return;
-      }
-      invalidatePendingLoad();
-      set((s) => {
-        let next: DeleteSlice = applyMatchVideosDeleted(s, stubbed);
-        next = applyMatchesDeleted(next, removed);
-        return {
-          ...applyRecordingsDeleted(next, unknown),
-          deletingMatchIds: withoutIds(s.deletingMatchIds, ids),
-          ...failureReport('recording', errors, ids.length),
-        };
-      });
-      reconcile();
-      try {
-        set({ counts: await fetchBucketCounts() });
-      } catch {
-        /* leave the stale badge; the next load() reconciles */
-      }
+      await runMatchDeletes(ids);
     },
 
-    // Permanently delete one clip (the Clips bucket's right-click delete, and the player strip's).
-    // Pessimistic like deleteMatch: server-side first, then drop the row locally (clearing a clip
-    // auto-play that pointed at it) and refresh the Clips badge. The clip is in deletingClipIds until
-    // the delete settles, and a failure is reported in the banner and reconciled as in deleteMatch.
-    // Rethrows so the caller (the player, for its own strip) can tell a failure.
+    // Permanently delete one clip (the Clips bucket's right-click delete, and the player strip's), as
+    // deleteMatch does a recording. Resolves 'queued' when the core does it later, and rethrows a
+    // failure, so the caller (the player, for its own strip) can tell either.
     deleteClip: async (id) => {
-      const deleted = new Set([id]);
-      set((s) => ({ deletingClipIds: withIds(s.deletingClipIds, deleted), deleteError: null }));
-      try {
-        await apiDeleteClip(id);
-      } catch (err) {
-        set((s) => ({
-          deletingClipIds: withoutIds(s.deletingClipIds, deleted),
-          ...failureReport('clip', [err], 1),
-        }));
-        void get().load({ silent: true });
-        throw err;
-      }
-      invalidatePendingLoad();
+      const { errors, queued } = await runClipDeletes([id]);
+      if (errors.length > 0) throw errors[0];
+      return queued.has(id) ? 'queued' : 'deleted';
+    },
+
+    // Bulk clip delete (the Clips bucket's multi-select), as deleteMatches.
+    deleteClips: async (ids) => {
+      await runClipDeletes(ids);
+    },
+
+    recordingDeleteDone: (id, outcome) => {
+      const done = new Set([id]);
+      invalidateLoadForFrame();
+      set((s) => ({
+        ...applyRecordingsOutcome(s, done, outcome),
+        queuedMatchIds: withoutIds(s.queuedMatchIds, done),
+      }));
+    },
+
+    clipDeleteDone: (id) => {
+      invalidateLoadForFrame();
       set((s) => ({
         ...applyClipDeleted(s, id),
-        deletingClipIds: withoutIds(s.deletingClipIds, deleted),
+        queuedClipIds: withoutIds(s.queuedClipIds, [id]),
       }));
-      try {
-        set({ counts: await fetchBucketCounts() });
-      } catch {
-        /* leave the stale badge; the next load() reconciles */
-      }
-    },
-
-    // Bulk clip delete (the Clips bucket's multi-select). Mirrors deleteMatches: each delete runs
-    // server-side first — sequentially, bounded by the small selection size — then all removals land
-    // in ONE state update with a single counts refresh. A failed or timed-out delete is skipped so the
-    // rest still go, as in deleteMatches, and a reconcile reload follows. Every clip is in
-    // deletingClipIds from the start until the whole run is done, and the run's failures are reported
-    // in the banner together.
-    deleteClips: async (ids) => {
-      set((s) => ({ deletingClipIds: withIds(s.deletingClipIds, ids), deleteError: null }));
-      const removed = new Set<number>();
-      const errors: unknown[] = [];
-      for (const id of ids) {
-        try {
-          await apiDeleteClip(id);
-          removed.add(id);
-        } catch (err) {
-          errors.push(err); // skip this one; the rest still delete
-        }
-      }
-      // Started only after invalidatePendingLoad below, which would otherwise drop it as stale.
-      const reconcile = (): void => {
-        if (errors.length > 0) void get().load({ silent: true });
-      };
-      if (removed.size === 0) {
-        set((s) => ({
-          deletingClipIds: withoutIds(s.deletingClipIds, ids),
-          ...failureReport('clip', errors, ids.length),
-        }));
-        reconcile();
-        return;
-      }
-      invalidatePendingLoad();
-      set((s) => ({
-        ...applyClipsDeleted(s, removed),
-        deletingClipIds: withoutIds(s.deletingClipIds, ids),
-        ...failureReport('clip', errors, ids.length),
-      }));
-      reconcile();
-      try {
-        set({ counts: await fetchBucketCounts() });
-      } catch {
-        /* leave the stale badge; the next load() reconciles */
-      }
     },
 
     load: async (opts) => {
@@ -550,15 +548,24 @@ export function startLibrary(): () => void {
       void useLibraryStore.getState().load({ silent: true });
     }, 200);
   };
-  const off = subscribeToMatchEvents(socket, scheduleReload);
+  // A match.deleted frame also drops (or stubs) its row at once, before that reload: for a delete the
+  // core queued it is the only word the delete is done, and the row would otherwise sit there, no
+  // longer marked as being deleted, until the reload landed.
+  const off = subscribeToMatchEvents(socket, (evt) => {
+    const done = matchDeleteDone(evt);
+    if (done !== null) useLibraryStore.getState().recordingDeleteDone(done.id, done.outcome);
+    scheduleReload();
+  });
 
   // Clip lifecycle frames mutate the library too: a new/finished clip changes the
   // Clips bucket list + count. Subscribe to ALL matches (key 0) and reuse the same
   // coalesced reload — load() now refetches clips + counts alongside the match list.
   // clip.progress fires often during generation; only created/ready change membership,
-  // so skip progress to avoid a reload per percent tick.
+  // so skip progress to avoid a reload per percent tick. A clip.deleted drops its row at once too,
+  // as a match.deleted does.
   const offClips = socket.onClipEvent(0, (evt) => {
     if (evt.type === 'clip.progress') return;
+    if (evt.type === 'clip.deleted') useLibraryStore.getState().clipDeleteDone(evt.payload.clipId);
     scheduleReload();
   });
 
@@ -582,6 +589,9 @@ export function startLibrary(): () => void {
 // counts. A newly-enriched row thus leaves Unsorted for its real bucket and the
 // badge counts update in one shot. load() replaces (not increments) state, so
 // duplicate frames for the same id are naturally idempotent — no double-counting.
-function subscribeToMatchEvents(socket: StatusSocket, onMatchEvent: () => void): () => void {
-  return socket.onEvent(() => onMatchEvent());
+function subscribeToMatchEvents(
+  socket: StatusSocket,
+  onMatchEvent: (evt: { readonly type: string; readonly payload: unknown }) => void,
+): () => void {
+  return socket.onEvent((evt) => onMatchEvent(evt));
 }
