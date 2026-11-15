@@ -279,6 +279,36 @@ class RecordingArchiverTest {
     }
 
     @Test
+    void aSameVolumeMoveWhoseRepointFails_renamesTheFilesBack() throws Exception {
+        // On the same volume the move is a rename, which takes the source before the repoint. When the
+        // repoint then fails (a SQLITE_BUSY, say), the files must go back where the row still points:
+        // left in the archive, the row points at a file that is gone until the sweeper nulls it.
+        Path archive = configureArchive("hdd", 10);
+        settings.get().retentionCapGb = 1; // two 1 GiB VODs over a 1 GiB cap force a move
+        MatchRepository failingRepoint = spy(matches);
+        doThrow(new IllegalStateException("simulated SQLITE_BUSY"))
+                .when(failingRepoint).updateVideoPath(anyLong(), anyString(), any());
+        RecordingArchiver failing = new RecordingArchiver(failingRepoint, clips, settings,
+                new RetentionSweeper(failingRepoint, clips, settings, mock(EventPublisher.class)),
+                hugeFreeProbe());
+        long oldest = seed(videoDir, "old.mp4", "old.jpg", GIB, 1_000L, false);
+        seed(videoDir, "new.mp4", "new.jpg", GIB, 2_000L, false);
+        Path src = videoDir.resolve("old.mp4");
+        Path thumb = videoDir.resolve("thumbs").resolve("old.jpg");
+
+        assertThat(failing.archive(null).movedIds()).isEmpty();
+
+        assertThat(src).exists();
+        assertThat(Files.size(src)).isEqualTo(GIB);
+        assertThat(thumb).exists();
+        assertThat(archive.resolve(oldest + "-old.mp4")).doesNotExist();
+        assertThat(archive.resolve("thumbs").resolve(oldest + "-old.jpg")).doesNotExist();
+        var row = matches.findById(oldest).orElseThrow();
+        assertThat(row.videoPath()).isEqualTo(src.toString());
+        assertThat(row.thumbPath()).isEqualTo(thumb.toString());
+    }
+
+    @Test
     void crossStoreMoveSucceedsDestExistsSourceGoneRowRepointed() throws Exception {
         // The happy path through the SAME forced cross-store branch: destination fully written, source
         // deleted (only AFTER the repoint), and the row points at the id-prefixed destination name.

@@ -273,7 +273,8 @@ public class RecordingArchiver {
     /**
      * Moves a VOD's {@code .mp4} (and thumbnail, into {@code <dir>/thumbs}) onto {@code targetDir} and
      * repoints the DB row. Returns false (leaving the row untouched) if the video move fails, so the
-     * file is never lost and the next pass retries.
+     * file is never lost and the next pass retries. A same-filesystem rename takes the source before
+     * the repoint, so a repoint that then fails renames the files back, and the row's paths stay good.
      *
      * <p>Crash-safety ordering (the cross-store SSD→HDD case): copy → verify size → {@code
      * updateVideoPath} → ONLY THEN delete the source. The DB is repointed to a file that already fully
@@ -319,10 +320,24 @@ public class RecordingArchiver {
             }
 
             // Repoint the row to the (already fully-written) destination(s) BEFORE deleting any source.
-            if (mv.isClip()) {
-                clips.updateVideoPath(mv.ownerId(), dstVideo.toString(), newThumb);
-            } else {
-                matches.updateVideoPath(mv.ownerId(), dstVideo.toString(), newThumb);
+            try {
+                if (mv.isClip()) {
+                    clips.updateVideoPath(mv.ownerId(), dstVideo.toString(), newThumb);
+                } else {
+                    matches.updateVideoPath(mv.ownerId(), dstVideo.toString(), newThumb);
+                }
+            } catch (RuntimeException e) {
+                // A same-filesystem rename already took the source (a copy left it in place), so put it
+                // back while the row still points there. Left in the archive, the file would be found
+                // again only by a restart's recovery, and only before the sweeper confirms the row's
+                // file missing and nulls its paths.
+                if (videoRenamedInPlace) {
+                    renameBack(dstVideo, src);
+                }
+                if (thumbRenamedInPlace) {
+                    renameBack(Path.of(newThumb), thumbSrc);
+                }
+                throw e;
             }
 
             // The row now references the destination; the source copies are safe to remove. (An atomic
@@ -495,6 +510,19 @@ public class RecordingArchiver {
                     });
         } catch (IOException | RuntimeException e) {
             log.warn("Could not check {} for interrupted archive copies: {}", dir, e.toString());
+        }
+    }
+
+    /**
+     * Renames a moved file back to where its row still points, after a failed repoint. If that fails
+     * too, the file stays at {@code from}, and only a restart's recovery can re-link it.
+     */
+    private void renameBack(Path from, Path to) {
+        try {
+            Files.move(from, to, StandardCopyOption.ATOMIC_MOVE);
+        } catch (IOException | RuntimeException e) {
+            log.warn("Could not put {} back at {} after its row failed to repoint: {}",
+                    from, to, e.toString());
         }
     }
 
