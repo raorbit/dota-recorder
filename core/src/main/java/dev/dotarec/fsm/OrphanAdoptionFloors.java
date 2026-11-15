@@ -57,8 +57,9 @@ import org.slf4j.LoggerFactory;
  * recorded into, so they never reach back.
  *
  * <p>The floors live in their own file in the data folder, never in {@code settings.json}: that
- * file is shared ground with the Go remake, and this app's settings loader rejects a key it doesn't
- * know. The Go remake keeps the same file in the same format ({@code internal/fsm/adoption_floors.go}),
+ * file is shared ground with the Go remake, and a 0.1.x from before the settings loader kept keys it
+ * doesn't know refuses a file that carries one. The Go remake keeps the same file in the same format
+ * ({@code internal/fsm/adoption_floors.go}),
  * so once it takes over this data folder, the floors this app set still hold. The format is exactly
  * {@code {"version":1,"floors":{"<key>":<epoch millis>,...}}}, with {@link #key} naming each root.
  */
