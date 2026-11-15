@@ -1,6 +1,7 @@
 // Minimal typed client for the local core bridge: REST over fetch plus a
 // WebSocket client with exponential-backoff reconnect.
-//
+import { createDeleteQueue } from '../lib/delete-queue';
+
 // Endpoints resolve from the preload-exposed bridge when present (packaged /
 // Electron), falling back to the known loopback defaults (dev / browser).
 const DEFAULT_BRIDGE_BASE = 'http://127.0.0.1:3224';
@@ -368,11 +369,18 @@ async function postJsonBody<TBody, TResult>(path: string, body: TBody): Promise<
   return (await res.json()) as TResult;
 }
 
-// How long a delete may take. It waits for the core's storage-maintenance lock, which the archiver
-// holds through a whole pass of cross-drive copies (minutes for multi-GB VODs onto a slow HDD). The
-// core finishes a delete even after the request gives up and announces it (match.deleted /
-// clip.deleted), so this only bounds a wedged core.
+// How long a delete may take once it is sent (its wait in the delete queue below doesn't count). It
+// waits for the core's storage-maintenance lock, which the archiver holds through a whole pass of
+// cross-drive copies (minutes for multi-GB VODs onto a slow HDD). The core finishes a delete even
+// after the request gives up and announces it (match.deleted / clip.deleted), so this only bounds a
+// wedged core.
 const DELETE_TIMEOUT_MS = 10 * 60_000;
+
+// Every recording and clip delete goes through this one queue, a single request at a time, and a
+// delete of a row already queued or in flight joins it (see lib/delete-queue). They are the only
+// requests the core makes wait on its maintenance lock, so they are the only ones queued: everything
+// else goes straight out, and a delete held up behind an archive pass can't hold it back.
+const deletes = createDeleteQueue();
 
 // DELETE returning no body (204/200).
 async function delVoid(path: string): Promise<void> {
@@ -634,9 +642,10 @@ export function createClip(
   return postJsonBody<typeof body, Clip>(`/matches/${matchId}/clips`, body);
 }
 
-// Permanently deletes a clip (DELETE /clips/{id}): unlinks the .mp4 then drops the row.
+// Permanently deletes a clip (DELETE /clips/{id}): unlinks the .mp4 then drops the row. Sent through
+// the delete queue (see `deletes`).
 export function deleteClip(clipId: number): Promise<void> {
-  return delVoid(`/clips/${clipId}`);
+  return deletes.run(`clip:${clipId}`, () => delVoid(`/clips/${clipId}`));
 }
 
 // Toggles the star on a match (PATCH /matches/{id}) and returns the updated row.
@@ -662,8 +671,13 @@ export type MatchDeleteOutcome = 'deleted' | 'stubbed';
 // Returns the server's outcome so the store can mirror the AUTHORITATIVE branch: the server decides
 // stub-vs-delete from the clip table under its maintenance lock, and the store's own clip list can
 // lag it (a clip created in the ~200ms before its clip.created reload lands). Null when the body is
-// missing/unrecognized (an older core) — the caller then falls back to its local guess.
-export async function deleteMatch(id: number): Promise<MatchDeleteOutcome | null> {
+// missing/unrecognized (an older core) — the caller then falls back to its local guess. Sent through
+// the delete queue (see `deletes`).
+export function deleteMatch(id: number): Promise<MatchDeleteOutcome | null> {
+  return deletes.run(`match:${id}`, () => sendMatchDelete(id));
+}
+
+async function sendMatchDelete(id: number): Promise<MatchDeleteOutcome | null> {
   const res = await fetch(`${bridgeBase()}/matches/${id}`, {
     method: 'DELETE',
     headers: { Accept: 'application/json', ...authHeaders() },
