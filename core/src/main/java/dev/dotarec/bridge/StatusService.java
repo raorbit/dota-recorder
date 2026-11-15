@@ -23,6 +23,7 @@ public class StatusService {
     private final MatchFsm matchFsm;
     private final ObsDemand obsDemand;
     private final LowDiskState lowDiskState;
+    private final DeleteQueue deletes;
 
     // @Lazy breaks the construction cycle StatusService -> MatchFsm -> EventPublisher ->
     // StatusService. MatchFsm is only dereferenced at runtime in snapshot(), so a lazy proxy is
@@ -32,12 +33,14 @@ public class StatusService {
             ObsHealth obsHealth,
             @Lazy MatchFsm matchFsm,
             ObsDemand obsDemand,
-            LowDiskState lowDiskState) {
+            LowDiskState lowDiskState,
+            DeleteQueue deletes) {
         this.gsiHeartbeat = gsiHeartbeat;
         this.obsHealth = obsHealth;
         this.matchFsm = matchFsm;
         this.obsDemand = obsDemand;
         this.lowDiskState = lowDiskState;
+        this.deletes = deletes;
     }
 
     /** Builds a point-in-time snapshot of recorder status. */
@@ -61,7 +64,11 @@ public class StatusService {
                 new StatusSnapshot.FsmStatus(matchFsm.getState().name(), null);
         StatusSnapshot.StorageStatus storage =
                 new StatusSnapshot.StorageStatus(lowDiskState.current());
+        StatusSnapshot.DeleteStatus pendingDeletes =
+                new StatusSnapshot.DeleteStatus(
+                        deletes.pendingIds(DeleteQueue.Kind.MATCH),
+                        deletes.pendingIds(DeleteQueue.Kind.CLIP));
 
-        return new StatusSnapshot(gsi, obs, fsm, storage);
+        return new StatusSnapshot(gsi, obs, fsm, storage, pendingDeletes);
     }
 }

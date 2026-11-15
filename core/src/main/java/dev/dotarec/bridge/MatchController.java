@@ -68,21 +68,33 @@ public class MatchController {
     private final PauseRepository pauses;
     private final ClipRepository clips;
     private final SettingsStore settings;
-    private final StorageMaintenanceLock maintenanceLock;
+    /** Runs a delete under the storage-maintenance lock, now or once it frees. */
+    private final DeleteQueue deletes;
     /** Announces a finished delete; null in tests that don't observe it. */
     private final EventPublisher events;
 
     @Autowired
     public MatchController(MatchRepository matches, MarkerRepository markers, PauseRepository pauses,
-                           ClipRepository clips, SettingsStore settings,
-                           StorageMaintenanceLock maintenanceLock, EventPublisher events) {
+                           ClipRepository clips, SettingsStore settings, DeleteQueue deletes,
+                           EventPublisher events) {
         this.matches = matches;
         this.markers = markers;
         this.pauses = pauses;
         this.clips = clips;
         this.settings = settings;
-        this.maintenanceLock = maintenanceLock;
+        this.deletes = deletes;
         this.events = events;
+    }
+
+    /**
+     * Test constructor: deletes take a shared maintenance lock (waiting for it as long as production
+     * does before they are queued) and are announced to {@code events}. Package-private so only the
+     * tests can build one.
+     */
+    MatchController(MatchRepository matches, MarkerRepository markers, PauseRepository pauses,
+                           ClipRepository clips, SettingsStore settings,
+                           StorageMaintenanceLock maintenanceLock, EventPublisher events) {
+        this(matches, markers, pauses, clips, settings, new DeleteQueue(maintenanceLock, events), events);
     }
 
     /**
@@ -195,7 +207,8 @@ public class MatchController {
      * {@code {"outcome":"stubbed"}} — because the branch is decided from the clip table read UNDER the
      * lock. The renderer mirrors the delete locally, and without the outcome it would have to guess
      * from its own (possibly stale) clip list; a clip created in the ~200ms before its
-     * {@code clip.created} reload lands would make that guess wrong.
+     * {@code clip.created} reload lands would make that guess wrong. A delete that hasn't run yet is
+     * answered 202 with {@code {"outcome":"queued"}} instead (below).
      *
      * <p>Serializes against the storage-maintenance passes ({@link dev.dotarec.retention.RecordingArchiver}
      * archive + {@link dev.dotarec.retention.RetentionSweeper} sweep) via {@link StorageMaintenanceLock}:
@@ -205,53 +218,62 @@ public class MatchController {
      * Under the lock the row's CURRENT paths are RE-READ (by id) immediately before unlinking, so the
      * files removed are always the row's present locations even if the archiver just repointed them.
      *
-     * <p>That wait can outlast the renderer's request: the archiver holds the lock through a whole
-     * pass of cross-drive copies. The delete still completes after the request gave up, so it is
-     * announced as a {@code match.deleted} frame ({@code {id, outcome}}) for every open view to
-     * reload on; without it the row stayed listed until some unrelated reload.
+     * <p>The archiver holds that lock through a whole pass of cross-drive copies, so the delete goes
+     * through {@link DeleteQueue}: it waits here for the lock at most half a minute, and is then queued
+     * to run once the lock frees, with the 202 answered at once. A second delete of one still pending
+     * gets the same answer. Wherever it ran, a finished delete is announced as a {@code match.deleted}
+     * frame ({@code {id, outcome}}) for every open view to drop or stub the row on; a queued one has no
+     * request left to answer.
      */
     @DeleteMapping("/matches/{id}")
-    public DeleteOutcome delete(@PathVariable long id) {
+    public ResponseEntity<DeleteOutcome> delete(@PathVariable long id) {
         // Existence probe outside the lock so an unknown id is a cheap 404 without serializing on
-        // maintenance; the authoritative paths are re-read under the lock below.
+        // maintenance; the authoritative paths are re-read under the lock (deleteUnderLock).
         matches.findById(id)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "No match " + id));
-        boolean stubbed;
-        maintenanceLock.lock();
-        try {
-            // Re-read the CURRENT row inside the lock: the archiver may have repointed video_path/
-            // thumb_path to an archive drive since the probe above, so unlink the present locations, not
-            // the pre-move ones (which would be a no-op leaving the moved file stranded). A row deleted
-            // by a concurrent pass leaves nothing to unlink; the row delete below is then a no-op.
-            matches.findById(id).ifPresent(m -> {
-                deleteFileQuietly(m.videoPath());
-                deleteFileQuietly(m.thumbPath());
-            });
-            if (clips.findByParentMatchId(id).isEmpty()) {
-                matches.delete(id);
-                stubbed = false;
-            } else {
-                // Clips outlive the recording, and they cascade with the row — so leave the row as a
-                // videoless stub (the same end state the retention sweeper leaves behind).
-                matches.nullVideoPath(id);
-                stubbed = true;
-            }
-        } finally {
-            maintenanceLock.unlock();
+        return deletes.run(DeleteQueue.Kind.MATCH, id, () -> deleteUnderLock(id),
+                        outcome -> announceDeleted(id, outcome))
+                .map(outcome -> ResponseEntity.ok(new DeleteOutcome(outcome)))
+                .orElseGet(() -> ResponseEntity.status(HttpStatus.ACCEPTED).body(DeleteOutcome.QUEUED));
+    }
+
+    /** The delete itself, run with the maintenance lock held: {@code "deleted"} or {@code "stubbed"}. */
+    private String deleteUnderLock(long id) {
+        // Re-read the CURRENT row inside the lock: the archiver may have repointed video_path/
+        // thumb_path to an archive drive since the probe, so unlink the present locations, not the
+        // pre-move ones (which would be a no-op leaving the moved file stranded). A row deleted by a
+        // concurrent pass, or while this delete was queued, leaves nothing to unlink; the row delete
+        // below is then a no-op.
+        matches.findById(id).ifPresent(m -> {
+            deleteFileQuietly(m.videoPath());
+            deleteFileQuietly(m.thumbPath());
+        });
+        if (clips.findByParentMatchId(id).isEmpty()) {
+            matches.delete(id);
+            return "deleted";
         }
-        String outcome = stubbed ? "stubbed" : "deleted";
+        // Clips outlive the recording, and they cascade with the row — so leave the row as a
+        // videoless stub (the same end state the retention sweeper leaves behind).
+        matches.nullVideoPath(id);
+        return "stubbed";
+    }
+
+    private void announceDeleted(long id, String outcome) {
         if (events != null) {
             events.publish("match.deleted", Map.of("id", id, "outcome", outcome));
         }
-        return new DeleteOutcome(outcome);
     }
 
     /**
      * {@code DELETE /matches/{id}} response: {@code outcome} is {@code "deleted"} (the row went
-     * entirely — it had no clips) or {@code "stubbed"} (the row survives videoless because its clips
-     * still need it).
+     * entirely — it had no clips), {@code "stubbed"} (the row survives videoless because its clips
+     * still need it) or, with a 202, {@code "queued"} (it runs once the maintenance lock frees, and its
+     * {@code match.deleted} frame then says which of the other two it was).
      */
-    public record DeleteOutcome(String outcome) {}
+    public record DeleteOutcome(String outcome) {
+        /** A delete that hasn't run yet: queued behind the maintenance lock, or already pending. */
+        static final DeleteOutcome QUEUED = new DeleteOutcome("queued");
+    }
 
     /**
      * Best-effort unlink: ignores a null/blank/missing path; logs (never throws) on an I/O failure.

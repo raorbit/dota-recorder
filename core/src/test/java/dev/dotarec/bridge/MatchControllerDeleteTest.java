@@ -6,6 +6,8 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
 import dev.dotarec.config.AppPaths;
@@ -20,6 +22,7 @@ import dev.dotarec.data.TestDb;
 import dev.dotarec.retention.StorageMaintenanceLock;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -29,6 +32,8 @@ import javax.sql.DataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.server.ResponseStatusException;
 
 /**
@@ -36,7 +41,8 @@ import org.springframework.web.server.ResponseStatusException;
  * delete). Clipless: the row goes (markers + pauses cascade via the FK) and the {@code .mp4} +
  * thumbnail are unlinked. With clips: the files are unlinked but the row survives as a videoless stub
  * (the clips cascade with it, so it must stay as their parent). File unlinks are best-effort: a
- * missing file must not block the delete.
+ * missing file must not block the delete. One that can't get the storage-maintenance lock within its
+ * wait is answered as queued and done once the lock frees (a {@link HeldLock} plays the pass).
  */
 class MatchControllerDeleteTest {
 
@@ -69,7 +75,7 @@ class MatchControllerDeleteTest {
         markers.insert(id, "death", 12.5, null, "died", "gsi");
         assertThat(markers.findByMatchId(id)).hasSize(1);
 
-        MatchController.DeleteOutcome outcome = controller.delete(id);
+        MatchController.DeleteOutcome outcome = controller.delete(id).getBody();
 
         // The response tells the renderer which branch was taken so its local mirror never guesses.
         assertThat(outcome.outcome()).isEqualTo("deleted");
@@ -91,7 +97,7 @@ class MatchControllerDeleteTest {
         clips.insert(id, "manual", null, 10.0, 20.0, "carve",
                 clipVod.toString(), clipThumb.toString(), 3L, "ready", null, 1L);
 
-        MatchController.DeleteOutcome outcome = controller.delete(id);
+        MatchController.DeleteOutcome outcome = controller.delete(id).getBody();
 
         assertThat(outcome.outcome()).isEqualTo("stubbed");
         // The recording itself is gone from disk...
@@ -120,11 +126,11 @@ class MatchControllerDeleteTest {
         long clipId = clips.insert(id, "manual", null, 10.0, 20.0, "carve",
                 null, null, null, "ready", null, 1L);
 
-        assertThat(controller.delete(id).outcome()).isEqualTo("stubbed");
+        assertThat(controller.delete(id).getBody().outcome()).isEqualTo("stubbed");
         assertThat(repo.findById(id)).isPresent();
 
         clips.delete(clipId);
-        assertThat(controller.delete(id).outcome()).isEqualTo("deleted");
+        assertThat(controller.delete(id).getBody().outcome()).isEqualTo("deleted");
         assertThat(repo.findById(id)).isEmpty();
     }
 
@@ -256,6 +262,98 @@ class MatchControllerDeleteTest {
         t.join(2_000);
         assertThat(t.isAlive()).as("delete must not leak a maintenance-lock hold").isFalse();
         assertThat(acquired).isTrue();
+    }
+
+    @Test
+    void delete_answersQueued_whileAPassHoldsTheLock_andDeletesOnceItFrees() throws Exception {
+        // An archive pass holds the maintenance lock through its cross-drive copies. The request waits
+        // for it only a bounded time, then hands the delete to the queue and answers 202 at once, with
+        // the row and its file still there. Once the pass ends the queue deletes them and announces it:
+        // no request is left to answer.
+        StorageMaintenanceLock lock = new StorageMaintenanceLock();
+        EventPublisher events = mock(EventPublisher.class);
+        DeleteQueue deletes = new DeleteQueue(lock, events, Duration.ofMillis(100));
+        MatchController c = new MatchController(repo, markers, new PauseRepository(ds), clips,
+                settings, deletes, events);
+        Path vod = writeFile("match.mp4", new byte[] {1});
+        long id = insert(vod.toString(), null);
+        // The backstop ends the pass after 3 s: a request that waited for it fails here, not hangs.
+        try (HeldLock pass = HeldLock.hold(lock).releaseAfter(Duration.ofSeconds(3))) {
+            ResponseEntity<MatchController.DeleteOutcome> answer = c.delete(id);
+
+            assertThat(answer.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+            assertThat(answer.getBody()).isEqualTo(new MatchController.DeleteOutcome("queued"));
+            assertThat(repo.findById(id)).isPresent();
+            assertThat(Files.exists(vod)).isTrue();
+            verify(events, never()).publish(eq("match.deleted"), any());
+
+            pass.release();
+            deletes.drain(Duration.ofSeconds(5));
+        } finally {
+            deletes.shutdown();
+        }
+        verify(events).publish("match.deleted", Map.of("id", id, "outcome", "deleted"));
+        assertThat(repo.findById(id)).isEmpty();
+        assertThat(Files.exists(vod)).isFalse();
+    }
+
+    @Test
+    void delete_answersAsBefore_whenThePassEndsWithinTheWait() throws Exception {
+        // A short hold (one VOD's move) ends inside the wait, so the delete runs on the request and
+        // answers with what it did.
+        StorageMaintenanceLock lock = new StorageMaintenanceLock();
+        EventPublisher events = mock(EventPublisher.class);
+        DeleteQueue deletes = new DeleteQueue(lock, events, Duration.ofSeconds(10));
+        MatchController c = new MatchController(repo, markers, new PauseRepository(ds), clips,
+                settings, deletes, events);
+        long id = insert(writeFile("match.mp4", new byte[] {1}).toString(), null);
+        try (HeldLock pass = HeldLock.hold(lock)) {
+            Thread ender = new Thread(() -> {
+                try {
+                    Thread.sleep(150);
+                    pass.release();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+            ender.start();
+
+            ResponseEntity<MatchController.DeleteOutcome> answer = c.delete(id);
+
+            assertThat(answer.getStatusCode()).isEqualTo(HttpStatus.OK);
+            assertThat(answer.getBody()).isEqualTo(new MatchController.DeleteOutcome("deleted"));
+            assertThat(repo.findById(id)).isEmpty();
+            ender.join(5_000);
+        } finally {
+            deletes.shutdown();
+        }
+        verify(events).publish("match.deleted", Map.of("id", id, "outcome", "deleted"));
+    }
+
+    @Test
+    void delete_ofARecordingAlreadyQueued_answersQueuedAgain_andDeletesItOnce() throws Exception {
+        StorageMaintenanceLock lock = new StorageMaintenanceLock();
+        EventPublisher events = mock(EventPublisher.class);
+        DeleteQueue deletes = new DeleteQueue(lock, events, Duration.ofMillis(100));
+        MatchController c = new MatchController(repo, markers, new PauseRepository(ds), clips,
+                settings, deletes, events);
+        long id = insert(writeFile("match.mp4", new byte[] {1}).toString(), null);
+        try (HeldLock pass = HeldLock.hold(lock)) {
+            assertThat(c.delete(id).getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+
+            ResponseEntity<MatchController.DeleteOutcome> again = c.delete(id);
+
+            assertThat(again.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+            assertThat(again.getBody()).isEqualTo(new MatchController.DeleteOutcome("queued"));
+            pass.release();
+            deletes.drain(Duration.ofSeconds(5));
+        } finally {
+            deletes.shutdown();
+        }
+        // Queued, then done: the second ask queued nothing of its own.
+        verify(events, times(2)).publishStatus();
+        verify(events, times(1)).publish(eq("match.deleted"), any());
+        assertThat(repo.findById(id)).isEmpty();
     }
 
     @Test
