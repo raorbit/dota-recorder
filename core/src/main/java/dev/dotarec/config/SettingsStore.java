@@ -1,6 +1,9 @@
 package dev.dotarec.config;
 
+import com.fasterxml.jackson.annotation.JsonAnyGetter;
+import com.fasterxml.jackson.annotation.JsonAnySetter;
 import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import java.io.IOException;
@@ -10,7 +13,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.function.UnaryOperator;
 import org.slf4j.Logger;
@@ -161,9 +166,28 @@ public class SettingsStore {
          */
         public boolean recordDemoMatches = false;
 
+        /**
+         * Keys in settings.json this build doesn't declare (a newer build's, or the Go remake's), kept
+         * as read and written back with the rest. Without them every save would strip them: the boot
+         * re-saves settings too (the OBS config writer pins the websocket password), so one launch of
+         * this build was enough to lose them.
+         */
+        private final Map<String, JsonNode> unknownKeys = new LinkedHashMap<>();
+
+        @JsonAnySetter
+        void keepUnknownKey(String key, JsonNode value) {
+            unknownKeys.put(key, value);
+        }
+
+        @JsonAnyGetter
+        Map<String, JsonNode> unknownKeys() {
+            return unknownKeys;
+        }
+
         /** Field-by-field copy (all fields are primitive/immutable) for atomic copy-on-write updates. */
         Settings copy() {
             Settings c = new Settings();
+            c.unknownKeys.putAll(unknownKeys);
             c.resolution = resolution;
             c.encoder = encoder;
             c.fps = fps;
@@ -236,10 +260,12 @@ public class SettingsStore {
 
     public SettingsStore(AppPaths paths) {
         this.file = paths.dataDir().resolve(FILE_NAME);
-        // Unknown keys are ignored, not fatal: a settings.json written by a newer build (or the Go
+        // Unknown keys are kept, not fatal: a settings.json written by a newer build (or the Go
         // remake, which adds keys of its own) must keep its values here. A strict mapper made
         // readOrNull() return null for such a file, so load() fell back to fresh defaults -- a 50 GB
-        // cap and no archive drives, which the sweeper then enforced.
+        // cap and no archive drives, which the sweeper then enforced. Settings' any-setter holds the
+        // unknown keys and writes them back on save; the lenient mapper is the fallback should a
+        // nested record meet one.
         this.mapper =
                 new ObjectMapper()
                         .enable(SerializationFeature.INDENT_OUTPUT)
