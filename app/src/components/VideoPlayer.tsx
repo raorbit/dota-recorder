@@ -6,7 +6,6 @@ import {
   fetchPauses,
   fetchClips,
   createClip,
-  deleteClip,
   setClipStarred,
   clipStreamUrl,
   clipThumbUrl,
@@ -172,9 +171,14 @@ export function VideoPlayer({
   // resurrect the just-mutated state. The matchId `cancelled` guard still handles selection changes.
   const clipFetchTokenRef = useRef(0);
 
-  // Refresh the library list/counts after a clip delete so the "Clips" bucket + badge stay in sync
-  // immediately (the clip.deleted frame also lands, but the local reload is instant).
+  // Refresh the library list/counts after a clip star toggle so the "Clips" bucket shows it at once
+  // (the local reload doesn't wait for any frame).
   const reloadLibrary = useLibraryStore((s) => s.load);
+  // A strip clip delete goes through the library store, like the Clips bucket's: one pending set for
+  // both views (a clip being deleted shows "Deleting…" in each, and neither offers a second delete),
+  // and the store drops the clip from the Clips bucket and its badge when the delete lands.
+  const deleteClip = useLibraryStore((s) => s.deleteClip);
+  const deletingClipIds = useLibraryStore((s) => s.deletingClipIds);
 
   const matchId = match?.id ?? null;
   // Mirror of matchId for onDeleteClip, which resumes after its delete with the click's closure.
@@ -649,7 +653,8 @@ export function VideoPlayer({
 
   // Delete a clip (unlinks the .mp4, drops the row), then refresh the strip. Reached only
   // through the right-click menu's armed confirm. If the deleted clip is still playing, fall
-  // back to the full VOD.
+  // back to the full VOD. The store's deleteClip updates the library side (the Clips bucket list
+  // and its badge) and rejects when the delete didn't go through.
   async function onDeleteClip(clip: Clip): Promise<void> {
     try {
       await deleteClip(clip.id);
@@ -673,11 +678,6 @@ export function VideoPlayer({
         clipFetchTokenRef.current++;
         setClips((prev) => prev.filter((c) => c.id !== clip.id));
       }
-      // The strip above is player-local; refresh the store so the library "Clips" bucket list and the
-      // sidebar badge drop the deleted clip immediately (the core also publishes a clip.deleted frame,
-      // which the store follows too, but this local reload doesn't wait for the round-trip). Silent,
-      // so the table's rows stay up while it runs.
-      void reloadLibrary({ silent: true });
     } catch {
       /* leave the row; the next clip.* frame / re-select reconciles */
     }
@@ -1011,12 +1011,16 @@ export function VideoPlayer({
           )}
           {clips.map((clip) => {
             const pct = clipProgress[clip.id];
+            const deleting = deletingClipIds.has(clip.id);
             return (
               <div
                 className="vp-clip-item"
                 key={clip.id}
                 data-status={clip.status}
                 data-active={activeClipId === clip.id}
+                // Its delete is queued or in flight (it can wait minutes behind an archive pass).
+                data-deleting={deleting ? 'true' : undefined}
+                aria-busy={deleting || undefined}
                 // Focusable so a keyboard user can reach the row's context menu (the ONLY delete
                 // path in the player) without a mouse; ContextMenu / Shift+F10 mirror MatchTable's
                 // rows. The label names the clip for screen readers since the row itself has focus.
@@ -1061,6 +1065,7 @@ export function VideoPlayer({
                   ▶
                 </span>
                 <span className="vp-clip-label">{clipLabel(clip)}</span>
+                {deleting && <span className="vp-clip-deleting">Deleting…</span>}
                 <span className="vp-clip-dur">{clipDuration(clip)}</span>
                 <span className="vp-clip-status" data-status={clip.status}>
                   {clip.status === 'ready' && '●'}
@@ -1100,22 +1105,35 @@ export function VideoPlayer({
           onClose={closeClipMenu}
           ariaLabel={`Actions for clip ${clipLabel(clipMenu.clip)}`}
         >
-          <button
-            type="button"
-            className="ctx-item ctx-item-danger"
-            role="menuitem"
-            onClick={() => {
-              if (clipMenuDeleteArmed) {
-                // onDeleteClip swallows its own failure (the strip row stays for a retry).
-                void onDeleteClip(clipMenu.clip);
-                closeClipMenu();
-              } else {
-                setClipMenuDeleteArmed(true);
-              }
-            }}
-          >
-            {clipMenuDeleteArmed ? 'Click to confirm delete' : 'Delete clip'}
-          </button>
+          {deletingClipIds.has(clipMenu.clip.id) ? (
+            // Its delete is already queued or in flight: no second one (it would only join the first).
+            <div
+              className="ctx-item"
+              role="menuitem"
+              aria-disabled="true"
+              data-disabled="true"
+              tabIndex={-1}
+            >
+              Deleting…
+            </div>
+          ) : (
+            <button
+              type="button"
+              className="ctx-item ctx-item-danger"
+              role="menuitem"
+              onClick={() => {
+                if (clipMenuDeleteArmed) {
+                  // onDeleteClip swallows its own failure (the strip row stays for a retry).
+                  void onDeleteClip(clipMenu.clip);
+                  closeClipMenu();
+                } else {
+                  setClipMenuDeleteArmed(true);
+                }
+              }}
+            >
+              {clipMenuDeleteArmed ? 'Click to confirm delete' : 'Delete clip'}
+            </button>
+          )}
         </PopupMenu>
       )}
     </div>

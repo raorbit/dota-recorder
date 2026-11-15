@@ -151,6 +151,12 @@
   background: var(--accent-tint);
 }
 
+/* A row whose delete is queued or in flight (it can wait minutes for the core's maintenance lock):
+   dimmed, with a "Deleting…" tag after its name, until the delete settles. */
+.mt-row[data-deleting='true'] {
+  opacity: 0.55;
+}
+
 .mt-cell {
   min-width: 0;
 }
@@ -186,6 +192,14 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.mt-deleting {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-style: italic;
+  color: var(--text-muted);
+  white-space: nowrap;
 }
 
 /* Star toggle: faint when off, gold when on/hovered. Protects a recording from the

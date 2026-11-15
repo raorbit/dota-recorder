@@ -98,8 +98,19 @@ const refused = (): Promise<unknown> =>
 const timedOut = (): Promise<unknown> =>
   Promise.reject(new DOMException('The operation timed out.', 'TimeoutError'));
 
+// A DELETE still waiting on the core's maintenance lock, answered when the test releases it. Every
+// test releases what it holds: the client's delete queue is shared by the whole file.
+function heldDelete(): { answer: Promise<unknown>; release: () => void } {
+  let release!: () => void;
+  const answer = new Promise<void>((resolve) => (release = resolve)).then(deleted);
+  return { answer, release };
+}
+
 const matchIds = (): number[] => useLibraryStore.getState().matches.map((m) => m.id);
 const clipIds = (): number[] => useLibraryStore.getState().clips.map((c) => c.id);
+const byId = (a: number, b: number): number => a - b;
+const deletingMatches = (): number[] => [...useLibraryStore.getState().deletingMatchIds].sort(byId);
+const deletingClips = (): number[] => [...useLibraryStore.getState().deletingClipIds].sort(byId);
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -110,6 +121,8 @@ beforeEach(() => {
     counts: EMPTY_COUNTS,
     status: null,
     loadState: 'idle',
+    deletingMatchIds: new Set<number>(),
+    deletingClipIds: new Set<number>(),
     diskWarning: null,
   });
   fetchMock = vi.fn((url: unknown) => {
@@ -314,6 +327,86 @@ describe('startLibrary storage-events wiring', () => {
     await flush();
 
     expect(clipIds()).toEqual([9]);
+    teardown();
+  });
+
+  it('marks a recording as deleting while its delete waits, and sends it once', async () => {
+    const held = heldDelete();
+    const deletes = serveLibrary({ matches: [{ id: 7 }, { id: 8 }], clips: [] }, () => held.answer);
+    const teardown = startLibrary();
+    await flush();
+
+    const first = useLibraryStore.getState().deleteMatch(7);
+    await flush();
+    expect(deletingMatches()).toEqual([7]);
+    // Asked for again while it waits (another view, a second click): it joins the one in flight.
+    const again = useLibraryStore.getState().deleteMatch(7);
+    await flush();
+
+    held.release();
+    await first;
+    await again;
+    expect(deletes).toEqual(['http://127.0.0.1:3224/matches/7']);
+    expect(deletingMatches()).toEqual([]);
+    expect(matchIds()).toEqual([8]);
+    teardown();
+  });
+
+  it('marks every row of a bulk delete as deleting until the whole run is done', async () => {
+    const held = heldDelete();
+    serveLibrary({ matches: [{ id: 7 }, { id: 8 }, { id: 9 }], clips: [] }, (url) =>
+      url.endsWith('/matches/8') ? held.answer : deleted(),
+    );
+    const teardown = startLibrary();
+    await flush();
+
+    const run = useLibraryStore.getState().deleteMatches([7, 8]);
+    await flush();
+    // 7 is done and 8 still waits: both stay marked until the run lands in one update.
+    expect(deletingMatches()).toEqual([7, 8]);
+    expect(matchIds()).toEqual([7, 8, 9]);
+
+    held.release();
+    await run;
+    expect(deletingMatches()).toEqual([]);
+    expect(matchIds()).toEqual([9]);
+    teardown();
+  });
+
+  it('unmarks a delete that was refused or timed out', async () => {
+    serveLibrary({ matches: [{ id: 7 }], clips: [{ id: 5, parentMatchId: 7 }] }, (url) =>
+      url.endsWith('/matches/7') ? refused() : timedOut(),
+    );
+    const teardown = startLibrary();
+    await flush();
+
+    await expect(useLibraryStore.getState().deleteMatch(7)).rejects.toThrow();
+    await expect(useLibraryStore.getState().deleteClip(5)).rejects.toThrow();
+
+    expect(deletingMatches()).toEqual([]);
+    expect(deletingClips()).toEqual([]);
+    teardown();
+  });
+
+  it('marks clips as deleting while their delete waits, one at a time or in bulk', async () => {
+    const held = heldDelete();
+    const clips = [5, 6, 7].map((id) => ({ id, parentMatchId: 1 }));
+    serveLibrary({ matches: [{ id: 1 }], clips }, (url) =>
+      url.endsWith('/clips/5') ? held.answer : deleted(),
+    );
+    const teardown = startLibrary();
+    await flush();
+
+    const one = useLibraryStore.getState().deleteClip(5);
+    const bulk = useLibraryStore.getState().deleteClips([6, 7]);
+    await flush();
+    expect(deletingClips()).toEqual([5, 6, 7]);
+
+    held.release();
+    await one;
+    await bulk;
+    expect(deletingClips()).toEqual([]);
+    expect(clipIds()).toEqual([]);
     teardown();
   });
 
