@@ -24,6 +24,7 @@ import dev.dotarec.obs.ObsRecorder;
 import dev.dotarec.obs.ObsRestarter;
 import dev.dotarec.obs.ObsStartNotConfirmedException;
 import dev.dotarec.obs.ThumbnailCapturer;
+import dev.dotarec.obs.setup.EncoderFallback;
 import dev.dotarec.tagger.EventTagger;
 import dev.dotarec.tagger.PendingMarker;
 import java.nio.file.Path;
@@ -38,6 +39,7 @@ import java.util.UUID;
 import javax.sql.DataSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 /**
@@ -161,6 +163,22 @@ public class MatchFsm {
     private long lastRenderProbeNanos = Long.MIN_VALUE;
     private boolean lastRenderBroken;
 
+    /**
+     * How many starts in a row OBS may accept and never start before an auto-picked hardware encoder
+     * is switched to x264. The first one restarts OBS, which clears a dialog left open or a lost
+     * renderer; a fresh OBS failing the same way points at the encoder.
+     */
+    static final int UNCONFIRMED_STARTS_BEFORE_X264 = 2;
+
+    /** Switches the auto encoder to x264; {@link EncoderFallback#NONE} unless Spring wires one in. */
+    private EncoderFallback encoderFallback = EncoderFallback.NONE;
+
+    /**
+     * Starts in a row OBS accepted but never confirmed: back to zero on a confirmed start, and after
+     * each time {@link #encoderFallback} is asked.
+     */
+    private int unconfirmedStarts;
+
     // Single constructor: Spring auto-selects it with no @Autowired needed, and the clocks arrive as one
     // injected TimeSource bean (ClockConfig) instead of per-clock test-seam ctor overloads. Those
     // overloads previously forced an @Autowired on the production ctor whose absence only broke boot
@@ -197,6 +215,16 @@ public class MatchFsm {
         this.settings = settings;
         this.mapper = mapper;
         this.time = time;
+    }
+
+    /**
+     * Wires in the encoder fallback (the OBS config writer, in the app). A setter rather than one
+     * more constructor argument, so the tests that build an FSM by hand stay as they are and keep
+     * {@link EncoderFallback#NONE}.
+     */
+    @Autowired
+    synchronized void setEncoderFallback(EncoderFallback encoderFallback) {
+        this.encoderFallback = encoderFallback;
     }
 
     public MatchState getState() {
@@ -640,11 +668,24 @@ public class MatchFsm {
             // GsiController stamps each frame's monotonicNanos with, so the per-marker delta is
             // immune to an OS/NTP wall-clock step (the wall anchor below is for storage/display only).
             confirmedNanos = time.nanoTime();
+            unconfirmedStarts = 0;
         } catch (ObsStartNotConfirmedException e) {
-            // OBS took the request and did nothing: its outputs are disabled (a dialog left open)
-            // or its renderer is gone. Either way a fresh OBS records.
+            // OBS took the request and did nothing: its outputs are disabled (a dialog left open),
+            // its renderer is gone, or its encoder can't open. A fresh OBS fixes the first two.
             this.state = MatchState.IDLE;
             log.warn("Recording not confirmed by OBS: {}; restarting OBS", e.getMessage());
+            // The third fails the fresh OBS too: OBS can offer a hardware encoder it can't open (it
+            // offers QSV on any Intel GPU), and that one fails every record start. So once starts
+            // keep failing, an auto-picked hardware encoder is switched to x264 in the profile first,
+            // and the restart below relaunches OBS on it (or a later failure's restart does, if the
+            // restarter refuses this one for now). The switch is one-way for the rest of the process,
+            // and the restart is the rate-limited one every failure asks for, so this can't loop.
+            // Counting from zero again after asking means a streak that goes on asks again every
+            // second failure, not on every one.
+            if (++unconfirmedStarts >= UNCONFIRMED_STARTS_BEFORE_X264) {
+                unconfirmedStarts = 0;
+                encoderFallback.fallBackToX264();
+            }
             restartObs("it accepted StartRecord but never started recording");
             return;
         } catch (ObsException e) {

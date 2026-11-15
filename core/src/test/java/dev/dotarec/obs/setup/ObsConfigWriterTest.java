@@ -3,6 +3,10 @@ package dev.dotarec.obs.setup;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.dotarec.config.AppPaths;
@@ -11,8 +15,10 @@ import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.slf4j.LoggerFactory;
 
 class ObsConfigWriterTest {
 
@@ -208,6 +214,129 @@ class ObsConfigWriterTest {
 
         Path ini = new ObsLayout(paths.obsDir()).profileIni();
         assertThat(Files.readString(ini)).contains("RecEncoder=x264");
+    }
+
+    @Test
+    void fallBackToX264_switchesAnAutoPickedHardwareEncoder_forTheRestOfTheProcess(@TempDir Path dir)
+            throws Exception {
+        // An Intel-only PC: OBS offers QSV on any Intel GPU, so an iGPU whose driver can't open it
+        // fails every record start. Once the FSM sees that, the profile must name x264 for both
+        // encoders: the default Stream quality records with the streaming one.
+        AppPaths paths = paths(dir);
+        SettingsStore settings = new SettingsStore(paths);
+        AtomicInteger probes = new AtomicInteger();
+        EncoderProbe intel = new EncoderProbe(() -> {
+            probes.incrementAndGet();
+            return List.of("Intel(R) UHD Graphics 620");
+        });
+        ObsConfigWriter writer = new ObsConfigWriter(paths, settings, intel, "", "0");
+        writer.configure();
+        Path ini = new ObsLayout(paths.obsDir()).profileIni();
+        assertThat(Files.readString(ini)).contains("RecEncoder=qsv").contains("StreamEncoder=qsv");
+
+        List<ILoggingEvent> logged = logsOf(() -> assertThat(writer.fallBackToX264()).isTrue());
+
+        assertThat(Files.readString(ini)).contains("RecEncoder=x264").contains("StreamEncoder=x264");
+        assertThat(logged)
+                .as("the switch is logged where a slow-PC complaint would be looked into")
+                .filteredOn(e -> e.getLevel() == Level.WARN)
+                .singleElement()
+                .satisfies(e -> assertThat(e.getFormattedMessage()).contains("qsv to x264"));
+        // Auto stays auto: nothing is persisted, so the UI keeps showing Auto.
+        assertThat(settings.get().encoder).isBlank();
+        // A settings save later in the session re-writes the profile with x264 too, unprobed.
+        writer.applyProfile();
+        assertThat(Files.readString(ini)).contains("StreamEncoder=x264");
+        assertThat(probes).hasValue(1);
+        // One-way: nothing is left to switch.
+        assertThat(writer.fallBackToX264()).isFalse();
+
+        // The next launch (a new process) probes again, so a fixed driver gets QSV back.
+        new ObsConfigWriter(paths, settings, intel, "", "0").configure();
+        assertThat(Files.readString(ini)).contains("StreamEncoder=qsv");
+    }
+
+    @Test
+    void fallBackToX264_keepsAnEncoderPickedInSettings_andSaysSo(@TempDir Path dir) throws Exception {
+        AppPaths paths = paths(dir);
+        SettingsStore settings = new SettingsStore(paths);
+        settings.update(
+                s -> {
+                    s.encoder = "amd";
+                    return s;
+                });
+        ObsConfigWriter writer = writer(paths, settings, "", "0");
+        writer.configure();
+
+        List<ILoggingEvent> logged = logsOf(() -> assertThat(writer.fallBackToX264()).isFalse());
+
+        Path ini = new ObsLayout(paths.obsDir()).profileIni();
+        assertThat(Files.readString(ini)).contains("RecEncoder=amd").contains("StreamEncoder=amd");
+        assertThat(settings.get().encoder).isEqualTo("amd");
+        assertThat(logged)
+                .filteredOn(e -> e.getLevel() == Level.WARN)
+                .singleElement()
+                .satisfies(e -> assertThat(e.getFormattedMessage())
+                        .contains("amd encoder picked in Settings"));
+    }
+
+    @Test
+    void fallBackToX264_hasNothingToSwitch_whenAlreadyOnX264(@TempDir Path dir) {
+        AppPaths paths = paths(dir);
+        SettingsStore settings = new SettingsStore(paths);
+        ObsConfigWriter noGpu =
+                new ObsConfigWriter(paths, settings, new EncoderProbe(List::of), "", "0");
+        noGpu.configure();
+        assertThat(noGpu.fallBackToX264()).as("auto already resolved to x264").isFalse();
+
+        settings.update(
+                s -> {
+                    s.encoder = "x264";
+                    return s;
+                });
+        ObsConfigWriter picked = writer(paths, settings, "", "0");
+        picked.configure();
+        List<ILoggingEvent> logged = logsOf(() -> assertThat(picked.fallBackToX264()).isFalse());
+        assertThat(logged)
+                .as("no advice to pick x264 when x264 is the pick")
+                .noneMatch(e -> e.getLevel() == Level.WARN);
+    }
+
+    @Test
+    void fallBackToX264_thatCantWriteTheProfile_triesAgainNextTime(@TempDir Path dir) throws Exception {
+        AppPaths paths = paths(dir);
+        SettingsStore settings = new SettingsStore(paths);
+        ObsConfigWriter writer = writer(paths, settings, "", "0");
+        writer.configure();
+        Path ini = new ObsLayout(paths.obsDir()).profileIni();
+        assertThat(Files.readString(ini)).contains("StreamEncoder=nvenc");
+        // Fail the write as profileWriteFailureLeavesPreExistingIniIntact does: a DIRECTORY on .tmp.
+        Path tmp = ini.resolveSibling(ini.getFileName() + ".tmp");
+        Files.createDirectory(tmp);
+
+        assertThat(writer.fallBackToX264()).isFalse();
+        assertThat(Files.readString(ini)).contains("StreamEncoder=nvenc");
+
+        // With x264 left cached, this call would find nothing to switch while basic.ini still names
+        // the encoder OBS can't open.
+        Files.delete(tmp);
+        assertThat(writer.fallBackToX264()).isTrue();
+        assertThat(Files.readString(ini)).contains("StreamEncoder=x264");
+    }
+
+    /** What {@link ObsConfigWriter} logs while {@code action} runs. */
+    private static List<ILoggingEvent> logsOf(Runnable action) {
+        Logger writerLog = (Logger) LoggerFactory.getLogger(ObsConfigWriter.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        writerLog.addAppender(appender);
+        try {
+            action.run();
+        } finally {
+            writerLog.detachAppender(appender);
+            appender.stop();
+        }
+        return appender.list;
     }
 
     @Test

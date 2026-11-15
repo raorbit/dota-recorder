@@ -51,7 +51,7 @@ import org.springframework.stereotype.Component;
  * hand-authored as a fragile static scene-collection JSON.
  */
 @Component
-public class ObsConfigWriter {
+public class ObsConfigWriter implements EncoderFallback {
 
     private static final Logger log = LoggerFactory.getLogger(ObsConfigWriter.class);
 
@@ -65,7 +65,8 @@ public class ObsConfigWriter {
     private final String obsVersion;
 
     /** Per-process cache of the auto-detected encoder so the (bounded) GPU probe runs at most once per
-     * launch; a new process re-probes so a swapped GPU re-adapts. Null until first resolved. */
+     * launch; a new process re-probes so a swapped GPU re-adapts. Null until first resolved, and x264
+     * once {@link #fallBackToX264} found that OBS can't open the probed one. */
     private volatile String resolvedAutoEncoder;
     private final ObjectMapper mapper =
             new ObjectMapper().enable(SerializationFeature.INDENT_OUTPUT);
@@ -149,6 +150,61 @@ public class ObsConfigWriter {
             resolvedAutoEncoder = cached;
         }
         return cached;
+    }
+
+    /**
+     * Switches the auto-picked encoder to x264 for the rest of this process and re-writes
+     * {@code basic.ini}, for a hardware encoder OBS offers but can't open. OBS offers QSV on any
+     * Intel GPU, and AMF after a check that never opens an encode session, while its own x264
+     * fallback only replaces an encoder it didn't register. When the one it offers then fails to
+     * open, every record start shows an error dialog in OBS and never starts the output, restart or
+     * not. {@link dev.dotarec.fsm.MatchFsm} calls this once starts keep failing that way, then
+     * restarts OBS so the relaunched one loads x264. The profile names the one token as both the
+     * recording and the streaming encoder (the default Stream quality records with the latter), so
+     * both switch.
+     *
+     * <p>Only "auto" is switched. An encoder picked in Settings is the user's: it is kept, and the
+     * failure logged. Settings are not touched, so the UI keeps showing Auto, and the next launch
+     * probes the GPU again (a driver update may have fixed the encoder by then).
+     *
+     * @return true when the profile now names x264 where it named a hardware encoder; false when
+     *     there was nothing to switch, or the profile could not be written (the probed encoder is
+     *     then kept, so the next call tries again)
+     */
+    @Override
+    public synchronized boolean fallBackToX264() {
+        SettingsStore.Settings s = settings.get();
+        if (s.encoder != null && !s.encoder.isBlank()) {
+            if (!EncoderProbe.X264.equals(s.encoder)) {
+                log.warn(
+                        "OBS keeps failing to start recording with the {} encoder picked in Settings;"
+                                + " keeping it. Set the encoder to Auto or x264 if matches stop"
+                                + " recording",
+                        s.encoder);
+            }
+            return false;
+        }
+        String probed = resolveEncoder(s);
+        if (EncoderProbe.X264.equals(probed)) {
+            // Already on the encoder every PC can run: there is nothing left to switch to.
+            return false;
+        }
+        resolvedAutoEncoder = EncoderProbe.X264;
+        try {
+            writeProfile(new ObsLayout(paths.obsDir()));
+        } catch (RuntimeException e) {
+            // Keep the probed encoder: with x264 cached, the next call would find nothing left to
+            // switch while basic.ini still named the encoder OBS can't open.
+            resolvedAutoEncoder = probed;
+            log.warn("Could not switch the OBS profile from {} to x264: {}", probed, e.toString());
+            return false;
+        }
+        log.warn(
+                "Switching the OBS encoder from the auto-picked {} to x264 until the app restarts:"
+                        + " OBS accepts StartRecord but never starts recording with it (an encoder"
+                        + " it offers but can't open, e.g. on an outdated GPU driver)",
+                probed);
+        return true;
     }
 
     /** 24-char URL-safe token (144 bits of entropy) — ample for a loopback-only server. */
