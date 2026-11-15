@@ -54,6 +54,8 @@ import org.springframework.stereotype.Component;
  *       can't read stays in the journal for a boot that can;</li>
  *   <li>saves the floors, holding a new video folder's first floor back while a recording its link
  *       reached back for is still unrecovered;</li>
+ *   <li>once, on the first boot whose floors are saved, releases the rows earlier versions adopted
+ *       before any floor existed, leaving their files where they are;</li>
  *   <li>scans the roots for files no row references: a source the archiver failed to delete from the
  *       video folder is deleted, an archive drive's leftover from an interrupted move is re-linked to
  *       its row or deleted, and a recorder-named file written since its folder's floor is adopted as
@@ -188,6 +190,7 @@ public class CrashRecoveryRunner implements ApplicationRunner {
             }
             OrphanAdoptionFloors.Snapshot floors =
                     plan.save(plan.linksBack() && anyStillJournaled(reachedBackFor(unfinished)));
+            releaseRowsAdoptedBeforeTheFloors(plan.earliestReadFloor().orElse(startMs), floors);
             reconcileOrphanVods(floors);
         } finally {
             maintenanceLock.unlock();
@@ -415,6 +418,128 @@ public class CrashRecoveryRunner implements ApplicationRunner {
         } catch (Exception e) {
             log.warn("Could not stat recovered recording {}: {}", path, e.toString());
             return null;
+        }
+    }
+
+    /**
+     * Releases, once, the rows earlier boots adopted before any adoption floor existed (see {@link
+     * OrphanAdoptionFloors}). Every 0.1.x before the floors adopted the unreferenced recordings in its
+     * roots by their names alone, and a root may be where the user's own OBS saves too, so such a row
+     * may be the user's own recording, first in line for retention's delete and the archiver's move.
+     * Each unstarred {@code gsi_only} row created before {@code cutoffMs} that still holds a video
+     * leaves the library, and its file stays where it is; a row with clips (or markers or pauses,
+     * which no import writes) keeps itself and them and drops only its video, so retention leaves the
+     * file alone. Kept as they are:
+     *
+     * <ul>
+     *   <li>a row whose file name, less the row's own {@code <matchId>-}, is still an archived name or
+     *       a clip's ({@link #APP_ONLY_BASENAME}): residue only this app makes;</li>
+     *   <li>a row whose file is another row's archived copy's source (that copy's name less its
+     *       {@code <matchId>-}, and the same size), adopted when the archiver failed to delete it:
+     *       retention reclaims it, as before the floors;</li>
+     *   <li>a row whose file its folder's floor admits (modified since): released, it would only be
+     *       adopted again;</li>
+     *   <li>a row with a clip still to be cut from its video.</li>
+     * </ul>
+     *
+     * <p>A released file stays out for good: it predates its folder's floor, or its folder's first
+     * floor will come after it. The release runs only on a boot whose floors are saved, after the
+     * journal is replayed (a link may reach back before the floor, and never takes a file a row still
+     * has), and before the orphan scan. Its marker is written only once its transaction commits, so a
+     * boot that fails retries; the cutoff, the earliest floor the floors file held when this boot
+     * began (or this boot's scan, with no file), keeps a retry from releasing any row adopted under a
+     * floor, since an adoption always comes more than the quiescence window after its floor.
+     */
+    private void releaseRowsAdoptedBeforeTheFloors(long cutoffMs, OrphanAdoptionFloors.Snapshot floors) {
+        if (!floors.saved() || adoptionFloors.released()) {
+            return;
+        }
+        try {
+            Map<String, List<Path>> copies = archivedCopies().videos();
+            List<MatchSummary> candidates = new ArrayList<>();
+            int kept = 0;
+            for (MatchSummary row : matches.findAdoptedBefore(cutoffMs)) {
+                Path file = safePath(row.videoPath());
+                if (file == null || file.getFileName() == null
+                        || keepsAdoptedRow(row, file, copies, floors)) {
+                    kept++;
+                } else {
+                    candidates.add(row);
+                }
+            }
+            List<MatchSummary> deleted = new ArrayList<>();
+            List<MatchSummary> videoDropped = new ArrayList<>();
+            try (Connection conn = dataSource.getConnection()) {
+                conn.setAutoCommit(false);
+                try {
+                    for (MatchSummary row : candidates) {
+                        if (matches.deleteAdopted(conn, row.id(), row.videoPath())) {
+                            deleted.add(row);
+                        } else if (matches.dropAdoptedVideo(conn, row.id(), row.videoPath())) {
+                            videoDropped.add(row);
+                        } else {
+                            kept++; // starred or moved since it was read, or a clip is being cut from it
+                        }
+                    }
+                    conn.commit();
+                } catch (SQLException | RuntimeException e) {
+                    conn.rollback();
+                    throw e;
+                } finally {
+                    conn.setAutoCommit(true);
+                }
+            }
+            for (MatchSummary row : deleted) {
+                log.warn("Removed match row {} from the library, adopted before the adoption floors and"
+                        + " maybe the user's own recording; its file {} stays where it is",
+                        row.id(), row.videoPath());
+            }
+            for (MatchSummary row : videoDropped) {
+                log.warn("Dropped the video of match row {}, adopted before the adoption floors and maybe"
+                        + " the user's own recording, keeping the row for its clips; its file {} stays"
+                        + " where it is", row.id(), row.videoPath());
+            }
+            int released = deleted.size() + videoDropped.size();
+            log.info("Released {} match row(s) adopted before the adoption floors and kept {}; their files"
+                    + " stay where they are", released, kept);
+            try {
+                adoptionFloors.markReleased(System.currentTimeMillis(), released);
+            } catch (Exception e) {
+                log.warn("Could not record that the rows adopted before the adoption floors are released;"
+                        + " the next boot looks again: {}", e.toString());
+            }
+        } catch (Exception e) {
+            log.warn("Could not release the rows adopted before the adoption floors; the next boot tries"
+                    + " again: {}", e.toString());
+        }
+    }
+
+    /** Whether a row adopted before the floors keeps its video (see the release's rules). */
+    private static boolean keepsAdoptedRow(
+            MatchSummary row,
+            Path file,
+            Map<String, List<Path>> copies,
+            OrphanAdoptionFloors.Snapshot floors) {
+        String name = file.getFileName().toString();
+        String own = leftoverRemainder(name, row.id() + "-");
+        if (APP_ONLY_BASENAME.matcher(own == null ? name : own).matches()) {
+            return true;
+        }
+        for (String original : own == null ? List.of(name) : List.of(name, own)) {
+            for (Path copy : copies.getOrDefault(original, List.of())) {
+                if (!normalize(copy).equals(normalize(file)) && sameSize(file, copy)) {
+                    return true;
+                }
+            }
+        }
+        return floors.of(file.getParent()).admits(lastModifiedMs(file));
+    }
+
+    private static boolean sameSize(Path a, Path b) {
+        try {
+            return Files.size(a) == Files.size(b);
+        } catch (Exception e) {
+            return false;
         }
     }
 
@@ -1144,6 +1269,13 @@ public class CrashRecoveryRunner implements ApplicationRunner {
      */
     private static final Set<String> RECORDING_EXTENSIONS = Set.of(".mp4", ".mkv", ".mov");
 
+    /** OBS's default recording name, as the user's own OBS writes it too. */
+    private static final String OBS_NAME =
+            "\\d{4}-\\d{2}-\\d{2} \\d{2}-\\d{2}-\\d{2}(?: \\(\\d+\\))?\\.(?:mp4|mkv|mov)";
+
+    /** A clip's name, as the clip renderer writes it and as the archiver prefixes it. */
+    private static final String CLIP_NAME = "(?:clip-\\d+-)?\\d+-clip-\\d+\\.mp4";
+
     /**
      * Basenames this recorder actually writes — the ONLY shapes the orphan scan may adopt as new
      * rows. OBS records under its default {@code FilenameFormatting}
@@ -1158,9 +1290,13 @@ public class CrashRecoveryRunner implements ApplicationRunner {
      * adoption is also held to the folder's {@link OrphanAdoptionFloors adoption floor}.
      */
     private static final Pattern RECORDER_BASENAME =
-            Pattern.compile(
-                    "(?:\\d+-)?\\d{4}-\\d{2}-\\d{2} \\d{2}-\\d{2}-\\d{2}(?: \\(\\d+\\))?\\.(?:mp4|mkv|mov)"
-                            + "|(?:clip-\\d+-)?\\d+-clip-\\d+\\.mp4");
+            Pattern.compile("(?:\\d+-)?" + OBS_NAME + "|" + CLIP_NAME);
+
+    /**
+     * The names only this app writes, never the user's own OBS: an OBS name the archiver prefixed with
+     * a row's {@code <matchId>-}, and a clip's, archived or not.
+     */
+    private static final Pattern APP_ONLY_BASENAME = Pattern.compile("\\d+-" + OBS_NAME + "|" + CLIP_NAME);
 
     /** True when {@code path}'s basename is a name this recorder (OBS, archiver, or clipper) produces. */
     private static boolean hasRecorderProvenance(Path path) {
