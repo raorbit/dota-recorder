@@ -85,8 +85,11 @@ public class MatchController {
         this.events = events;
     }
 
-    /** Test constructor: a shared maintenance lock, no event publisher. */
-    public MatchController(MatchRepository matches, MarkerRepository markers, PauseRepository pauses,
+    /**
+     * Test constructor: a shared maintenance lock, no event publisher, so a delete announces nothing.
+     * Package-private so only the tests can build one.
+     */
+    MatchController(MatchRepository matches, MarkerRepository markers, PauseRepository pauses,
                            ClipRepository clips, SettingsStore settings,
                            StorageMaintenanceLock maintenanceLock) {
         this(matches, markers, pauses, clips, settings, maintenanceLock, null);
