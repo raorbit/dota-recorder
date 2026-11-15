@@ -17,10 +17,12 @@ import org.springframework.stereotype.Component;
  * transitions {@code STARTING -> STARTED -> STOPPING -> STOPPED} (plus RECONNECTING/PAUSED/etc.).
  * Only {@code OBS_WEBSOCKET_OUTPUT_STARTED} means frames are actually being written, so that is the
  * single instant we treat recording as "real" and capture as the {@code recordConfirmedWallMs}
- * anchor (see {@code RecordingSession}). The {@code STARTED} event's {@code outputPath} is
- * {@code null} in v5 (a known obs-websocket regression), so the output path is captured from the
- * {@code STOPPED} event here as a <em>fallback</em>; the primary path source is the synchronous
- * {@code StopRecord} response read by {@link ObsController#stopRecording()}.
+ * anchor (see {@code RecordingSession}). A stopped recording's path comes from the synchronous
+ * {@code StopRecord} response read by {@link ObsController#stopRecording()}, with the {@code
+ * STOPPED} event's path captured here as the <em>fallback</em>. The {@code STARTED} event names the
+ * file too in the obs-websocket OBS ships now (it reads the recording output's path setting on both
+ * STARTED and STOPPED), although its protocol docs still say STOPPED only and older versions sent
+ * null; it is kept as the last resort for a recording whose OBS died without a STOPPED.
  *
  * <p>Threading: {@link #onRecordStateChanged} runs on the obs-websocket library's socket thread.
  * It must never block (no I/O, no waiting) -- it only flips the {@code volatile} health flags and
@@ -73,7 +75,8 @@ public class ObsEvents {
      * fast and non-blocking.
      *
      * @param outputState the v5 {@code outputState} string (e.g. {@code OBS_WEBSOCKET_OUTPUT_STARTED})
-     * @param outputPath the event's outputPath (null on STARTED in v5; populated on STOPPED)
+     * @param outputPath the event's outputPath (populated on STARTED and STOPPED by the bundled
+     *     obs-websocket; null on STARTED from older versions)
      */
     public void onRecordStateChanged(String outputState, String outputPath) {
         if (outputState == null) {
@@ -175,8 +178,8 @@ public class ObsEvents {
     }
 
     /**
-     * The output path the latest OUTPUT_STARTED reported, or {@code null} when it reported none (the
-     * v5 event often carries none; see the class notes). The FSM keeps it with the recording, so a
+     * The output path the latest OUTPUT_STARTED reported, or {@code null} when it reported none (an
+     * older obs-websocket sends none; see the class notes). The FSM keeps it with the recording, so a
      * recording whose OBS crashed, and so never reported a STOPPED path, can still keep its file.
      */
     public String startedOutputPath() {
