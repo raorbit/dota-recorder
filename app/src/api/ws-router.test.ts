@@ -97,6 +97,25 @@ describe('classifyWsFrame', () => {
     expect(classifyWsFrame({ type: 'clip.created', payload: { id: 1 } })).toBeNull();
   });
 
+  it('routes a delete.failed frame to the delete-failure channel, and drops a malformed one', () => {
+    const routed = classifyWsFrame({
+      type: 'delete.failed',
+      payload: { kind: 'match', id: 7, message: 'database is locked' },
+    });
+    expect(routed).toEqual({
+      kind: 'deleteFailed',
+      failure: { kind: 'match', id: 7, message: 'database is locked' },
+    });
+    expect(classifyWsFrame({ type: 'delete.failed', payload: { kind: 'clip', id: 5 } })).toEqual({
+      kind: 'deleteFailed',
+      failure: { kind: 'clip', id: 5, message: '' },
+    });
+    expect(classifyWsFrame({ type: 'delete.failed', payload: { kind: 'vod', id: 5 } })).toBeNull();
+    expect(
+      classifyWsFrame({ type: 'delete.failed', payload: { kind: 'clip', id: '5' } }),
+    ).toBeNull();
+  });
+
   it('ignores unknown types and malformed envelopes', () => {
     expect(classifyWsFrame({ type: 'something.new', payload: {} })).toBeNull();
     expect(classifyWsFrame({ payload: {} })).toBeNull();
