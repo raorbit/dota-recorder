@@ -93,7 +93,8 @@ public interface ObsRecorder {
 
     /**
      * Sends StopRecord and returns the saved output file path read from the StopRecord response
-     * (the primary, authoritative path source in v5; the STARTED event's path is null).
+     * (the primary, authoritative path source; the path the STARTED event reported, see
+     * {@link #startedOutputPath()}, is only a last resort).
      *
      * @return absolute path of the recorded file, or {@code null} if OBS reported none
      * @throws ObsException if OBS is not connected or rejects/times out the request

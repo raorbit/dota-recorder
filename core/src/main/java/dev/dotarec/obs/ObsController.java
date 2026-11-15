@@ -36,8 +36,8 @@ import org.springframework.stereotype.Service;
  *   <li>{@link #isReady()} -- connected AND a program scene is active AND an unmuted app-owned audio
  *       input exists, so arming a recording against a green GSI card cannot silently capture nothing.</li>
  *   <li>{@link #startRecording()} / {@link #stopRecording()} -- StartRecord/StopRecord, with the
- *       saved file path read from the StopRecord response (the STARTED event's path is null in
- *       v5).</li>
+ *       saved file path read from the StopRecord response, the authoritative source (the path the
+ *       STARTED event reports is only a last resort; see {@link ObsEvents}).</li>
  *   <li>{@link #recordConfirmedAt()} -- the wall-clock instant OBS confirmed OUTPUT_STARTED, the
  *       anchor for {@code markers.video_offset_s}.</li>
  * </ul>
