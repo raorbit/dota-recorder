@@ -374,6 +374,45 @@ class MatchFsmHealingTest {
     }
 
     @Test
+    void aRelaunchLandingDuringTheProbe_isStillCaught_byTheConnectionCount() {
+        // The old OBS answers "still recording" just before it dies, and its relaunch's connection
+        // lands while that answer is in flight. Read before the probe, the connection the output is
+        // credited to stays the old one, so the relaunched OBS's idle output reads as a relaunch on
+        // the next tick. Read after it, the rest of the match went unrecorded.
+        fsm.onFrame(playing());
+        advanceSeconds(300);
+        obs.recordStatus = new MatchFsm.RecordOutputStatus(true, 300_000L, 50_000_000L);
+        obs.duringProbe = this::obsCrashedAndARelaunchedOneConnected;
+        fsm.superviseRecording();
+        obs.duringProbe = null;
+
+        advanceSeconds(5);
+        fsm.superviseRecording();
+
+        assertThat(fsm.getState()).isEqualTo(MatchState.IDLE);
+    }
+
+    @Test
+    void aRelaunchLandingDuringTheProbe_isStillCaught_byTheObsProcess() {
+        obs.process = OBS_RUN;
+        fsm.onFrame(playing());
+        advanceSeconds(300);
+        obs.recordStatus = new MatchFsm.RecordOutputStatus(true, 300_000L, 50_000_000L);
+        obs.duringProbe = () -> {
+            obsCrashedAndARelaunchedOneConnected();
+            obs.exited.add(OBS_RUN);
+            obs.process = RELAUNCHED;
+        };
+        fsm.superviseRecording();
+        obs.duringProbe = null;
+
+        advanceSeconds(5);
+        fsm.superviseRecording();
+
+        assertThat(fsm.getState()).isEqualTo(MatchState.IDLE);
+    }
+
+    @Test
     void aStopOnTheConnectionABlipMoved_isLeftForPostGame() {
         // A websocket blip moves the still-recording output onto a new connection; later OBS stops
         // it on that same connection while still rendering (a full disk, a stop in the OBS window).

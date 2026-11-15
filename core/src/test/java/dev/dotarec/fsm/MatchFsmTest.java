@@ -66,6 +66,11 @@ class MatchFsmTest {
         String savedPath = "C:\\videos\\match.mkv";
         /** What probeRecordStatus answers; null models an unanswerable OBS. Tests drive it directly. */
         MatchFsm.RecordOutputStatus recordStatus;
+        /**
+         * Hook run inside probeRecordStatus() after it read its answer, so a test can land a
+         * reconnect while that answer is in flight.
+         */
+        Runnable duringProbe;
         /** Hook run inside startRecording() BEFORE recording flips true, so a test can observe the
          *  FSM's state during the (real: blocking) StartRecord -> OUTPUT_STARTED window. */
         Runnable duringStart;
@@ -168,7 +173,13 @@ class MatchFsmTest {
 
         @Override public Instant recordConfirmedAt() { return confirmedAt; }
 
-        @Override public MatchFsm.RecordOutputStatus probeRecordStatus() { return recordStatus; }
+        @Override public MatchFsm.RecordOutputStatus probeRecordStatus() {
+            MatchFsm.RecordOutputStatus answer = recordStatus;
+            if (duringProbe != null) {
+                duringProbe.run();
+            }
+            return answer;
+        }
     }
 
     /** Fake thumbnail capturer; records the order vs stopRecording to prove thumbnail-before-stop. */
