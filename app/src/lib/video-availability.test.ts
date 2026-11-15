@@ -5,6 +5,7 @@ import {
   libraryEventRemovesVod,
   afterStripClipDelete,
   releaseStaleMedia,
+  type PlaybackReadout,
   type ReleasableMedia,
 } from './video-availability';
 
@@ -118,21 +119,40 @@ describe('releaseStaleMedia', () => {
     };
   }
 
+  // The player's transport setters, recording what they were set to.
+  function readout(): PlaybackReadout & { calls: string[] } {
+    const calls: string[] = [];
+    return {
+      calls,
+      setPlaying: (playing) => calls.push(`playing ${playing}`),
+      setProgress: (percent) => calls.push(`progress ${percent}`),
+      setCurrentTimeS: (seconds) => calls.push(`time ${seconds}`),
+      setMediaDurationS: (seconds) => calls.push(`duration ${seconds}`),
+    };
+  }
+
   it('stops and empties an element still holding the previous recording once the source is gone', () => {
     const v = media('http://127.0.0.1:3224/matches/1/video/stream');
-    expect(releaseStaleMedia(v, undefined)).toBe(true);
+    const r = readout();
+    expect(releaseStaleMedia(v, undefined, r)).toBe(true);
     expect(v.calls).toEqual(['pause', 'remove src', 'load']);
+    // ...and the play glyph, playhead, time and length stop describing the recording that was there.
+    expect(r.calls).toEqual(['playing false', 'progress 0', 'time 0', 'duration null']);
   });
 
   it('leaves an element alone while it has a source, or when it holds nothing', () => {
+    const r = readout();
     const playing = media('http://127.0.0.1:3224/matches/1/video/stream');
-    expect(releaseStaleMedia(playing, 'http://127.0.0.1:3224/matches/2/video/stream')).toBe(false);
+    expect(releaseStaleMedia(playing, 'http://127.0.0.1:3224/matches/2/video/stream', r)).toBe(
+      false,
+    );
     expect(playing.calls).toEqual([]);
 
     const empty = media('');
-    expect(releaseStaleMedia(empty, undefined)).toBe(false);
+    expect(releaseStaleMedia(empty, undefined, r)).toBe(false);
     expect(empty.calls).toEqual([]);
 
-    expect(releaseStaleMedia(null, undefined)).toBe(false);
+    expect(releaseStaleMedia(null, undefined, r)).toBe(false);
+    expect(r.calls).toEqual([]);
   });
 });

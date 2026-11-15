@@ -32,16 +32,34 @@ export interface ReleasableMedia {
   load(): void;
 }
 
-// Stops and empties a media element whose source went away. When the player's source becomes
-// undefined React only drops the src attribute, and a media element keeps playing what it already
-// loaded: selecting a recording with no video (or the open one being deleted or swept) left the
-// previous VOD playing, sound and all, behind the "recording removed" placeholder. Returns whether
-// there was anything to release.
-export function releaseStaleMedia(media: ReleasableMedia | null, src: string | undefined): boolean {
+// The player's transport state that follows playback (the play/pause glyph, the playhead, the time
+// readout and the media's own length), as the setters releaseStaleMedia resets it through.
+export interface PlaybackReadout {
+  setPlaying(playing: boolean): void;
+  setProgress(percent: number): void;
+  setCurrentTimeS(seconds: number): void;
+  setMediaDurationS(seconds: number | null): void;
+}
+
+// Stops and empties a media element whose source went away, and resets the transport readout that
+// followed it. When the player's source becomes undefined React only drops the src attribute, and a
+// media element keeps playing what it already loaded: selecting a recording with no video (or the
+// open one being deleted or swept) left the previous VOD playing, sound and all, behind the
+// "recording removed" placeholder, still driving the scrub bar. Returns whether there was anything to
+// release.
+export function releaseStaleMedia(
+  media: ReleasableMedia | null,
+  src: string | undefined,
+  readout: PlaybackReadout,
+): boolean {
   if (media === null || src !== undefined || media.currentSrc === '') return false;
   media.pause();
   media.removeAttribute('src');
   media.load();
+  readout.setPlaying(false);
+  readout.setProgress(0);
+  readout.setCurrentTimeS(0);
+  readout.setMediaDurationS(null);
   return true;
 }
 

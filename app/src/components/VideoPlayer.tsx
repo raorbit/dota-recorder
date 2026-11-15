@@ -736,13 +736,15 @@ export function VideoPlayer({
   const playSrc = activeClipId !== null ? clipStreamUrl(activeClipId) : (videoUrl ?? undefined);
 
   // No source any more (a no-video row selected, or the open VOD deleted/swept): stop the element
-  // too, or the previous recording keeps playing behind the placeholder and drives the scrub bar.
+  // too, and reset the transport, or the previous recording keeps playing behind the placeholder and
+  // drives the scrub bar (see releaseStaleMedia).
   useEffect(() => {
-    if (!releaseStaleMedia(videoRef.current, playSrc)) return;
-    setPlaying(false);
-    setProgress(0);
-    setCurrentTimeS(0);
-    setMediaDurationS(null);
+    releaseStaleMedia(videoRef.current, playSrc, {
+      setPlaying,
+      setProgress,
+      setCurrentTimeS,
+      setMediaDurationS,
+    });
   }, [playSrc]);
 
   return (
