@@ -171,10 +171,11 @@ public class ObsConfigWriter implements EncoderFallback {
      * Intel GPU, and AMF after a check that never opens an encode session, while its own x264
      * fallback only replaces an encoder it didn't register. When the one it offers then fails to
      * open, every record start shows an error dialog in OBS and never starts the output, restart or
-     * not. {@link dev.dotarec.fsm.MatchFsm} calls this once a second run of OBS in a row fails that
-     * way, then restarts OBS so the relaunched one loads x264. The profile names the one token as
-     * both the recording and the streaming encoder (the default Stream quality records with the
-     * latter), so both switch.
+     * not; some drivers crash OBS there instead. {@link dev.dotarec.fsm.MatchFsm} calls this once a
+     * second run of OBS in a row fails that way, then restarts OBS so the relaunched one loads x264,
+     * or as soon as an OBS crashed while it started recording, leaving it to Electron's relaunches
+     * to load x264. The profile names the one token as both the recording and the streaming encoder
+     * (the default Stream quality records with the latter), so both switch.
      *
      * <p>Nothing is switched while OBS can't record into the profile's video folder at all: the
      * folder is missing (an unplugged drive), or its drive has under {@link #OBS_MIN_FREE_BYTES}
@@ -202,7 +203,7 @@ public class ObsConfigWriter implements EncoderFallback {
         if (s.encoder != null && !s.encoder.isBlank()) {
             if (!EncoderProbe.X264.equals(s.encoder)) {
                 log.warn(
-                        "OBS keeps failing to start recording with the {} encoder picked in Settings;"
+                        "OBS fails to start recording with the {} encoder picked in Settings;"
                                 + " keeping it. Set the encoder to Auto or x264 if matches stop"
                                 + " recording",
                         s.encoder);
@@ -226,8 +227,8 @@ public class ObsConfigWriter implements EncoderFallback {
         }
         log.warn(
                 "Switching the OBS encoder from the auto-picked {} to x264 until the app restarts:"
-                        + " OBS accepts StartRecord but never starts recording with it (an encoder"
-                        + " it offers but can't open, e.g. on an outdated GPU driver)",
+                        + " OBS fails to start recording with it (an encoder it offers but can't"
+                        + " open, e.g. on an outdated GPU driver)",
                 probed);
         return true;
     }

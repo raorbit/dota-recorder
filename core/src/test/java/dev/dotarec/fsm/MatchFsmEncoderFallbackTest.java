@@ -34,7 +34,8 @@ import org.junit.jupiter.api.io.TempDir;
  * A hardware encoder OBS offers but can't open: OBS accepts every StartRecord and never starts the
  * output, before and after a restart. The FSM restarts OBS on the first such start; once a second
  * run of OBS in a row fails the same way, it first asks {@link EncoderFallback} to switch an
- * auto-picked hardware encoder to x264, so the OBS that restart relaunches records with x264.
+ * auto-picked hardware encoder to x264, so the OBS that restart relaunches records with x264. An
+ * encoder whose driver crashes OBS instead gets x264 at the first crash, with no restart.
  */
 class MatchFsmEncoderFallbackTest {
 
@@ -231,5 +232,46 @@ class MatchFsmEncoderFallbackTest {
         fsm.onFrame(playing(MATCH));
 
         assertThat(asked).containsExactly("restart", "restart", "x264", "restart");
+    }
+
+    @Test
+    void anObsThatCrashesStartingTheRecording_getsX264AtOnce_andNoRestart() {
+        // A driver that crashes OBS in the encoder's setup: the OBS that took the start exits during
+        // the wait, and Electron relaunches it. A restart would only end that fresh relaunch and
+        // spend one more of the few relaunches Electron allows a crashing OBS.
+        obs.startNotConfirmed = true;
+        obs.duringStart = () -> obs.exited.add(obs.process);
+
+        fsm.onFrame(playing(MATCH));
+        assertThat(asked).as("x264 at the first crash, and no restart").containsExactly("x264");
+        assertThat(fsm.getState()).isEqualTo(MatchState.IDLE);
+
+        // Electron's relaunch loaded the profile before the switch, so it crashes the same way.
+        relaunchObs();
+        fsm.onFrame(playing(MATCH));
+        assertThat(asked).containsExactly("x264", "x264");
+
+        // The relaunch after it loads x264 and records.
+        relaunchObs();
+        obs.duringStart = null;
+        obs.startNotConfirmed = false;
+        fsm.onFrame(playing(MATCH));
+        assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
+    }
+
+    @Test
+    void crashesThatGoOn_neverAskForARestart_whateverTheFallbackSays() {
+        // An encoder picked in Settings is kept, so OBS keeps crashing; only Electron relaunches it,
+        // and Electron stops after a few crashes in a row.
+        switches = false;
+        obs.startNotConfirmed = true;
+        obs.duringStart = () -> obs.exited.add(obs.process);
+
+        for (int i = 0; i < 3; i++) {
+            fsm.onFrame(playing(MATCH));
+            relaunchObs();
+        }
+
+        assertThat(asked).containsExactly("x264", "x264", "x264");
     }
 }
