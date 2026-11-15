@@ -24,6 +24,7 @@ import dev.dotarec.data.RecordingSessionRepository;
 import dev.dotarec.data.TestDb;
 import dev.dotarec.gsi.GsiFrame;
 import dev.dotarec.obs.ObsException;
+import dev.dotarec.obs.ObsProcess;
 import dev.dotarec.obs.ObsRecorder;
 import dev.dotarec.obs.ObsRestarter;
 import dev.dotarec.obs.ObsStartNotConfirmedException;
@@ -32,7 +33,9 @@ import dev.dotarec.tagger.EventTagger;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CyclicBarrier;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.BeforeEach;
@@ -85,6 +88,13 @@ class MatchFsmTest {
         int detachCalls;
         /** What connectionEpoch() answers; a test bumps it to model a reconnect (a relaunched OBS). */
         long epoch = 1L;
+        /**
+         * What connectedObsProcess() answers. Null, the default, models an OBS the core couldn't
+         * name, so the FSM tells a relaunch by the connection count alone.
+         */
+        ObsProcess process;
+        /** OBS processes that have exited: isObsRunning answers false for them. */
+        final Set<ObsProcess> exited = new HashSet<>();
         /** The path OBS reported on OUTPUT_STARTED (startedOutputPath()); null models none. */
         String startedPath;
 
@@ -151,6 +161,10 @@ class MatchFsmTest {
         @Override public String startedOutputPath() { return startedPath; }
 
         @Override public long connectionEpoch() { return epoch; }
+
+        @Override public ObsProcess connectedObsProcess() { return process; }
+
+        @Override public boolean isObsRunning(ObsProcess p) { return !exited.contains(p); }
 
         @Override public Instant recordConfirmedAt() { return confirmedAt; }
 

@@ -10,7 +10,9 @@ import ch.qos.logback.core.read.ListAppender;
 import dev.dotarec.config.TimeSource;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.Locale;
+import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.ArrayList;
 import java.util.List;
@@ -203,6 +205,83 @@ class ObsHealerTest {
         ObsHealer healer = new ObsHealer(exe, (e, waitMs) -> 0, new TimeSource(nanos::get, () -> 0L));
 
         assertThat(healer.isObsRunning()).isFalse();
+    }
+
+    @Test
+    void findObsProcess_namesTheOneRunningObs_byItsPidAndStart(@TempDir Path dir) throws Exception {
+        Path exe = standInObs(dir);
+        Process obs = run(exe);
+        try {
+            ObsHealer healer = healerFor(exe);
+            ObsProcess found = healer.findObsProcess();
+
+            assertThat(found)
+                    .isEqualTo(new ObsProcess(obs.pid(), obs.info().startInstant().orElseThrow()));
+            assertThat(healer.isObsRunning(found)).isTrue();
+
+            end(obs);
+            assertThat(healer.isObsRunning(found)).as("that run of OBS is gone").isFalse();
+            assertThat(healer.findObsProcess()).isNull();
+        } finally {
+            end(obs);
+        }
+    }
+
+    @Test
+    void findObsProcess_withTwoRunningThisAppsObs_namesNeither(@TempDir Path dir) throws Exception {
+        // The core can't tell which of the two its connection reached.
+        Path exe = standInObs(dir);
+        Process first = run(exe);
+        Process second = run(exe);
+        try {
+            assertThat(healerFor(exe).findObsProcess()).isNull();
+        } finally {
+            end(first);
+            end(second);
+        }
+    }
+
+    @Test
+    void isObsRunning_isFalseForItsPidOnceAProcessStartedLaterHoldsIt() {
+        // Windows reuses pids: a live process with the right pid but another start instant is a
+        // later process, not the run of OBS that was named.
+        ProcessHandle self = ProcessHandle.current();
+        Optional<Instant> started = self.info().startInstant();
+        assumeTrue(started.isPresent(), "this process's start can't be read here");
+        ObsHealer healer = healerFor(OBS);
+
+        assertThat(healer.isObsRunning(new ObsProcess(self.pid(), started.get()))).isTrue();
+        assertThat(healer.isObsRunning(new ObsProcess(self.pid(), started.get().minusSeconds(60))))
+                .isFalse();
+    }
+
+    private ObsHealer healerFor(Path exe) {
+        return new ObsHealer(exe, (e, waitMs) -> 0, new TimeSource(nanos::get, () -> 0L));
+    }
+
+    /**
+     * A stand-in for this app's OBS executable in {@code dir}: a copy of Windows' ping, which runs
+     * from any folder and waits as long as it is told to. Windows-only, like the app.
+     */
+    private static Path standInObs(Path dir) throws Exception {
+        assumeTrue(System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win"),
+                "the stand-in OBS is a copy of Windows' ping");
+        Path ping = Path.of(System.getenv("SystemRoot"), "System32", "PING.EXE");
+        assumeTrue(Files.isRegularFile(ping), "no ping.exe to stand in for OBS");
+        return Files.copy(ping, dir.resolve("obs64.exe"));
+    }
+
+    /** Runs the stand-in OBS for about a minute, unless {@link #end} ends it first. */
+    private static Process run(Path exe) throws Exception {
+        return new ProcessBuilder(exe.toString(), "-n", "60", "127.0.0.1")
+                .redirectErrorStream(true)
+                .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                .start();
+    }
+
+    private static void end(Process p) throws InterruptedException {
+        p.destroyForcibly();
+        p.waitFor(10, TimeUnit.SECONDS);
     }
 
     @Test

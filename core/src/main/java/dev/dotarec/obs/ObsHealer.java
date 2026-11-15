@@ -8,6 +8,7 @@ import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.Deque;
+import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
@@ -28,6 +29,10 @@ import org.springframework.stereotype.Component;
  * (the user's, or deadlock-recorder's). Restarts are rate-limited so a GPU that is genuinely gone
  * cannot become a restart loop. The bundled OBS runs with {@code --multi}, which skips OBS's
  * unclean-shutdown dialog, so a killed instance relaunches without a prompt.
+ *
+ * <p>The same process scan tells the rest of the core which run of OBS it is connected to and
+ * whether that one still runs ({@link #findObsProcess()}, {@link #isObsRunning(ObsProcess)}), so
+ * an OBS that crashed and was relaunched can be told from a websocket that merely dropped.
  */
 @Component
 public class ObsHealer implements ObsRestarter {
@@ -165,6 +170,55 @@ public class ObsHealer implements ObsRestarter {
             return ProcessHandle.allProcesses().anyMatch(ph -> runs(ph, target, exeName));
         } catch (RuntimeException e) {
             log.debug("Process scan for {} failed: {}", obsExecutable, e.toString());
+            return true;
+        }
+    }
+
+    /**
+     * The one process running this app's own OBS executable, named by its pid and start instant, or
+     * null when that can't be told: no process this one can read runs it (an OBS run elevated has no
+     * command to match), more than one does, its start can't be read, or the scan fails. {@link
+     * ObsController} asks on each identified connection, so the core knows which run of OBS holds an
+     * output, and a relaunched one can't pass for one that crashed.
+     */
+    public ObsProcess findObsProcess() {
+        String target = canonical(obsExecutable.toString());
+        String exeName = fileName(obsExecutable.toString());
+        if (target == null || exeName == null) {
+            return null;
+        }
+        try {
+            List<ProcessHandle> found = ProcessHandle.allProcesses()
+                    .filter(ph -> runs(ph, target, exeName))
+                    .limit(2)
+                    .toList();
+            if (found.size() != 1) {
+                log.debug("{} processes run {}; not naming one", found.isEmpty() ? "No" : "Several",
+                        obsExecutable);
+                return null;
+            }
+            ProcessHandle ph = found.get(0);
+            return ph.info().startInstant().map(started -> new ObsProcess(ph.pid(), started))
+                    .orElse(null);
+        } catch (RuntimeException e) {
+            log.debug("Process scan for {} failed: {}", obsExecutable, e.toString());
+            return null;
+        }
+    }
+
+    /**
+     * Whether {@code process} still runs: a live process has its pid and started at the same
+     * instant, so a pid Windows has since handed to another process doesn't count. A check that
+     * fails, or a start that can't be read, reads as running, as in {@link #isObsRunning()}.
+     */
+    public boolean isObsRunning(ObsProcess process) {
+        try {
+            return ProcessHandle.of(process.pid())
+                    .map(ph -> ph.info().startInstant().map(process.startedAt()::equals)
+                            .orElse(true))
+                    .orElse(false);
+        } catch (RuntimeException e) {
+            log.debug("Process check for OBS pid {} failed: {}", process.pid(), e.toString());
             return true;
         }
     }

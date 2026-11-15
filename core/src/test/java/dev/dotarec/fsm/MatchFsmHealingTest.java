@@ -23,10 +23,12 @@ import dev.dotarec.data.TestDb;
 import dev.dotarec.fsm.MatchFsmTest.FakeObs;
 import dev.dotarec.fsm.MatchFsmTest.FakeThumbs;
 import dev.dotarec.gsi.GsiFrame;
+import dev.dotarec.obs.ObsProcess;
 import dev.dotarec.obs.ObsRestarter;
 import dev.dotarec.tagger.EventTagger;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
@@ -58,6 +60,12 @@ class MatchFsmHealingTest {
     private static final long MATCH = 7_712_345_678L;
     private static final String IN_PROGRESS = "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS";
     private static final String POST_GAME = "DOTA_GAMERULES_STATE_POST_GAME";
+
+    /** The OBS run a recording starts on, and the one Electron relaunches once that one crashed. */
+    private static final ObsProcess OBS_RUN =
+            new ObsProcess(4_242L, Instant.parse("2026-11-15T18:00:00Z"));
+    private static final ObsProcess RELAUNCHED =
+            new ObsProcess(5_120L, Instant.parse("2026-11-15T18:40:00Z"));
 
     private FakeObs obs;
     private FakeRestarter restarter;
@@ -108,9 +116,23 @@ class MatchFsmHealingTest {
     /**
      * OBS crashed mid-recording and Electron relaunched it: the core is connected to a fresh, idle
      * OBS. No STOPPED ever came (the reconnect reset the events anyway), and StopRecord fails
-     * against the new OBS's inactive output.
+     * against the new OBS's inactive output. A test that names OBS processes also switches
+     * {@code obs.process} to the relaunched one.
      */
     private void obsCrashedAndARelaunchedOneConnected() {
+        obs.epoch++;
+        obs.recording = false;
+        obs.lastStoppedPath = null;
+        obs.recordStatus = new MatchFsm.RecordOutputStatus(false, null, null);
+        obs.stopFailuresRemaining = 1;
+    }
+
+    /**
+     * OBS ended the output itself while the websocket was down (a full disk, a stop in the OBS
+     * window), and the core then reconnected to that same OBS: no STOPPED was heard, and the
+     * reconnect reset the events, so no stop path is known either.
+     */
+    private void obsEndedTheOutputWhileTheSocketWasDown() {
         obs.epoch++;
         obs.recording = false;
         obs.lastStoppedPath = null;
@@ -373,6 +395,108 @@ class MatchFsmHealingTest {
         assertThat(matches.findAll()).singleElement()
                 .satisfies(r -> assertThat(r.videoPath())
                         .isEqualTo("C:\\videos\\stopped-after-blip.mkv"));
+    }
+
+    @Test
+    void aStopObsMadeItself_staysItsOwn_afterAReconnectToTheSameObs() {
+        // The disk fills: OBS ends the output, keeps rendering, and the stop is left for POST_GAME.
+        // Minutes later the websocket drops and the core reconnects to that same OBS. Read as a
+        // relaunch, the match was cut there and re-armed against the full disk.
+        obs.process = OBS_RUN;
+        obs.startedPath = "C:\\videos\\disk-full.mkv";
+        fsm.onFrame(playing());
+        advanceSeconds(300);
+        obsStoppedTheOutput("C:\\videos\\disk-full.mkv");
+        fsm.superviseRecording();
+        assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
+
+        advanceSeconds(120);
+        obs.epoch++; // reconnected to the same OBS
+        obs.lastStoppedPath = null; // and the reconnect reset the events
+        fsm.superviseRecording();
+
+        assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
+        assertThat(restarter.reasons).isEmpty();
+        fsm.onFrame(frame().state(POST_GAME).matchId(MATCH).mono(nanos.get()).build());
+        assertThat(matches.findAll()).singleElement()
+                .satisfies(r -> assertThat(r.videoPath()).isEqualTo("C:\\videos\\disk-full.mkv"));
+    }
+
+    @Test
+    void aStopObsMadeWhileTheSocketWasDown_isItsOwn_whenTheSameObsComesBack() {
+        obs.process = OBS_RUN;
+        obs.startedPath = "C:\\videos\\stopped-offline.mkv";
+        fsm.onFrame(playing());
+        advanceSeconds(300);
+        obsEndedTheOutputWhileTheSocketWasDown();
+        fsm.superviseRecording();
+
+        assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
+        assertThat(restarter.reasons).isEmpty();
+        fsm.onFrame(frame().state(POST_GAME).matchId(MATCH).mono(nanos.get()).build());
+        assertThat(matches.findAll()).singleElement()
+                .satisfies(r -> assertThat(r.videoPath())
+                        .isEqualTo("C:\\videos\\stopped-offline.mkv"));
+    }
+
+    @Test
+    void aStopObsMadeWhileTheSocketWasDown_isItsOwn_whenTheReconnectCantNameAnObsThatStillRuns() {
+        obs.process = OBS_RUN;
+        fsm.onFrame(playing());
+        advanceSeconds(300);
+        obsEndedTheOutputWhileTheSocketWasDown();
+        obs.process = null; // the reconnect couldn't name it, but the recording's OBS still runs
+        fsm.superviseRecording();
+
+        assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
+    }
+
+    @Test
+    void obsRelaunchedMidMatch_isToldByTheProcessNowConnected() {
+        obs.process = OBS_RUN;
+        obs.startedPath = "C:\\videos\\part-1.mkv";
+        fsm.onFrame(playing());
+        advanceSeconds(300);
+        obsCrashedAndARelaunchedOneConnected();
+        obs.process = RELAUNCHED;
+        fsm.superviseRecording();
+
+        assertThat(fsm.getState()).isEqualTo(MatchState.IDLE);
+        assertThat(restarter.reasons).as("the relaunched OBS is fresh; no restart").isEmpty();
+        assertThat(matches.findAll()).singleElement()
+                .satisfies(r -> assertThat(r.videoPath()).isEqualTo("C:\\videos\\part-1.mkv"));
+    }
+
+    @Test
+    void obsRelaunchedMidMatch_whoseProcessCantBeNamed_isToldByTheOldOneBeingGone() {
+        obs.process = OBS_RUN;
+        fsm.onFrame(playing());
+        advanceSeconds(300);
+        obsCrashedAndARelaunchedOneConnected();
+        obs.exited.add(OBS_RUN);
+        obs.process = null;
+        fsm.superviseRecording();
+
+        assertThat(fsm.getState()).isEqualTo(MatchState.IDLE);
+    }
+
+    @Test
+    void anOutputSeenRunningOnANamedObs_belongsToThatObsFromThenOn() {
+        // The start couldn't name its OBS, so only the connection count tells a relaunch. Once a
+        // connection that names its OBS finds the output still running, that OBS holds it, and a
+        // stop it makes across a later reconnect to it is its own.
+        fsm.onFrame(playing());
+        advanceSeconds(300);
+        obs.epoch++;
+        obs.process = OBS_RUN;
+        obs.recordStatus = new MatchFsm.RecordOutputStatus(true, 300_000L, 50_000_000L);
+        fsm.superviseRecording();
+
+        advanceSeconds(60);
+        obsEndedTheOutputWhileTheSocketWasDown();
+        fsm.superviseRecording();
+
+        assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
     }
 
     @Test

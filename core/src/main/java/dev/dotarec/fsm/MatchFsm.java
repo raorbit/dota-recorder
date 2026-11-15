@@ -19,6 +19,7 @@ import dev.dotarec.data.RecordingSessionRepository.Snapshot;
 import dev.dotarec.fsm.RecordingSession.PauseSpanBuffer;
 import dev.dotarec.gsi.GsiFrame;
 import dev.dotarec.obs.ObsException;
+import dev.dotarec.obs.ObsProcess;
 import dev.dotarec.obs.ObsRecorder;
 import dev.dotarec.obs.ObsRestarter;
 import dev.dotarec.obs.ObsStartNotConfirmedException;
@@ -300,9 +301,11 @@ public class MatchFsm {
      * RECORDING against a dead output for the rest of the match, never restarting OBS. An output
      * that stopped while OBS still renders (the user stopped it in the OBS window, the disk filled)
      * is left for POST_GAME as before: a restart can't fix those, and re-arming against them would
-     * only loop junk rows. The exception is an inactive output on a newer connection than the last
-     * one it was seen active on: the OBS that recorded it crashed and a relaunched one took its
-     * place, so the recording is finalized and the next in-match frame records the rest.
+     * only loop junk rows. A reconnect to the same OBS (a websocket blip) changes nothing there,
+     * whether the stop came before it or while the socket was down. The exception is an inactive
+     * output whose OBS is gone: the OBS that recorded it crashed (or was ended) and a relaunched one
+     * took its place, so the recording is finalized and the next in-match frame records the rest.
+     * See {@link #obsWasRelaunched} for how that is told.
      */
     public synchronized void superviseRecording() {
         RecordingSession s = this.session;
@@ -318,17 +321,23 @@ public class MatchFsm {
         // miss a relaunch (the next one catches it), never adopt the new connection for an output
         // the old one reported.
         long epoch = obs.connectionEpoch();
+        ObsProcess connected = obs.connectedObsProcess();
         RecordOutputStatus status = statusProbe.probeRecordStatus();
         if (status == null) {
             return;
         }
         if (status.active()) {
             // The output survived onto this connection (a websocket blip, not a crash): it is this
-            // connection's own from here on. Otherwise one blip left every later stop on it (a full
-            // disk, a stop in the OBS window) looking like a relaunch, finalizing and re-arming.
+            // connection's own from here on, held by the OBS process the connection reached when
+            // that one is named. Otherwise, where only the connection count tells, one blip left
+            // every later stop on it (a full disk, a stop in the OBS window) looking like a
+            // relaunch, finalizing and re-arming.
             s.setObsConnectionEpoch(epoch);
+            if (connected != null) {
+                s.setObsProcess(connected);
+            }
         } else {
-            if (epoch != s.getObsConnectionEpoch()) {
+            if (obsWasRelaunched(s, epoch, connected)) {
                 // OBS crashed (or was ended) mid-match and a relaunched one is connected now: the
                 // output died with the old process, which never sent a STOPPED. Left RECORDING, the
                 // rest of the match went unrecorded against the idle new OBS. Keep what the old one
@@ -368,6 +377,27 @@ public class MatchFsm {
             finalizeRecording();
         }
         restartObs("it stopped writing the recording");
+    }
+
+    /**
+     * Whether the OBS that held the recording's output is gone and another one answers now, once
+     * the probe found that output inactive; {@code epoch} and {@code connected} are the connection's
+     * count and OBS process, read before the probe. Told by the OBS process when the recording's is
+     * named: another process is connected now, or, when the one connected can't be named, the
+     * recording's no longer runs. A reconnect to the same OBS is no relaunch, so a stop OBS made
+     * itself, before a blip or while the socket was down, stays its own. Where the recording's OBS
+     * couldn't be named (one this process can't read), a newer connection than the last one the
+     * output was seen active on stands in, and a blip then reads as a relaunch too.
+     */
+    private boolean obsWasRelaunched(RecordingSession s, long epoch, ObsProcess connected) {
+        ObsProcess recorder = s.getObsProcess();
+        if (recorder == null) {
+            return epoch != s.getObsConnectionEpoch();
+        }
+        if (connected != null) {
+            return !connected.equals(recorder);
+        }
+        return !obs.isObsRunning(recorder);
     }
 
     /**
@@ -645,6 +675,7 @@ public class MatchFsm {
         s.setRecordStartedWallMs(anchor);
         s.setVideoPath(obs.startedOutputPath());
         s.setObsConnectionEpoch(obs.connectionEpoch());
+        s.setObsProcess(obs.connectedObsProcess());
         s.observe(frame);
         s.setLastFrame(frame);
         if (GAME_IN_PROGRESS.equals(frame.gameState())) {

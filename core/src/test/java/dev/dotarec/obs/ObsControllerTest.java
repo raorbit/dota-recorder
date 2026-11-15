@@ -18,6 +18,7 @@ import static org.mockito.Mockito.when;
 
 import dev.dotarec.config.SettingsStore;
 import dev.dotarec.config.SettingsStore.AudioSource;
+import dev.dotarec.config.TimeSource;
 import io.obswebsocket.community.client.OBSCommunicator;
 import io.obswebsocket.community.client.OBSRemoteController;
 import io.obswebsocket.community.client.message.response.general.GetVersionResponse;
@@ -31,6 +32,10 @@ import io.obswebsocket.community.client.message.response.sources.SaveSourceScree
 import io.obswebsocket.community.client.model.Input;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Deque;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicReference;
@@ -529,7 +534,8 @@ class ObsControllerTest {
         // an OBS that crashed and was relaunched would look like the recording's own, and the rest of
         // the match would go unrecorded against its idle output.
         ObsHealth health = new ObsHealth();
-        ObsController controller = identifyingController(health, mock(OBSRemoteController.class));
+        ObsController controller =
+                identifyingController(health, mock(OBSRemoteController.class), healerNaming());
 
         assertThat(controller.ensureConnected()).isTrue();
         long first = controller.connectionEpoch();
@@ -553,12 +559,66 @@ class ObsControllerTest {
         assertThat(controller.startedOutputPath()).isEqualTo("C:\\videos\\match.mkv");
     }
 
+    @Test
+    void ensureConnected_namesTheObsProcessEachConnectionReached_andKeepsItOnceItDrops() {
+        // A relaunched OBS is told from a websocket blip by this, and the recording flag outlives a
+        // dropped connection only as long as the OBS process it names still runs.
+        ObsProcess first = new ObsProcess(4_242L, Instant.parse("2026-11-15T18:00:00Z"));
+        ObsProcess relaunched = new ObsProcess(5_120L, Instant.parse("2026-11-15T18:40:00Z"));
+        ObsHealth health = new ObsHealth();
+        ObsHealer healer = healerNaming(first, relaunched);
+        ObsController controller =
+                identifyingController(health, mock(OBSRemoteController.class), healer);
+
+        controller.ensureConnected();
+        assertThat(controller.connectedObsProcess()).isEqualTo(first);
+
+        health.setConnected(false); // OBS crashed
+        assertThat(controller.connectedObsProcess())
+                .as("still names the OBS that held any output")
+                .isEqualTo(first);
+
+        controller.ensureConnected(); // its relaunch's websocket came up
+        assertThat(controller.connectedObsProcess()).isEqualTo(relaunched);
+        assertThat(controller.isObsRunning(first)).isFalse();
+        assertThat(controller.isObsRunning(relaunched)).isTrue();
+    }
+
+    /**
+     * A healer whose scan names {@code named} one per call, then nothing, and that reads each named
+     * process as running until the scan has named the next.
+     */
+    private static ObsHealer healerNaming(ObsProcess... named) {
+        Deque<ObsProcess> unnamed = new ArrayDeque<>(List.of(named));
+        List<ObsProcess> exited = new ArrayList<>();
+        return new ObsHealer(Path.of("C:\\obs\\bin\\64bit\\obs64.exe"), (exe, waitMs) -> 0,
+                new TimeSource(() -> 0L, () -> 0L)) {
+            private ObsProcess last;
+
+            @Override
+            public ObsProcess findObsProcess() {
+                if (last != null) {
+                    exited.add(last);
+                }
+                last = unnamed.poll();
+                return last;
+            }
+
+            @Override
+            public boolean isObsRunning(ObsProcess process) {
+                return !exited.contains(process);
+            }
+        };
+    }
+
     /**
      * A controller whose every connect attempt reaches an OBS that completes the handshake:
      * {@code buildController} hands back {@code obs} and reports it identified, as onReady does, and
-     * {@code obs} answers GetVersion with this client's protocol.
+     * {@code obs} answers GetVersion with this client's protocol. {@code healer} is wired as in
+     * production, to name the OBS process each connection reached.
      */
-    private static ObsController identifyingController(ObsHealth health, OBSRemoteController obs) {
+    private static ObsController identifyingController(
+            ObsHealth health, OBSRemoteController obs, ObsHealer healer) {
         SettingsStore settings = mock(SettingsStore.class);
         when(settings.get()).thenReturn(new SettingsStore.Settings());
         GetVersionResponse version = mock(GetVersionResponse.class);
@@ -567,7 +627,7 @@ class ObsControllerTest {
         when(obs.getVersion(anyLong())).thenReturn(version);
         return new ObsController(
                 settings, health, new ObsEvents(health, mock(CaptureBlackFrameGuard.class)),
-                sceneConfigurer()) {
+                sceneConfigurer(), healer) {
             @Override
             OBSRemoteController buildController(SettingsStore.Settings s, CountDownLatch latch) {
                 ReflectionTestUtils.setField(this, "connectionReady", true);

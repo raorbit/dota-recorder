@@ -1,6 +1,7 @@
 package dev.dotarec.fsm;
 
 import dev.dotarec.gsi.GsiFrame;
+import dev.dotarec.obs.ObsProcess;
 import dev.dotarec.tagger.PendingMarker;
 import java.util.ArrayList;
 import java.util.List;
@@ -32,6 +33,12 @@ public class RecordingSession {
 
     /** The OBS connection the recording started on ({@code ObsRecorder.connectionEpoch()}). */
     private long obsConnectionEpoch;
+
+    /**
+     * The OBS process that holds the recording's output ({@code ObsRecorder.connectedObsProcess()}),
+     * or null when it couldn't be named.
+     */
+    private ObsProcess obsProcess;
 
     /** The most recent frame the tagger diffs the next one against. */
     private GsiFrame lastFrame;
@@ -145,6 +152,14 @@ public class RecordingSession {
 
     public void setObsConnectionEpoch(long obsConnectionEpoch) {
         this.obsConnectionEpoch = obsConnectionEpoch;
+    }
+
+    public ObsProcess getObsProcess() {
+        return obsProcess;
+    }
+
+    public void setObsProcess(ObsProcess obsProcess) {
+        this.obsProcess = obsProcess;
     }
 
     public String getScene() {
