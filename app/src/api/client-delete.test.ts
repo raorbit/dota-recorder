@@ -124,15 +124,30 @@ describe('delete requests', () => {
   it("fail with the core's reason when it gives one, for the delete-failure banner", async () => {
     const refusal = (status: number, statusText: string, body: string) => () =>
       Promise.resolve({ ok: false, status, statusText, text: async () => body });
+    const locked = JSON.stringify({ message: 'database is locked' });
     fetchMock
-      .mockImplementationOnce(refusal(404, 'Not Found', JSON.stringify({ message: 'No match 7' })))
-      .mockImplementationOnce(refusal(404, 'Not Found', JSON.stringify({ message: 'No clip 8' })))
+      .mockImplementationOnce(refusal(500, 'Internal Server Error', locked))
+      .mockImplementationOnce(refusal(500, 'Internal Server Error', locked))
       .mockImplementationOnce(refusal(500, 'Internal Server Error', ''));
 
-    await expect(deleteMatch(7)).rejects.toThrow('No match 7');
-    await expect(deleteClip(8)).rejects.toThrow('No clip 8');
+    await expect(deleteMatch(7)).rejects.toThrow('database is locked');
+    await expect(deleteClip(8)).rejects.toThrow('database is locked');
     await expect(deleteClip(9)).rejects.toThrow(
       'DELETE /clips/9 failed: 500 Internal Server Error',
     );
+  });
+
+  it('count a row the core no longer has as deleted: it is gone already', async () => {
+    const gone = (message: string) => () =>
+      Promise.resolve({
+        ok: false,
+        status: 404,
+        statusText: 'Not Found',
+        text: async () => JSON.stringify({ message }),
+      });
+    fetchMock.mockImplementationOnce(gone('No match 7')).mockImplementationOnce(gone('No clip 8'));
+
+    await expect(deleteMatch(7)).resolves.toBe('deleted');
+    await expect(deleteClip(8)).resolves.toBe('deleted');
   });
 });

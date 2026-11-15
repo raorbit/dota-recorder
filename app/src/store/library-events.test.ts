@@ -113,6 +113,14 @@ const refused = (): Promise<unknown> =>
   Promise.resolve({ ok: false, status: 500, statusText: 'Internal Server Error' });
 const timedOut = (): Promise<unknown> =>
   Promise.reject(new DOMException('The operation timed out.', 'TimeoutError'));
+// The core has no such row: it went already.
+const notFound = (message: string) => (): Promise<unknown> =>
+  Promise.resolve({
+    ok: false,
+    status: 404,
+    statusText: 'Not Found',
+    text: async () => JSON.stringify({ message }),
+  });
 
 // A DELETE the core is still waiting on (its half-minute wait for the maintenance lock), answered when
 // the test releases it.
@@ -642,6 +650,33 @@ describe('startLibrary storage-events wiring', () => {
     expect(deleteError()).toBe(
       'The clip was not deleted: DELETE /clips/5 failed: 500 Internal Server Error',
     );
+    teardown();
+  });
+
+  it('counts a row the core no longer has as deleted, not as a failure', async () => {
+    // 7 left the list earlier (its own delete) but stayed in the table's multi-selection, so a bulk
+    // delete of 7, 8 and 9 still asks for it: the core answers 404, which is what was asked for.
+    serveLibrary(
+      { matches: [{ id: 8 }, { id: 9 }], clips: [{ id: 6, parentMatchId: 8 }] },
+      (url) =>
+        url.endsWith('/matches/7')
+          ? notFound('No match 7')()
+          : url.endsWith('/clips/5')
+            ? notFound('No clip 5')()
+            : deleted(),
+    );
+    const teardown = startLibrary();
+    await flush();
+
+    await useLibraryStore.getState().deleteMatches([7, 9]);
+    expect(useLibraryStore.getState().deleteError).toBeNull();
+    expect(matchIds()).toEqual([8]);
+
+    await useLibraryStore.getState().deleteMatch(7);
+    await expect(useLibraryStore.getState().deleteClip(5)).resolves.toBe('deleted');
+    await useLibraryStore.getState().deleteClips([5, 6]);
+    expect(useLibraryStore.getState().deleteError).toBeNull();
+    expect(clipIds()).toEqual([]);
     teardown();
   });
 
