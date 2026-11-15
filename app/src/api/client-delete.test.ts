@@ -86,6 +86,26 @@ describe('delete requests', () => {
     await expect(match).resolves.toBe('deleted');
   });
 
+  it('send a clip delete and a recording delete with the same id as two deletes', async () => {
+    // Matches and clips are separate tables, so recording 7 and clip 7 both exist: deleting one must
+    // never stand in for deleting the other.
+    const held = heldResponse();
+    fetchMock.mockImplementationOnce(() => held.promise).mockImplementationOnce(queued);
+
+    const match = deleteMatch(7);
+    const clip = deleteClip(7);
+    await settle();
+
+    expect(sentDeletes()).toEqual([
+      'http://127.0.0.1:3224/matches/7',
+      'http://127.0.0.1:3224/clips/7',
+    ]);
+    // Each gets its own answer: the clip's was queued while the recording's is still out.
+    await expect(clip).resolves.toBe('queued');
+    held.release();
+    await expect(match).resolves.toBe('deleted');
+  });
+
   it('hold back no other request while one waits', async () => {
     fetchMock.mockImplementationOnce(() => heldResponse().promise); // never released
 

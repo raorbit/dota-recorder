@@ -489,6 +489,43 @@ describe('startLibrary storage-events wiring', () => {
     teardown();
   });
 
+  it('keeps a clip delete and a recording delete with the same id apart', async () => {
+    // Recording 7 and clip 7 (of recording 1) both exist: each delete marks, and is done, on its own.
+    const held = heldDelete();
+    const core = {
+      matches: [{ id: 1 }, { id: 7 }],
+      clips: [{ id: 7, parentMatchId: 1 }],
+    };
+    serveLibrary(core, (url) => (url.endsWith('/matches/7') ? held.answer : QUEUED));
+    const teardown = startLibrary();
+    await flush();
+
+    const recording = useLibraryStore.getState().deleteMatch(7);
+    await expect(useLibraryStore.getState().deleteClip(7)).resolves.toBe('queued');
+    expect(deletingMatches()).toEqual([7]);
+    expect(deletingClips()).toEqual([]);
+    expect(queuedMatches()).toEqual([]);
+    expect(queuedClips()).toEqual([7]);
+
+    // The recording's delete is done: only the recording goes, and the clip stays queued.
+    held.release();
+    await recording;
+    expect(matchIds()).toEqual([1]);
+    expect(clipIds()).toEqual([7]);
+    expect(queuedClips()).toEqual([7]);
+
+    // The clip's frame drops the clip alone.
+    core.clips = [];
+    FakeWebSocket.instances[0].emitMessage({
+      type: 'clip.deleted',
+      payload: { clipId: 7, parentMatchId: 1 },
+    });
+    expect(clipIds()).toEqual([]);
+    expect(matchIds()).toEqual([1]);
+    expect(queuedClips()).toEqual([]);
+    teardown();
+  });
+
   it('marks every row of a bulk delete as deleting until the whole run is done', async () => {
     const held = heldDelete();
     serveLibrary({ matches: [{ id: 7 }, { id: 8 }, { id: 9 }], clips: [] }, (url) =>
