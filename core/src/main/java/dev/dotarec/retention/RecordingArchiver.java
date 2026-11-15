@@ -366,6 +366,13 @@ public class RecordingArchiver {
      * would otherwise leave the only copy with unwritten ranges reading as zeros. The flushes improve
      * durability but never gate the move (see {@link #flushBestEffort}).
      *
+     * <p>A flush can also fail because the copy is out of reach: the drive dropped off between the
+     * rename and the flush, and the rename may never have reached it, so once it is back it holds
+     * only the {@code .partial}. So after the second flush the copy is checked again, still there at
+     * the source's size, and the move fails otherwise: the caller then leaves the row and the source
+     * as they were, rather than repointing the row at a file that is gone and deleting the only
+     * other copy. A drive that is there but rejects flushes still passes.
+     *
      * <p>{@code REPLACE_EXISTING} is safe because {@code dst} carries the match id (see the caller): it
      * can only ever overwrite a leftover from this same match's prior interrupted move, making retries
      * idempotent.
@@ -391,6 +398,12 @@ public class RecordingArchiver {
             throw e;
         }
         flushBestEffort(dst);
+        // A copy that vanished with its drive throws here (NoSuchFileException, or the drive not
+        // being ready), failing the move.
+        if (Files.size(dst) != Files.size(src)) {
+            throw new IOException(
+                    "Archive copy " + dst + " no longer matches " + src + " after the flush");
+        }
         return false;
     }
 
