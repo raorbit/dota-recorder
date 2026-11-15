@@ -72,7 +72,7 @@ check(
   'electron-builder.yml: nsis.artifactName must expand to a space-free name — avoid ${productName}/${name} (they expand to a spaced/scoped value) and literal whitespace, or the on-disk .exe diverges from latest.yml and 404s the updater.',
 );
 
-// --- installer script: every program it starts named by its full path ----------------------------
+// --- installer script: every program it starts named by its full path, every cmd given /d --------
 // Windows can find a program named without a path in the installer's own folder (Downloads, for a
 // downloaded installer) or the folder it works in (the install folder, which the user can write to)
 // before the system's. Anything the user ran could leave a cmd.exe or a netsh.exe there for the
@@ -80,6 +80,11 @@ check(
 // installer starts, and everything a cmd line it starts runs, has to be named by its full path.
 // This ports the Go remake's guard (build/windows/installer_windows_test.go); this reader also
 // reads the switches cmd is given before its /c.
+//
+// Every cmd the installer starts also has to be given /d before its /c. Without it cmd first runs
+// the AutoRun commands in the registry, and anything the user runs can set HKCU's. The firewall
+// step's cmd runs elevated ("runas"), and an install for every user of the PC runs the whole
+// installer elevated, so any cmd it starts could run them with administrator rights.
 const buildResources = path.join(repoRoot, 'build-resources');
 
 // The folders a program may be named from: the system's, and the ones the installer fills itself.
@@ -228,6 +233,10 @@ for (const name of readdirSync(buildResources).filter((n) => /\.ns[ih]$/i.test(n
         switches == null || command != null,
         `${where} starts cmd with no /c command this check can read, so it can't vouch for the programs that cmd runs.`,
       );
+      check(
+        switches == null || switches.includes('/d'),
+        `${where} starts cmd without /d before its /c, so that cmd would first run the AutoRun commands in the registry, which anything the user runs can set, with its own rights (an administrator's, when elevated). Add /d.`,
+      );
     }
   }
 }
@@ -279,6 +288,19 @@ for (const [script, want] of readerCases) {
 }
 for (const bare of ['cmd', 'cmd.exe', '.\\cmd.exe', '$EXEDIR\\cmd.exe', '$CmdPath']) {
   check(!hasFullPath(bare), `the installer check takes "${bare}" for a full path.`);
+}
+// cmd reads a /d after its /c as part of the command, so only one before it counts.
+const autoRunCases = [
+  [String.raw`ExecShellWait "runas" "$SYSDIR\cmd.exe" '/d /c "x"' SW_HIDE`, true],
+  [String.raw`ExecShellWait "runas" "$SYSDIR\cmd.exe" '/S /D /C "x"' SW_HIDE`, true],
+  [String.raw`ExecShellWait "runas" "$SYSDIR\cmd.exe" '/c "x"' SW_HIDE`, false],
+  [String.raw`ExecShellWait "runas" "$SYSDIR\cmd.exe" '/c /d "x"' SW_HIDE`, false],
+];
+for (const [line, givenD] of autoRunCases) {
+  check(
+    programsStarted(line)[0].switches.includes('/d') === givenD,
+    `the installer check reads ${JSON.stringify(line)} as ${givenD ? 'not ' : ''}giving cmd /d.`,
+  );
 }
 
 // --- version-source parity -----------------------------------------------------------------------
