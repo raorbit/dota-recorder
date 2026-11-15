@@ -16,11 +16,16 @@ import dev.dotarec.data.RecordingSessionRepository;
 import dev.dotarec.data.RecordingSessionRepository.RecordingEventRow;
 import dev.dotarec.data.RecordingSessionRepository.RecordingSessionRow;
 import dev.dotarec.retention.StorageMaintenanceLock;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -57,9 +62,10 @@ import org.springframework.stereotype.Component;
  *   <li>once, on the first boot whose floors are saved, releases the rows earlier versions adopted
  *       before any floor existed, leaving their files where they are;</li>
  *   <li>scans the roots for files no row references: a source the archiver failed to delete from the
- *       video folder is deleted, an archive drive's leftover from an interrupted move is re-linked to
- *       its row or deleted, and a recorder-named file written since its folder's floor is adopted as
- *       a {@code gsi_only} row.</li>
+ *       video folder is deleted once its copy proves complete, or its row put back on it when an
+ *       earlier boot re-linked that row to a copy cut short; an archive drive's leftover from an
+ *       interrupted move is re-linked to its row or deleted; and a recorder-named file written since
+ *       its folder's floor is adopted as a {@code gsi_only} row.</li>
  * </ol>
  */
 @Component
@@ -435,10 +441,13 @@ public class CrashRecoveryRunner implements ApplicationRunner {
      *   <li>a row whose file name, less the row's own {@code <matchId>-}, is still an archived name or
      *       a clip's ({@link #APP_ONLY_BASENAME}): residue only this app makes;</li>
      *   <li>a row whose file is another row's archived copy's source (that copy's name less its
-     *       {@code <matchId>-}, and the same size), adopted when the archiver failed to delete it:
-     *       retention reclaims it, as before the floors. Only a copy whose own row this release
-     *       doesn't look at counts: the archiver's copy of a user's file adopted before the floors
-     *       and the source it couldn't delete, adopted again, would otherwise keep each other;</li>
+     *       {@code <matchId>-}, and a complete copy of it, see {@link #isCompleteCopy}), adopted when
+     *       the archiver failed to delete it: retention reclaims it, as before the floors. When the
+     *       copy was cut short the file is the only good one, so its row is released like any other,
+     *       and the orphan scan then puts the copy's row back on the file. Only a copy whose own row
+     *       this release doesn't look at counts: the archiver's copy of a user's file adopted before
+     *       the floors and the source it couldn't delete, adopted again, would otherwise keep each
+     *       other;</li>
      *   <li>a row whose file its folder's floor admits (modified since): released, it would only be
      *       adopted again;</li>
      *   <li>a row with a clip still to be cut from its video.</li>
@@ -544,7 +553,8 @@ public class CrashRecoveryRunner implements ApplicationRunner {
             for (ArchivedCopy copy : copies.getOrDefault(original, List.of())) {
                 if (!adopted.contains(copy.rowId())
                         && !normalize(copy.path()).equals(normalize(file))
-                        && sameSize(file, copy.path())) {
+                        && sameSize(file, copy.path())
+                        && isCompleteCopy(copy.path(), file)) {
                     return true;
                 }
             }
@@ -566,7 +576,8 @@ public class CrashRecoveryRunner implements ApplicationRunner {
         // as a standalone gsi_only row (its OBS name carries no match id to tie it back to). Adoption is
         // provenance-gated (recorder-produced basenames only, written since the folder's adoption
         // floor) so a user's own videos are never claimed. First, though, it may be a source the
-        // archiver left behind (see deleteIfArchivedSource), which goes whatever its age.
+        // archiver left behind, which goes whatever its age, or the original of a copy cut short that
+        // a row was re-linked to, which the row goes back on (see settleArchivedSource).
         Path videoDir = videoDir();
         OrphanAdoptionFloors.Floor videoFloor = floors.of(videoDir);
         ArchivedCopies archived = archivedCopies();
@@ -574,11 +585,12 @@ public class CrashRecoveryRunner implements ApplicationRunner {
                 videoDir,
                 referenced,
                 path -> {
-                    if (!(hasRecorderProvenance(path) && deleteIfArchivedSource(path, archived.videos()))) {
+                    if (!(hasRecorderProvenance(path)
+                            && settleArchivedSource(path, archived.videos(), false))) {
                         importOrphanVod(path, videoFloor);
                     }
                 });
-        deleteArchivedThumbSources(videoDir, archived);
+        settleArchivedThumbSources(videoDir, archived);
         // Archive drives: an unreferenced recording here is the residue of an interrupted cross-store
         // move (copied across, but the row's repoint or the source delete didn't finish before a crash).
         // The destination name is {@code <matchId>-...}, so we recover the ORIGINAL row rather than
@@ -659,8 +671,8 @@ public class CrashRecoveryRunner implements ApplicationRunner {
      *   <li>if that match lost its file (the move repoint never committed, e.g. an atomic rename
      *       consumed the source before the crash), RE-LINK the row to this recovered copy instead of
      *       importing a detached duplicate — but only when the file is ATTRIBUTABLE to the row
-     *       ({@link #isAttributableToLostVideo}: original basename and, when recorded, size), so a
-     *       user-placed prefix collision never becomes the row's VOD;</li>
+     *       ({@link #isAttributableToLostVideo}: original basename, when recorded, size, and a copy
+     *       not cut short), so a user-placed prefix collision never becomes the row's VOD;</li>
      *   <li>if the match is already intact (its row still points at a file that exists), this is a
      *       redundant leftover/partial copy from the move — DELETE it to reclaim the space;</li>
      *   <li>if there is no id prefix, no such match (the row was deleted), or the file couldn't be
@@ -753,7 +765,9 @@ public class CrashRecoveryRunner implements ApplicationRunner {
      *   <li><b>naming</b> — the remainder after {@code prefix} must equal the intact row's own video
      *       file name (the {@code src.getFileName()} the archiver prefixed);</li>
      *   <li><b>attribution</b> — the leftover's on-disk size must equal the intact row's current file
-     *       size (an interrupted move leaves a full-size duplicate of the same bytes).</li>
+     *       size (an interrupted move leaves a full-size duplicate: the same bytes, or a zeroed tail
+     *       where an older archiver's copy was cut short, residue either way while the row's own file
+     *       is there).</li>
      * </ul>
      *
      * Both must hold. A coincidental id-prefix collision (a user-placed file whose name/size differs)
@@ -790,7 +804,10 @@ public class CrashRecoveryRunner implements ApplicationRunner {
      *       {@code clip-<clipId>-}) must equal the basename of the row's recorded {@code video_path}
      *       (the {@code src.getFileName()} the archiver prefixed when it staged the move);</li>
      *   <li><b>attribution</b> — when the row recorded a file size, the leftover's on-disk size must
-     *       equal it (the move never rewrites bytes).</li>
+     *       equal it (the move never rewrites bytes);</li>
+     *   <li><b>completeness</b> — it must not end in zeros ({@link #isCompleteCopy}): a copy an older
+     *       archiver had cut short is full size too, and with the row's file gone only its end can
+     *       tell.</li>
      * </ul>
      *
      * <p>A row with no recorded basename to compare (e.g. {@code video_path} already NULL) can never
@@ -808,16 +825,19 @@ public class CrashRecoveryRunner implements ApplicationRunner {
         if (!remainder.equals(rowVideo.getFileName().toString())) {
             return false;
         }
-        if (storedSize == null) {
-            return true; // no recorded size to compare; the basename match is the best attribution left
+        // With no recorded size to compare, the basename match and the file's end are all that's left.
+        if (storedSize != null) {
+            try {
+                if (Files.size(file) != storedSize) {
+                    return false;
+                }
+            } catch (Exception e) {
+                // Can't confirm the size matches -> don't claim the file for the row.
+                log.warn("Could not stat archive leftover {} for {}: {}", file, owner, e.toString());
+                return false;
+            }
         }
-        try {
-            return Files.size(file) == storedSize;
-        } catch (Exception e) {
-            // Can't confirm the size matches -> don't claim the file for the row.
-            log.warn("Could not stat archive leftover {} for {}: {}", file, owner, e.toString());
-            return false;
-        }
+        return isCompleteCopy(file, null);
     }
 
     /**
@@ -883,34 +903,89 @@ public class CrashRecoveryRunner implements ApplicationRunner {
     }
 
     /**
-     * Deletes {@code file}, unreferenced in the folder the archiver moves recordings off, when it is
-     * provably the source of a row's archived copy, and returns whether it was. The archiver copies a
-     * recording across drives, checks the copy's size, repoints the row at it and only then deletes the
-     * source, so a delete that failed (another program holding the file, say) leaves the source with no
-     * row. A file named as a row's archived copy is less its {@code <matchId>-}, in another folder, and
-     * the same size is that source: the attribution is exact, so it needs no adoption floor, which the
-     * source's original modification time would fail. Nothing else would ever reclaim it, and no row
-     * counts it against a drive's cap. A delete that fails is tried again next boot; the file is never
-     * imported.
+     * Settles {@code file}, unreferenced in the folder the archiver moves recordings off, when it is
+     * the source of a row's archived copy, and returns whether it did: then it is never imported. The
+     * archiver copies a recording across drives, checks the copy's size, repoints the row at it and
+     * only then deletes the source, so a delete that failed (another program holding the file, say)
+     * leaves the source with no row. A file named as a row's archived copy is less its {@code
+     * <matchId>-}, in another folder, and the same size is that source, and then:
+     *
+     * <ul>
+     *   <li>when the copy is complete ({@link #isCompleteCopy}), {@code file} is deleted whatever its
+     *       age: the attribution is exact, so it needs no adoption floor, which the source's original
+     *       modification time would fail. Nothing else would ever reclaim it, and no row counts it
+     *       against a drive's cap. A delete that fails is tried again next boot;</li>
+     *   <li>when it isn't and {@code file} ends in data, the row goes back on {@code file}, the only
+     *       good copy: an earlier boot re-linked it to a copy cut short while {@code file}'s drive
+     *       was out. The copy is then move residue, which a later boot drops.</li>
+     * </ul>
+     *
+     * <p>A row is put back before any file is deleted, and when in doubt nothing is. With {@code
+     * thumbnail} the copies are thumbnails, and a row goes back on its thumbnail alone. The caller
+     * hands over only recorder-named files, or thumbnails.
      */
-    private boolean deleteIfArchivedSource(Path file, Map<String, List<ArchivedCopy>> copiesByName) {
+    private boolean settleArchivedSource(
+            Path file, Map<String, List<ArchivedCopy>> copiesByName, boolean thumbnail) {
         List<ArchivedCopy> copies = copiesByName.get(file.getFileName().toString());
         if (copies == null) {
             return false;
         }
+        ArchivedCopy complete = null;
+        Boolean fileEndsInData = null;
         for (ArchivedCopy copy : copies) {
-            if (isSourceOf(file, copy.path())) {
+            if (!isSourceOf(file, copy.path())) {
+                continue;
+            }
+            if (isCompleteCopy(copy.path(), file)) {
+                complete = complete == null ? copy : complete;
+                continue;
+            }
+            if (fileEndsInData == null) {
+                fileEndsInData = endsInData(file);
+            }
+            if (fileEndsInData) {
                 try {
-                    Files.deleteIfExists(file);
-                    log.warn("Removed {}, left behind when it was archived to {}", file, copy.path());
-                } catch (Exception e) {
-                    log.warn("Could not remove {}, left behind when it was archived to {}: {}",
-                            file, copy.path(), e.toString());
+                    if (putBackOnOriginal(copy, file, thumbnail)) {
+                        return true;
+                    }
+                } catch (RuntimeException e) {
+                    log.warn("Could not put match {} back on {}, the original of its archived copy {}; the"
+                            + " next boot tries again: {}", copy.rowId(), file, copy.path(), e.toString());
+                    return true;
                 }
-                return true;
             }
         }
-        return false;
+        if (complete == null) {
+            return false;
+        }
+        try {
+            Files.deleteIfExists(file);
+            log.warn("Removed {}, left behind when it was archived to {}", file, complete.path());
+        } catch (Exception e) {
+            log.warn("Could not remove {}, left behind when it was archived to {}: {}",
+                    file, complete.path(), e.toString());
+        }
+        return true;
+    }
+
+    /**
+     * Puts the row that owns {@code copy} back on {@code original}, the file the copy was made from,
+     * if the row still points at the copy: its video, or with {@code thumbnail} its thumbnail. Returns
+     * whether it did.
+     */
+    private boolean putBackOnOriginal(ArchivedCopy copy, Path original, boolean thumbnail) {
+        MatchSummary row = matches.findById(copy.rowId()).orElse(null);
+        Path current = row == null ? null : safePath(thumbnail ? row.thumbPath() : row.videoPath());
+        if (current == null || !normalize(current).equals(normalize(copy.path()))) {
+            return false;
+        }
+        matches.updateVideoPath(
+                row.id(),
+                thumbnail ? row.videoPath() : original.toString(),
+                thumbnail ? original.toString() : row.thumbPath());
+        log.warn("Put match {} back on {}: {}, the archived copy it was on, is not a complete copy of it",
+                row.id(), original, copy.path());
+        return true;
     }
 
     /** Whether {@code file} and {@code copy} sit in different folders and are the same size. */
@@ -928,11 +1003,74 @@ public class CrashRecoveryRunner implements ApplicationRunner {
         }
     }
 
+    /** How much of a file the completeness check reads at its end, and at its start and middle. */
+    private static final int SAMPLE_BYTES = 64 * 1024;
+
     /**
-     * The thumbnails' counterpart of {@link #deleteIfArchivedSource}: the archiver moves a recording's
+     * Whether {@code copy} is a complete copy: its last 64 KiB are not all zeros, and when the {@code
+     * original} it was made from is given, its first, middle and last 64 KiB are the original's. A
+     * name and a size prove nothing: every 0.1.x archiver before the {@code .partial} copy wrote its
+     * copy straight under the final {@code <id>-<name>} with Files.copy, which on Windows is
+     * CopyFileEx, and that sizes the destination to full length before it writes to it. So a copy cut
+     * short (a quit, an unattended update, Windows shutting down) is full size with a zeroed tail,
+     * which no finished recording or thumbnail has. A file that can't be read counts as incomplete.
+     */
+    private static boolean isCompleteCopy(Path copy, Path original) {
+        return endsInData(copy) && (original == null || sampledBytesMatch(copy, original));
+    }
+
+    /** Whether the last 64 KiB of {@code file} hold anything but zeros; false when it can't be read. */
+    private static boolean endsInData(Path file) {
+        try (FileChannel bytes = FileChannel.open(file, StandardOpenOption.READ)) {
+            for (byte b : sample(bytes, Math.max(0L, bytes.size() - SAMPLE_BYTES))) {
+                if (b != 0) {
+                    return true;
+                }
+            }
+            return false;
+        } catch (IOException | RuntimeException e) {
+            return false;
+        }
+    }
+
+    /** Whether {@code a} and {@code b} are the same size and alike at their start, middle and end. */
+    private static boolean sampledBytesMatch(Path a, Path b) {
+        try (FileChannel first = FileChannel.open(a, StandardOpenOption.READ);
+                FileChannel second = FileChannel.open(b, StandardOpenOption.READ)) {
+            long size = first.size();
+            if (second.size() != size) {
+                return false;
+            }
+            long[] offsets = {
+                0L, Math.max(0L, size / 2 - SAMPLE_BYTES / 2), Math.max(0L, size - SAMPLE_BYTES)
+            };
+            for (long at : offsets) {
+                if (!Arrays.equals(sample(first, at), sample(second, at))) {
+                    return false;
+                }
+            }
+            return true;
+        } catch (IOException | RuntimeException e) {
+            return false;
+        }
+    }
+
+    /** Up to {@link #SAMPLE_BYTES} of {@code file} from {@code at}: fewer only at its end. */
+    private static byte[] sample(FileChannel file, long at) throws IOException {
+        ByteBuffer buffer = ByteBuffer.allocate((int) Math.max(0L, Math.min(SAMPLE_BYTES, file.size() - at)));
+        while (buffer.hasRemaining()) {
+            if (file.read(buffer, at + buffer.position()) <= 0) {
+                break; // the file ended
+            }
+        }
+        return Arrays.copyOf(buffer.array(), buffer.position());
+    }
+
+    /**
+     * The thumbnails' counterpart of {@link #settleArchivedSource}: the archiver moves a recording's
      * thumbnail off {@code <videoDir>/thumbs} alongside it, deleting the source after the same repoint.
      */
-    private void deleteArchivedThumbSources(Path videoDir, ArchivedCopies archived) {
+    private void settleArchivedThumbSources(Path videoDir, ArchivedCopies archived) {
         if (videoDir == null || archived.thumbs().isEmpty()) {
             return;
         }
@@ -944,7 +1082,7 @@ public class CrashRecoveryRunner implements ApplicationRunner {
             try (Stream<Path> stream = Files.list(thumbDir)) {
                 stream.filter(Files::isRegularFile)
                         .filter(path -> !archived.referencedThumbs().contains(normalize(path)))
-                        .forEach(path -> deleteIfArchivedSource(path, archived.thumbs()));
+                        .forEach(path -> settleArchivedSource(path, archived.thumbs(), true));
             }
         } catch (Exception e) {
             log.warn("Could not check {} for archived thumbnails' sources: {}", thumbDir, e.toString());
@@ -958,8 +1096,9 @@ public class CrashRecoveryRunner implements ApplicationRunner {
      * <ul>
      *   <li>if the clip row lost its file (a same-filesystem rename consumed the source before the
      *       repoint committed), RE-LINK the row to this recovered copy — but only when the file is
-     *       ATTRIBUTABLE to the row ({@link #isAttributableToLostVideo}: original basename and, when
-     *       recorded, size), so a user-placed prefix collision never becomes the clip's video;</li>
+     *       ATTRIBUTABLE to the row ({@link #isAttributableToLostVideo}: original basename, when
+     *       recorded, size, and a copy not cut short), so a user-placed prefix collision never becomes
+     *       the clip's video;</li>
      *   <li>if the clip is already intact AND the file is provably its move residue (same
      *       basename/size attribution as the match path), this is a redundant copy from the
      *       interrupted move — DELETE it to reclaim the space.</li>
@@ -1088,8 +1227,10 @@ public class CrashRecoveryRunner implements ApplicationRunner {
             return stream.filter(Files::isRegularFile)
                     .filter(p -> p.getFileName().toString().startsWith(prefix))
                     // A ".partial" is the archiver's copy still in flight, cut short if the app died
-                    // mid-copy, so it is never the thumb.
+                    // mid-copy, so it is never the thumb; nor is an older archiver's copy cut short,
+                    // full size under the final name with a zeroed tail (see isCompleteCopy).
                     .filter(p -> !p.getFileName().toString().endsWith(".partial"))
+                    .filter(p -> isCompleteCopy(p, null))
                     // Files.list is unordered; sort by name so a same-owner multi-match (a leftover from
                     // a prior interrupted move alongside the current thumb) resolves deterministically.
                     .sorted(java.util.Comparator.comparing(p -> p.getFileName().toString()))
