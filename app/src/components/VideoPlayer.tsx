@@ -658,15 +658,17 @@ export function VideoPlayer({
       setClips((prev) => prev.filter((c) => c.id !== clip.id));
       // The strip above is player-local; refresh the store so the library "Clips" bucket list and the
       // sidebar badge drop the deleted clip immediately (the core also publishes a clip.deleted frame,
-      // which the store follows too, but this local reload doesn't wait for the round-trip).
-      void reloadLibrary();
+      // which the store follows too, but this local reload doesn't wait for the round-trip). Silent,
+      // so the table's rows stay up while it runs.
+      void reloadLibrary({ silent: true });
     } catch {
       /* leave the row; the next clip.* frame / re-select reconciles */
     }
   }
 
   // Star/unstar a clip: a starred clip is exempt from the retention sweep. Optimistic flip with revert
-  // on failure; refresh the library so the Clips bucket reflects the new star state.
+  // on failure; refresh the library (silently, rows kept up) so the Clips bucket reflects the new star
+  // state.
   async function onToggleClipStar(clip: Clip): Promise<void> {
     const next = !clip.starred;
     // Bump so an in-flight clip fetch can't resolve afterward and revert the optimistic flip.
@@ -674,7 +676,7 @@ export function VideoPlayer({
     setClips((prev) => prev.map((c) => (c.id === clip.id ? { ...c, starred: next } : c)));
     try {
       await setClipStarred(clip.id, next);
-      void reloadLibrary();
+      void reloadLibrary({ silent: true });
     } catch {
       setClips((prev) => prev.map((c) => (c.id === clip.id ? { ...c, starred: clip.starred } : c)));
     }
