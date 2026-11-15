@@ -72,20 +72,21 @@ check(
   'electron-builder.yml: nsis.artifactName must expand to a space-free name — avoid ${productName}/${name} (they expand to a spaced/scoped value) and literal whitespace, or the on-disk .exe diverges from latest.yml and 404s the updater.',
 );
 
-// --- installer script: every program it starts named by its full path, every cmd given /d --------
+// --- installer hooks: every program they start named by its full path, every cmd given /d --------
 // Windows can find a program named without a path in the installer's own folder (Downloads, for a
 // downloaded installer) or the folder it works in (the install folder, which the user can write to)
 // before the system's. Anything the user ran could leave a cmd.exe or a netsh.exe there for the
-// installer to start instead, and the firewall step starts both elevated. So everything the
-// installer starts, and everything a cmd line it starts runs, has to be named by its full path.
-// This ports the Go remake's guard (build/windows/installer_windows_test.go); this reader also
-// reads the switches cmd is given before its /c, NSIS's comments, LogicLib's one-liners, and cmd's
-// quotes, escapes, redirections, groups and own commands.
+// installer to start instead, and the firewall step starts both elevated. So everything the hooks
+// in build-resources start, and everything a cmd line they start runs, has to be named by its full
+// path. This ports the Go remake's guard (build/windows/installer_windows_test.go); this reader
+// also reads the switches cmd is given before its /c, NSIS's comments, LogicLib's one-liners, and
+// cmd's quotes, escapes, redirections, groups and own commands.
 //
-// Every cmd the installer starts also has to be given /d before its /c. Without it cmd first runs
-// the AutoRun commands in the registry, and anything the user runs can set HKCU's. The firewall
-// step's cmd runs elevated ("runas"), and an install for every user of the PC runs the whole
-// installer elevated, so any cmd it starts could run them with administrator rights.
+// Every cmd the hooks start also has to be given /d before its /c. Without it cmd first runs the
+// AutoRun commands in the registry, and anything the user runs can set HKCU's. The firewall step's
+// cmd runs elevated ("runas"), and in an install or uninstall for every user of the PC the hooks
+// run elevated themselves, so any cmd they start could run those commands with administrator
+// rights.
 //
 // The check reads Exec, ExecWait, ExecShell, ExecShellWait and nsExec::Exec, ExecToLog and
 // ExecToStack, each on a line of its own or as the statement of a LogicLib one-liner (${IfThen},
@@ -95,6 +96,12 @@ check(
 // a plugin, a !define, System::Call or a macro from outside build-resources (StdUtils' or UAC's).
 // Nor does it read what a program other than cmd runs (a PowerShell command, say). A command run
 // through cmd's call, start, if or for fails the check, since the check doesn't read it.
+//
+// And it reads only the scripts in build-resources, where the hooks are, not the templates
+// electron-builder makes the rest of the installer from, which aren't ours to change. Their check
+// for a running app, for one, starts PowerShell without -NoProfile, or cmd without /d running
+// tasklist and taskkill by bare names, and in an install or uninstall for every user it can run
+// elevated.
 const buildResources = path.join(repoRoot, 'build-resources');
 
 // The folders a program may be named from: the system's, and the ones the installer fills itself.
@@ -554,8 +561,8 @@ for (const file of readdirSync(buildResources).filter((n) => /\.ns[ih]$/i.test(n
     failures.push(`build-resources/${file}:${number} ${problemMessages[problem](name)}`);
   }
 }
-// The installer edits the firewall on install and on uninstall, each time through cmd and netsh, so
-// a check that found fewer than four programs isn't reading the script.
+// The hooks edit the firewall on install and on uninstall, each time through cmd and netsh, so a
+// check that found fewer than four programs isn't reading the script.
 check(
   programsFound >= 4,
   `the installer check found only ${programsFound} programs started by the NSIS scripts in build-resources; is programsStarted still reading them?`,
