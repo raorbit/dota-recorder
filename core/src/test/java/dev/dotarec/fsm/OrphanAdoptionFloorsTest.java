@@ -151,6 +151,40 @@ class OrphanAdoptionFloorsTest {
     }
 
     @Test
+    void aPlanReadsTheVideoFolderOnceAndKeepsWhetherItCould(@TempDir Path dir) throws Exception {
+        // One read decides both the video folder's first floor and whether a crashed recording waits
+        // for a boot that can read the folder, so the two can't disagree; it is read floored or not.
+        Path video = dir.resolve("video");
+        Path archive = dir.resolve("archive");
+        OrphanAdoptionFloors floors = new OrphanAdoptionFloors(dir.resolve("data"));
+        List<Path> read = new java.util.ArrayList<>();
+        Function<Path, OptionalLong> videoNotReady =
+                root -> {
+                    read.add(root);
+                    return root.equals(video) ? OptionalLong.empty() : OptionalLong.of(Long.MIN_VALUE);
+                };
+
+        OrphanAdoptionFloors.Plan unfloored = floors.plan(video, List.of(archive), 50_000L, 50_000L, videoNotReady);
+
+        assertThat(unfloored.cantReadVideoDir()).isTrue();
+        assertThat(read).containsExactly(video, archive);
+        assertThat(unfloored.save(false).of(video)).isEqualTo(OrphanAdoptionFloors.Floor.NONE);
+        scan(floors, video, List.of(archive), 60_000L, HOLDS_NOTHING);
+        read.clear();
+        OrphanAdoptionFloors.Plan floored = floors.plan(video, List.of(archive), 70_000L, 70_000L, videoNotReady);
+        assertThat(floored.cantReadVideoDir()).isTrue();
+        assertThat(read).containsExactly(video);
+        assertThat(floored.linkFloorOf(video)).isEqualTo(new OrphanAdoptionFloors.Floor(60_000L, true));
+        assertThat(floors.plan(video, List.of(archive), 70_000L, 70_000L, HOLDS_NOTHING).cantReadVideoDir())
+                .isFalse();
+        // With no video folder set there is nothing to wait for; with no data folder the answer stands.
+        assertThat(floors.plan(null, List.of(archive), 70_000L, 70_000L, videoNotReady).cantReadVideoDir())
+                .isFalse();
+        assertThat(new OrphanAdoptionFloors(null).plan(video, List.of(), 0L, 0L, videoNotReady).cantReadVideoDir())
+                .isTrue();
+    }
+
+    @Test
     void withoutADataFolderNothingIsAdmitted(@TempDir Path dir) {
         OrphanAdoptionFloors.Plan plan = new OrphanAdoptionFloors(null).plan(dir, List.of(), 0L, 0L, HOLDS_NOTHING);
 
