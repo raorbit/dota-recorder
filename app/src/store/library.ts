@@ -225,15 +225,17 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
     if (get().loadState === 'loading') set({ loadState: 'ready' });
   };
 
-  // Sends each recording's delete in turn, past any that fails (the rest still go), then lands what
-  // they did in ONE update and refreshes the counts once. Pessimistic: each row is mirrored only once
-  // the SERVER said which branch it took (it decides stub-vs-delete from the clip table under its
-  // maintenance lock; our own clips list can lag it by the ~200ms clip.created reload window, so
-  // guessing locally can drop a row the server stubbed). Only a missing outcome (older core) falls back
-  // to the local guess, and a delete the core queued is mirrored once its match.deleted frame says what
-  // it did. Every row is in deletingMatchIds from the start until the whole run is done, and one the
-  // core queued is then in queuedMatchIds. The run's failures are reported in the banner together and
-  // reconciled with a reload. Returns them.
+  // Sends every recording's delete at once, so each reaches the core even if this window closes
+  // before the answers come; the core makes at most one of them wait for its maintenance lock and
+  // queues the rest straight away. One that fails doesn't stop the others. What they did lands in ONE
+  // update with one counts refresh. Pessimistic: each row is mirrored only once the SERVER said which
+  // branch it took (it decides stub-vs-delete from the clip table under its maintenance lock; our own
+  // clips list can lag it by the ~200ms clip.created reload window, so guessing locally can drop a row
+  // the server stubbed). Only a missing outcome (older core) falls back to the local guess, and a
+  // delete the core queued is mirrored once its match.deleted frame says what it did. Every row is in
+  // deletingMatchIds from the start until the whole run is done, and one the core queued is then in
+  // queuedMatchIds. The run's failures are reported in the banner together and reconciled with a
+  // reload. Returns them.
   const runMatchDeletes = async (ids: readonly number[]): Promise<readonly unknown[]> => {
     set((s) => ({ deletingMatchIds: withIds(s.deletingMatchIds, ids), deleteError: null }));
     const removed = new Set<number>();
@@ -242,22 +244,24 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
     const queued = new Set<number>();
     const refused = new Set<number>();
     const errors: unknown[] = [];
-    for (const id of ids) {
-      try {
-        const outcome = await apiDeleteMatch(id);
-        (outcome === 'deleted'
-          ? removed
-          : outcome === 'stubbed'
-            ? stubbed
-            : outcome === 'queued'
-              ? queued
-              : unknown
-        ).add(id);
-      } catch (err) {
-        errors.push(err); // skip this one; the rest still delete
-        if (!isRequestTimeout(err)) refused.add(id);
+    const answers = await Promise.allSettled(ids.map((id) => apiDeleteMatch(id)));
+    answers.forEach((answer, i) => {
+      const id = ids[i];
+      if (answer.status === 'rejected') {
+        errors.push(answer.reason);
+        if (!isRequestTimeout(answer.reason)) refused.add(id);
+        return;
       }
-    }
+      const outcome = answer.value;
+      (outcome === 'deleted'
+        ? removed
+        : outcome === 'stubbed'
+          ? stubbed
+          : outcome === 'queued'
+            ? queued
+            : unknown
+      ).add(id);
+    });
     const done = new Set([...removed, ...stubbed, ...unknown]);
     // A coalesced match.* frame fires load() every ~200ms, so a load() that fetched the list BEFORE
     // these deletes committed server-side may still be in flight; invalidate it so it can't resurrect
@@ -299,14 +303,16 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
     const queued = new Set<number>();
     const refused = new Set<number>();
     const errors: unknown[] = [];
-    for (const id of ids) {
-      try {
-        ((await apiDeleteClip(id)) === 'queued' ? queued : removed).add(id);
-      } catch (err) {
-        errors.push(err); // skip this one; the rest still delete
-        if (!isRequestTimeout(err)) refused.add(id);
+    const answers = await Promise.allSettled(ids.map((id) => apiDeleteClip(id)));
+    answers.forEach((answer, i) => {
+      const id = ids[i];
+      if (answer.status === 'rejected') {
+        errors.push(answer.reason);
+        if (!isRequestTimeout(answer.reason)) refused.add(id);
+        return;
       }
-    }
+      (answer.value === 'queued' ? queued : removed).add(id);
+    });
     if (removed.size > 0) invalidatePendingLoad();
     set((s) => ({
       ...(removed.size > 0 ? applyClipsDeleted(s, removed) : {}),
@@ -420,10 +426,8 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
       if (errors.length > 0) throw errors[0];
     },
 
-    // Bulk-delete (table multi-select): each delete in turn — sequentially, so at most one of them
-    // waits on the core's maintenance lock (it answers within about half a minute, queueing the delete
-    // if the lock stays held, and queues the rest at once behind it) — past any that fails, so the rest
-    // still go. See runMatchDeletes.
+    // Bulk-delete (table multi-select): every delete at once, past any that fails. See
+    // runMatchDeletes.
     deleteMatches: async (ids) => {
       await runMatchDeletes(ids);
     },
