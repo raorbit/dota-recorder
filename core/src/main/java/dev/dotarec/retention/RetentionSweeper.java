@@ -23,6 +23,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.BooleanSupplier;
 
 /**
  * Enforces the disk budget for recorded VODs (modeled on Warcraft Recorder).
@@ -350,41 +351,57 @@ public class RetentionSweeper {
                     // maintenance lock, so a row starred between the candidate snapshot and this turn
                     // must win. The claim's WHERE re-tests starred=0 (and that the row still points at
                     // the snapshotted file) in the same UPDATE that prunes the paths — no
-                    // check-then-unlink window remains. The claim also prunes the VOD row only
-                    // (markers/stats survive with nulled paths); its clips are NOT cascade-deleted:
-                    // clips are standalone files, kept and evicted LAST — after every non-starred
-                    // VOD — in the clip phase below.
-                    if (!matches.claimForSweep(m.id(), m.videoPath())) {
-                        continue; // starred (or repointed/pruned) since the snapshot — not deletable
+                    // check-then-unlink window remains — and the unlink runs inside that UPDATE's
+                    // transaction, which commits only once the file is gone: a failed unlink rolls the
+                    // prune back, so the row keeps referencing its intact VOD and the next sweep
+                    // retries, and a process ended part way never leaves a pruned row whose file is
+                    // still on disk. The claim also prunes the VOD row only (markers/stats survive with
+                    // nulled paths); its clips are NOT cascade-deleted: clips are standalone files,
+                    // kept and evicted LAST — after every non-starred VOD — in the clip phase below.
+                    VideoUnlink unlink = new VideoUnlink(m.videoPath());
+                    boolean pruned;
+                    try {
+                        pruned = matches.claimForSweep(m.id(), m.videoPath(), unlink);
+                    } catch (RuntimeException e) {
+                        if (!unlink.gone) {
+                            throw e; // nothing changed: logged below, and the next sweep retries
+                        }
+                        // The video is gone but its prune didn't commit (an I/O error or a full disk
+                        // under the database), so the row still points at the vanished file until the
+                        // missing-file reconcile catches it up. The bytes ARE gone: credit them below,
+                        // or this pass would go on evicting VODs to offset them — every one of them,
+                        // if no commit can land. freed/deletedIds stay uncredited, as nothing was
+                        // fully evicted.
+                        log.warn("Retention sweep deleted match {}'s video but could not prune its row: {}",
+                                m.id(), e.toString());
+                        pruned = false;
                     }
-                    boolean videoGone = deleteFileQuietly(m.videoPath());
-                    if (!videoGone) {
-                        // The file is still on disk: undo the claim so the row keeps referencing its
-                        // intact VOD and the next sweep retries — never an invisibly orphaned file. The
-                        // thumbnail is deliberately left untouched here — it is unlinked only AFTER the
-                        // video delete is confirmed below. Unlinking it first would strand a dangling
-                        // thumb_path: restoreVideoPath puts the (now-deleted) thumb path back on the row.
-                        matches.restoreVideoPath(m.id(), m.videoPath(), m.thumbPath(), m.fileSizeBytes());
-                        log.warn("Retention sweep left match {} intact because video deletion failed", m.id());
-                        continue;
+                    if (!unlink.gone) {
+                        if (unlink.attempted) {
+                            // The file is still on disk and the claim rolled back. The thumbnail is
+                            // deliberately left untouched — it is unlinked only AFTER the video delete
+                            // is confirmed below, so a failed video delete (e.g. a locked .mp4) never
+                            // leaves the row pointing at a deleted thumb.
+                            log.warn("Retention sweep left match {} intact because video deletion failed", m.id());
+                        }
+                        continue; // starred (or repointed/pruned) since the snapshot, or still on disk
                     }
                     total -= size;
-                    // Video gone for good: only NOW unlink the thumbnail. Deferring it past the confirmed
-                    // video delete means a failed video delete (e.g. a locked .mp4) never leaves a
-                    // deleted thumb behind a restored thumb_path.
+                    // Video gone for good: only NOW unlink the thumbnail.
                     boolean thumbGone = deleteFileQuietly(m.thumbPath());
                     if (!thumbGone) {
                         log.warn(
                                 "Retention sweep could not delete thumbnail for match {}; pruning video row anyway",
                                 m.id());
                     }
-                    deletedIds.add(m.id());
-                    freed += size;
+                    if (pruned) {
+                        deletedIds.add(m.id());
+                        freed += size;
+                    }
                 } catch (RuntimeException e) {
                     // One match failing (e.g. a SQLITE_BUSY on the claim) must not abort the whole
-                    // pass: log and keep evicting. A failed claim changed nothing and retries next
-                    // sweep; a failed claim-RESTORE (two DB failures back to back) leaves a pruned row
-                    // whose intact file needs manual re-linking — rare enough to log, not to handle.
+                    // pass: log and keep evicting. A failed claim changed nothing — its prune rolls
+                    // back with it — and retries next sweep.
                     log.warn("Retention sweep could not evict match {}: {}", m.id(), e.toString());
                 }
             }
@@ -814,6 +831,28 @@ public class RetentionSweeper {
         } catch (IOException | RuntimeException e) {
             log.warn("Could not stat {} during retention sweep: {}", path, e.toString());
             return new FileStat(dbSizeBytes != null ? dbSizeBytes : 0L, false, true);
+        }
+    }
+
+    /**
+     * The unlink {@link MatchRepository#claimForSweep} runs inside its transaction. It remembers
+     * whether it ran and whether the video is gone, so a database failure after it can be told from
+     * one before it.
+     */
+    private final class VideoUnlink implements BooleanSupplier {
+        private final String path;
+        private boolean attempted;
+        private boolean gone;
+
+        private VideoUnlink(String path) {
+            this.path = path;
+        }
+
+        @Override
+        public boolean getAsBoolean() {
+            attempted = true;
+            gone = deleteFileQuietly(path);
+            return gone;
         }
     }
 

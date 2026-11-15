@@ -12,6 +12,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
+import org.mockito.MockedStatic;
 
 import dev.dotarec.config.SettingsStore.StorageLocation;
 
@@ -24,13 +25,19 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BooleanSupplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
@@ -356,7 +363,7 @@ class RetentionSweeperTest {
     void failedVideoDeleteLeavesThumbnailIntactAndDoesNotDangleThumbPath() throws Exception {
         // F17: the oldest match's .mp4 can't be deleted (an open handle / locked file on Windows), but
         // its thumbnail IS a normal deletable file. The thumbnail must be unlinked ONLY AFTER the video
-        // delete is confirmed — otherwise the thumb is gone yet restoreVideoPath puts its path back on
+        // delete is confirmed — otherwise the thumb is gone yet the rolled-back claim leaves its path on
         // the row, a permanent dangling thumb_path. A newer real VOD pushes over cap so the undeletable
         // (oldest) match is tried first, then the pass continues to evict the real one.
         settings.get().retentionCapGb = 1;
@@ -379,6 +386,63 @@ class RetentionSweeperTest {
         // The pass was not aborted: the newer real VOD is still evicted.
         assertThat(matches.findById(realVod).orElseThrow().videoPath()).isNull();
         assertThat(Files.exists(videoDir.resolve("real.mp4"))).isFalse();
+    }
+
+    @Test
+    void aSweepCutOffDuringTheUnlink_leavesTheRowPointingAtItsFile() throws Exception {
+        // The app quits or installs an update mid-eviction, the process ended outright. Nothing the
+        // claim did may be on disk by then: a row pruned while its file is still there is counted and
+        // swept by nothing again, and the next boot no longer adopts a file from before its floor.
+        settings.get().retentionCapGb = 1;
+        long gib = 1024L * 1024 * 1024;
+        long oldest = seedWithFiles("old.mp4", "old.jpg", 2 * gib, 1_000L, false);
+        Path video = videoDir.resolve("old.mp4");
+
+        try (MockedStatic<Files> files = mockStatic(Files.class, CALLS_REAL_METHODS)) {
+            // A matcher, so the call that records the stub reaches the real method with no path.
+            files.when(() -> Files.deleteIfExists(eq(video))).thenThrow(new ProcessEnded());
+            assertThatThrownBy(() -> sweeper.sweep(null)).isInstanceOf(ProcessEnded.class);
+        }
+
+        assertThat(video).exists();
+        var row = matches.findById(oldest).orElseThrow();
+        assertThat(row.videoPath()).isEqualTo(video.toString());
+        assertThat(row.fileSizeBytes()).isEqualTo(2 * gib);
+    }
+
+    @Test
+    void aPruneThatFailsOnceTheVideoIsGone_stillCreditsItsBytes() throws Exception {
+        // The claim commits only after the unlink, so the commit can fail with the video already gone
+        // (an I/O error or a full disk under the database). Those bytes are gone all the same, and
+        // crediting them ends the pass where a clean one would end; otherwise it would go on evicting
+        // newer VODs to offset them, every one of them while no commit can land. The row keeps its
+        // path for the missing-file reconcile, and the thumbnail goes with its video.
+        settings.get().retentionCapGb = 2;
+        long gib = 1024L * 1024 * 1024;
+        long oldest = seedWithFiles("old.mp4", "old.jpg", 2 * gib, 1_000L, false);
+        seedWithFiles("mid.mp4", "mid.jpg", gib, 2_000L, false);
+        seedWithFiles("new.mp4", "new.jpg", gib, 3_000L, false);
+        MatchRepository noCommits = spy(matches);
+        doAnswer(inv -> {
+            BooleanSupplier unlink = inv.getArgument(2);
+            unlink.getAsBoolean();
+            throw new IllegalStateException("simulated SQLITE_FULL on commit");
+        }).when(noCommits).claimForSweep(anyLong(), anyString(), any());
+        RetentionSweeper failing = new RetentionSweeper(noCommits, clips, settings, events);
+
+        RetentionSweeper.SweepResult result = failing.sweep(null);
+
+        assertThat(videoDir.resolve("old.mp4")).doesNotExist();
+        assertThat(videoDir.resolve("old.jpg")).doesNotExist();
+        assertThat(matches.findById(oldest).orElseThrow().videoPath())
+                .isEqualTo(videoDir.resolve("old.mp4").toString());
+        assertThat(videoDir.resolve("mid.mp4"))
+                .as("no VOD is evicted to offset bytes already gone")
+                .exists();
+        assertThat(videoDir.resolve("new.mp4")).exists();
+        assertThat(result.deletedIds()).isEmpty();
+        assertThat(result.freedBytes()).isZero();
+        assertThat(result.totalAfterBytes()).isEqualTo(2 * gib);
     }
 
     @Test
@@ -1228,6 +1292,13 @@ class RetentionSweeperTest {
     private static void createSparseFile(Path path, long sizeBytes) throws Exception {
         try (RandomAccessFile file = new RandomAccessFile(path.toFile(), "rw")) {
             file.setLength(sizeBytes);
+        }
+    }
+
+    /** Stands in for the process being ended mid-call: an Error, which nothing in the sweep catches. */
+    private static final class ProcessEnded extends Error {
+        ProcessEnded() {
+            super("process ended");
         }
     }
 }

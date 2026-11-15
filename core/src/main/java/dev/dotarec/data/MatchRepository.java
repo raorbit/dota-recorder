@@ -13,6 +13,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.BooleanSupplier;
 
 /**
  * Plain-JDBC read/write access to the {@code matches} table. JOOQ is a documented TODO (plan stack);
@@ -251,25 +252,61 @@ public class MatchRepository {
     }
 
     /**
-     * Atomically claims a sweep candidate for eviction: prunes the row exactly like
-     * {@link #nullVideoPath} but ONLY while it is still non-starred AND still points at the video the
-     * sweeper snapshotted. Both guards live in the WHERE so the starred re-check and the prune are
-     * one statement, not a read-then-write: a star PATCH that commits between the sweeper's candidate
-     * snapshot and this row's eviction turn wins — the claim matches nothing and the file is never
-     * unlinked. The {@code video_path} guard likewise refuses a row that was repointed or already
-     * pruned since the snapshot.
+     * Atomically claims a sweep candidate for eviction and has {@code unlink} delete its video: prunes
+     * the row exactly like {@link #nullVideoPath} but ONLY while it is still non-starred AND still
+     * points at the video the sweeper snapshotted, and the prune is durable only once the video is
+     * gone. Both guards live in the WHERE so the starred re-check and the prune are one statement, not
+     * a read-then-write: a star PATCH that commits between the sweeper's candidate snapshot and this
+     * row's eviction turn wins — the claim matches nothing and {@code unlink} never runs. The
+     * {@code video_path} guard likewise refuses a row that was repointed or already pruned since the
+     * snapshot.
      *
-     * @return true only if THIS call claimed (pruned) the row; the caller may then unlink the file
+     * <p>The UPDATE and the unlink share one transaction, committed only when {@code unlink} reports
+     * the video gone and rolled back otherwise, so a failed unlink leaves the row referencing its
+     * intact file. A process ended in between leaves the row pointing at its file, or at nothing if
+     * the unlink got through, which the sweeper's missing-file reconcile catches up — never a pruned
+     * row whose file is still on disk, which nothing would count or sweep again. A star PATCH that
+     * arrives during the unlink waits for the write lock this transaction holds, and stars a row whose
+     * file is gone. The lock is held for the UPDATE, the unlink and the commit and no longer, and
+     * {@code unlink} must not touch the database.
+     *
+     * @param unlink deletes the row's video and reports whether it is gone
+     * @return true only if THIS call claimed the row, {@code unlink} removed its video, and the prune
+     *     committed
+     * @throws IllegalStateException when the database fails, which can be after {@code unlink} has
+     *     run (a failed commit), so the video may be gone either way
      */
-    public boolean claimForSweep(long id, String videoPath) {
+    public boolean claimForSweep(long id, String videoPath, BooleanSupplier unlink) {
         String sql = "UPDATE matches "
                 + "SET video_path = NULL, thumb_path = NULL, file_size_bytes = NULL "
                 + "WHERE id = ? AND starred = 0 AND video_path = ?";
-        try (Connection conn = dataSource.getConnection();
-             PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setLong(1, id);
-            ps.setString(2, videoPath);
-            return ps.executeUpdate() == 1;
+        try (Connection conn = dataSource.getConnection()) {
+            conn.setAutoCommit(false);
+            boolean pruned = false;
+            try {
+                boolean claimed;
+                try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                    ps.setLong(1, id);
+                    ps.setString(2, videoPath);
+                    claimed = ps.executeUpdate() == 1;
+                }
+                if (claimed && unlink.getAsBoolean()) {
+                    conn.commit();
+                    pruned = true;
+                }
+            } finally {
+                try {
+                    if (!pruned) {
+                        // Refused, kept, or failed part way (the unlink or the commit threw): the prune
+                        // must not outlive this call. Restoring auto-commit below commits whatever
+                        // transaction is still open, so this has to come first.
+                        conn.rollback();
+                    }
+                } finally {
+                    conn.setAutoCommit(true);
+                }
+            }
+            return pruned;
         } catch (SQLException e) {
             throw new IllegalStateException("Failed to claim match " + id + " for sweep", e);
         }
@@ -296,29 +333,6 @@ public class MatchRepository {
             return ps.executeUpdate();
         } catch (SQLException e) {
             throw new IllegalStateException("Failed to reconcile missing video for match " + id, e);
-        }
-    }
-
-    /**
-     * Undoes {@link #claimForSweep} after the file unlink FAILED: restores the snapshotted paths and
-     * size so the row keeps referencing its intact on-disk VOD and the next sweep can retry — the
-     * alternative is an invisibly orphaned file. Unconditional on purpose: it only runs moments
-     * after this pass's own successful claim, under the storage maintenance lock.
-     *
-     * @return rows updated (0 if no such match)
-     */
-    public int restoreVideoPath(long id, String videoPath, String thumbPath, Long fileSizeBytes) {
-        String sql = "UPDATE matches SET video_path = ?, thumb_path = ?, file_size_bytes = ? "
-                + "WHERE id = ?";
-        try (Connection conn = dataSource.getConnection();
-             PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, videoPath);
-            ps.setString(2, thumbPath);
-            setNullableLong(ps, 3, fileSizeBytes);
-            ps.setLong(4, id);
-            return ps.executeUpdate();
-        } catch (SQLException e) {
-            throw new IllegalStateException("Failed to restore video path for match " + id, e);
         }
     }
 
