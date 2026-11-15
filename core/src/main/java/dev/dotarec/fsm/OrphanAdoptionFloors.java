@@ -12,7 +12,6 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
@@ -59,9 +58,13 @@ import org.slf4j.LoggerFactory;
  * held to its recording's own window. The reach-back is never stored, and the folder's floor is the
  * scan's like any other, because the floor also gates the import of unclaimed orphans: stored, it
  * would admit every default-named file the user's own OBS wrote there from the crashed match on. So
- * a recording whose recovery fails on that boot can't link a file from before the floor on a later
- * one; the file stays on disk. An existing floor is never lowered, and archive drives aren't
- * recorded into, so they never reach back.
+ * the floors are worked out before the journal is replayed but saved only after it ({@link Plan}):
+ * when such a recording is still unrecovered then (its recovery rolled back), the folder's first
+ * floor isn't saved and the folder adopts nothing this boot, so the next boot reaches back again.
+ * A video folder the scan can't read gets no floor, as above, and the recordings that need it wait
+ * in the journal for a boot that can read it. The link itself needs no saved floor: a floor that
+ * isn't saved only comes later next time. An existing floor is never lowered, and archive drives
+ * aren't recorded into, so they never reach back.
  *
  * <p>The floors live in their own file in the data folder, never in {@code settings.json}: that
  * file is shared ground with the Go remake, and a 0.1.x from before the settings loader kept keys it
@@ -99,67 +102,139 @@ final class OrphanAdoptionFloors {
     }
 
     /**
-     * One scan's floors. Null floors admit nothing: a scan that couldn't save its floors adopts
-     * nothing at all, the safe side in every case.
+     * The floors one scan's imports are held to, as saved. Null floors admit nothing: a scan that
+     * couldn't save its floors adopts nothing at all, the safe side in every case.
      */
     static final class Snapshot {
         private final Map<String, Long> floors;
-        /** Earlier floors for linking alone, by root key, for roots that got their floor this scan. */
-        private final Map<String, Long> linkFrom;
 
-        private Snapshot(Map<String, Long> floors, Map<String, Long> linkFrom) {
+        private Snapshot(Map<String, Long> floors) {
             this.floors = floors;
-            this.linkFrom = linkFrom;
         }
 
         private static Snapshot none() {
-            return new Snapshot(null, Map.of());
+            return new Snapshot(null);
         }
 
         /** The root's floor, which every adoption is held to. */
         Floor of(Path root) {
-            if (floors == null || root == null) {
-                return Floor.NONE;
-            }
-            try {
-                Long from = floors.get(key(root));
-                return from == null ? Floor.NONE : new Floor(from, true);
-            } catch (RuntimeException | java.io.IOError e) {
-                // An unresolvable root has no floor; a boot-time runner must never throw for one.
-                return Floor.NONE;
-            }
-        }
-
-        /**
-         * The floor a link to a crashed recording is held to: {@link #of}, or earlier for a video
-         * folder that got its floor in this very scan while the journal held a pathless recording that
-         * started before it (see the class notes). Only the link may use it.
-         */
-        Floor linkFloorOf(Path root) {
-            Floor stored = of(root);
-            if (!stored.set() || linkFrom.isEmpty()) {
-                return stored;
-            }
-            try {
-                Long from = linkFrom.get(key(root));
-                return from == null ? stored : new Floor(Math.min(from, stored.fromMs()), true);
-            } catch (RuntimeException | java.io.IOError e) {
-                return stored;
-            }
+            return floorIn(floors, root);
         }
     }
 
     /**
-     * Gives every root that has no floor one, drops the floor of any other folder, and makes that
-     * durable before returning, so no file is adopted against a floor a crash could lose. A root's
-     * first floor is {@code startMs}, or 1 ms after the newest file {@code newestHeldMs} reports in it
-     * when that is later; a root it reports as unreadable (empty) gets none yet. A video folder that
-     * gets its floor here may link from {@code videoLinkFromMs} when that is earlier than {@code
-     * startMs} ({@link Snapshot#linkFloorOf}); that is never stored. The roots must be every root the
-     * scan reads (the Go remake prunes only in its full scan, never in its separate link pass). Never
-     * throws: whatever goes wrong, the answer is to adopt nothing.
+     * One boot scan's floors, worked out before the journal is replayed so the link to a crashed
+     * recording can use them, and saved after it by {@link #save}. Null floors admit nothing.
      */
-    Snapshot prepare(
+    static final class Plan {
+        private final Path file;
+        private final Map<String, Long> floors;
+        /** Keys of the roots this plan gives their first floor. */
+        private final Set<String> added;
+        /** Whether the file is rewritten even with nothing added: it was unreadable, or lost a floor. */
+        private final boolean rewrite;
+        private final String videoKey;
+        /** The video folder's earlier floor for linking alone, when this plan gives it its first. */
+        private final Long videoLinkFrom;
+
+        private Plan(Path file, Map<String, Long> floors, Set<String> added, boolean rewrite,
+                String videoKey, Long videoLinkFrom) {
+            this.file = file;
+            this.floors = floors;
+            this.added = added;
+            this.rewrite = rewrite;
+            this.videoKey = videoKey;
+            this.videoLinkFrom = videoLinkFrom;
+        }
+
+        private static Plan none() {
+            return new Plan(null, null, Set.of(), false, null, null);
+        }
+
+        /**
+         * The floor a link to a crashed recording is held to: the root's planned floor, saved or not,
+         * or earlier for a video folder this plan gives its first floor while the journal holds a
+         * pathless recording that started before it (see the class notes). Only the link may use it.
+         */
+        Floor linkFloorOf(Path root) {
+            Floor planned = floorIn(floors, root);
+            if (!planned.set() || videoLinkFrom == null) {
+                return planned;
+            }
+            try {
+                return key(root).equals(videoKey)
+                        ? new Floor(Math.min(videoLinkFrom, planned.fromMs()), true)
+                        : planned;
+            } catch (RuntimeException | java.io.IOError e) {
+                return planned;
+            }
+        }
+
+        /** Whether the video folder's link reaches back before its first floor in this plan. */
+        boolean linksBack() {
+            return videoLinkFrom != null;
+        }
+
+        /**
+         * Saves the planned floors and returns the ones this scan's imports are held to: none at all
+         * when they can't be saved, since a floor that isn't saved might not be there next boot. With
+         * {@code holdVideoFloor}, a first floor this plan gives the video folder is neither saved nor
+         * used, so that folder adopts nothing this boot and the next one can still reach back (see the
+         * class notes). Never throws.
+         */
+        Snapshot save(boolean holdVideoFloor) {
+            if (floors == null) {
+                return Snapshot.none();
+            }
+            try {
+                Map<String, Long> saved = floors;
+                Set<String> savedNew = added;
+                if (holdVideoFloor && added.contains(videoKey)) {
+                    saved = new TreeMap<>(floors);
+                    saved.remove(videoKey);
+                    savedNew = new HashSet<>(added);
+                    savedNew.remove(videoKey);
+                    log.info("Not saving the first orphan adoption floor of {} yet: a crashed recording"
+                            + " whose file it may hold is still to be recovered", videoKey);
+                }
+                if (rewrite || !savedNew.isEmpty()) {
+                    write(file, saved);
+                }
+                return new Snapshot(saved);
+            } catch (Exception | java.io.IOError e) {
+                log.warn("Could not save the orphan adoption floors {}; adopting no orphan recordings"
+                        + " this time: {}", file, e.toString());
+                return Snapshot.none();
+            }
+        }
+    }
+
+    /** {@code root}'s floor in {@code floors}; none for null floors or an unresolvable root. */
+    private static Floor floorIn(Map<String, Long> floors, Path root) {
+        if (floors == null || root == null) {
+            return Floor.NONE;
+        }
+        try {
+            Long from = floors.get(key(root));
+            return from == null ? Floor.NONE : new Floor(from, true);
+        } catch (RuntimeException | java.io.IOError e) {
+            // An unresolvable root has no floor; a boot-time runner must never throw for one.
+            return Floor.NONE;
+        }
+    }
+
+    /**
+     * Plans this scan's floors without saving any: gives every root that has no floor one, and drops
+     * the floor of any other folder. A root's first floor is {@code startMs}, or 1 ms after the newest
+     * file {@code newestHeldMs} reports in it when that is later; a root it reports as unreadable
+     * (empty) gets none yet. A video folder that gets its first floor here may link from {@code
+     * videoLinkFromMs} when that is earlier than {@code startMs} ({@link Plan#linkFloorOf}); that is
+     * never stored. Nothing is adopted until {@link Plan#save} has made the floors durable, so no file
+     * is adopted against a floor a crash could lose. The roots must be every root the scan reads (the
+     * Go remake prunes only in its full scan, never in its separate link pass). Never throws: whatever
+     * goes wrong, the answer is to link and adopt nothing.
+     */
+    Plan plan(
             Path videoDir,
             Collection<Path> archives,
             long startMs,
@@ -167,18 +242,18 @@ final class OrphanAdoptionFloors {
             Function<Path, OptionalLong> newestHeldMs) {
         if (file == null) {
             log.warn("No data folder to keep orphan adoption floors in; adopting no orphan recordings");
-            return Snapshot.none();
+            return Plan.none();
         }
         try {
-            return prepareOrThrow(videoDir, archives, startMs, videoLinkFromMs, newestHeldMs);
+            return planOrThrow(videoDir, archives, startMs, videoLinkFromMs, newestHeldMs);
         } catch (RuntimeException | java.io.IOError e) {
             log.warn("Could not prepare the orphan adoption floors {}; adopting no orphan recordings"
                     + " this time: {}", file, e.toString());
-            return Snapshot.none();
+            return Plan.none();
         }
     }
 
-    private Snapshot prepareOrThrow(
+    private Plan planOrThrow(
             Path videoDir,
             Collection<Path> archives,
             long startMs,
@@ -188,17 +263,19 @@ final class OrphanAdoptionFloors {
         roots.add(videoDir);
         roots.addAll(archives);
         Map<String, Long> floors;
-        boolean changed = false;
+        boolean rewrite = false;
         try {
             floors = read(file);
         } catch (Exception e) {
             log.warn("Could not read the orphan adoption floors {}; every folder's floor starts again"
                     + " from now: {}", file, e.toString());
             floors = new TreeMap<>();
-            changed = true;
+            rewrite = true;
         }
         Set<String> current = new HashSet<>();
-        Map<String, Long> linkFrom = new HashMap<>();
+        Set<String> added = new HashSet<>();
+        String videoKey = videoDir == null ? null : key(videoDir);
+        Long videoLinkFrom = null;
         for (int i = 0; i < roots.size(); i++) {
             Path root = roots.get(i);
             if (root == null) {
@@ -214,10 +291,10 @@ final class OrphanAdoptionFloors {
                 }
                 long from = firstFloor(startMs, newest.getAsLong());
                 floors.put(key, from);
-                changed = true;
+                added.add(key);
                 log.info("Only recordings written to {} from {} on can be adopted as orphans", root, from);
                 if (i == 0 && videoLinkFromMs < startMs) {
-                    linkFrom.put(key, videoLinkFromMs);
+                    videoLinkFrom = videoLinkFromMs;
                     log.info("A crashed recording's file in {} can still be linked from {} on", root,
                             videoLinkFromMs);
                 }
@@ -227,20 +304,11 @@ final class OrphanAdoptionFloors {
             String key = keys.next();
             if (!current.contains(key)) {
                 keys.remove();
-                changed = true;
+                rewrite = true;
                 log.info("Dropped the orphan adoption floor of {}, no longer recorded or archived to", key);
             }
         }
-        if (changed) {
-            try {
-                write(file, floors);
-            } catch (Exception e) {
-                log.warn("Could not save the orphan adoption floors {}; adopting no orphan recordings"
-                        + " this time: {}", file, e.toString());
-                return Snapshot.none();
-            }
-        }
-        return new Snapshot(floors, linkFrom);
+        return new Plan(file, floors, added, rewrite, videoKey, videoLinkFrom);
     }
 
     /**

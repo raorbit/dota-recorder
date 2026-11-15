@@ -66,6 +66,20 @@ class CrashRecoveryRunnerTest {
                 maintenanceLock, paths);
     }
 
+    /** A runner whose recovery transactions can't get a connection, so each one rolls back. */
+    private CrashRecoveryRunner newRunnerWhoseRecoveryFails() {
+        DataSource locked =
+                (DataSource) java.lang.reflect.Proxy.newProxyInstance(
+                        DataSource.class.getClassLoader(),
+                        new Class<?>[] {DataSource.class},
+                        (proxy, method, args) -> {
+                            throw new java.sql.SQLException("database is locked");
+                        });
+        return new CrashRecoveryRunner(
+                journal, matches, clips, markers, pauses, locked, new ObjectMapper(), settings,
+                maintenanceLock, paths);
+    }
+
     @Test
     void recoversUnfinishedJournalIntoMatchAndDeletesJournal() throws Exception {
         Path video = dir.resolve("recovered.mp4");
@@ -1272,6 +1286,106 @@ class CrashRecoveryRunnerTest {
         assertJournalRowWithoutVideo();
         assertThat(crashed).exists();
         assertThat(storedFloor(videos)).isEqualTo(existing);
+    }
+
+    @Test
+    void aBootThatCannotSaveItsFloorsStillLinksItsCrashedRecording() throws Exception {
+        // The upgrade boot after an install killed the app mid-match, with the floors file blocked
+        // (another program holding it, say). The link needs no saved floor, so the recording still
+        // gets its file; only the imports, which do, adopt nothing this boot.
+        Path videos = chooseVideoDir("Videos");
+        Crash crash = crashedHalfAnHourAgo(null);
+        Path crashed = writeModifiedAt(videos.resolve("2026-11-14 10-00-00.mp4"), crash.updatedMs());
+        Files.createDirectories(floorsFile().resolveSibling(OrphanAdoptionFloors.FILE_NAME + ".tmp"));
+
+        runner.run(null);
+
+        assertThat(matches.findAll())
+                .singleElement()
+                .satisfies(
+                        row -> {
+                            assertThat(row.dotaMatchId()).isEqualTo(1234L);
+                            assertThat(row.videoPath()).isEqualTo(crashed.toString());
+                        });
+        assertThat(journal.findUnfinished()).isEmpty();
+        assertThat(storedFloor(videos)).isNull();
+    }
+
+    @Test
+    void aCrashedRecordingWhoseRecoveryRollsBackIsLinkedOnTheNextBoot() throws Exception {
+        // The boot that gives the video folder its first floor can't commit the pathless recording's
+        // recovery (a locked database, say), so the journal keeps it. Saved, that floor would put the
+        // file out of reach for good; held back, the next boot reaches back for it again. The folder
+        // adopts nothing on the boot that held its floor, and the other roots' floors are saved.
+        Path videos = chooseVideoDir("Videos");
+        Path archive = chooseArchive("hdd");
+        Crash crash = crashedHalfAnHourAgo(null);
+        Path crashed = writeModifiedAt(videos.resolve("2026-11-14 10-00-00.mp4"), crash.updatedMs());
+
+        newRunnerWhoseRecoveryFails().run(null);
+
+        assertThat(journal.findUnfinished()).hasSize(1);
+        assertThat(matches.findAll()).isEmpty();
+        assertThat(storedFloor(videos)).isNull();
+        assertThat(storedFloor(archive)).isNotNull();
+
+        newRunner().run(null);
+
+        assertThat(matches.findAll())
+                .singleElement()
+                .satisfies(
+                        row -> {
+                            assertThat(row.dotaMatchId()).isEqualTo(1234L);
+                            assertThat(row.videoPath()).isEqualTo(crashed.toString());
+                        });
+        assertThat(journal.findUnfinished()).isEmpty();
+        assertThat(storedFloor(videos)).isNotNull();
+    }
+
+    @Test
+    void aPathlessRecordingWaitsInTheJournalForABootThatCanReadItsFolder() throws Exception {
+        // The recording folder is on a drive that isn't mounted yet at this boot. The pathless
+        // recording's file can't be looked for, so it stays in the journal and the folder gets no
+        // floor; a recording whose path the journal has is recovered as usual.
+        Path usb = chooseVideoDir("usb");
+        Files.delete(usb);
+        Crash crash = crashedHalfAnHourAgo(null);
+        Path finished = Files.createDirectories(dir.resolve("old")).resolve("2026-11-14 08-00-00.mp4");
+        Files.writeString(finished, "a recording whose path the journal has");
+        journal.open(sessionAt("with-path", crash.startedMs() - 60L * 60_000L, finished.toString()));
+
+        runner.run(null);
+
+        assertThat(journal.findUnfinished())
+                .extracting(RecordingSessionRow::sessionId)
+                .containsExactly("session-crash");
+        assertThat(matches.findAll()).extracting(MatchSummary::videoPath).containsExactly(finished.toString());
+        assertThat(storedFloor(usb)).isNull();
+
+        Files.createDirectories(usb);
+        Path crashed = writeModifiedAt(usb.resolve("2026-11-14 10-00-00.mp4"), crash.updatedMs());
+        newRunner().run(null);
+
+        assertThat(journal.findUnfinished()).isEmpty();
+        assertThat(matches.findAll())
+                .extracting(MatchSummary::videoPath)
+                .containsExactlyInAnyOrder(finished.toString(), crashed.toString());
+        assertThat(storedFloor(usb)).isNotNull();
+    }
+
+    @Test
+    void withNoVideoFolderSetAPathlessRecordingIsRecoveredAtOnce() {
+        // Only a folder that is set but can't be read is worth waiting for.
+        settings.update(
+                s -> {
+                    s.videoDir = "";
+                    return s;
+                });
+        journal.open(crashedSessionRow());
+
+        runner.run(null);
+
+        assertJournalRowWithoutVideo();
     }
 
     @Test
