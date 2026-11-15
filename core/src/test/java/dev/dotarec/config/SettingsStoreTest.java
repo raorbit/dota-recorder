@@ -190,6 +190,33 @@ class SettingsStoreTest {
     }
 
     @Test
+    void save_dropsAKeyThatOnlyDiffersFromADeclaredOneInCase(@TempDir Path dir) throws Exception {
+        // A hand edit can leave "retentionCapGB" beside the real "retentionCapGb". This build never
+        // reads it, but written back after the real key it would win in the Go remake's reader, which
+        // matches keys ignoring case: a 40 GB cap there, and a quoted value would make that reader
+        // refuse the whole file. Go folds the long s onto s as well. A key no field has stays kept.
+        Files.createDirectories(dir);
+        Files.writeString(
+                dir.resolve("settings.json"),
+                """
+                {"RETENTIONCAPGB": "2000", "retentionCapGb": 400, "retentionCapGB": 40,
+                 "clipPaddingSecond\u017F": 3, "readOnlyDirs": ["E:\\\\Old"]}
+                """);
+        SettingsStore store = new SettingsStore(paths(dir));
+        assertThat(store.get().retentionCapGb).isEqualTo(400);
+
+        store.update(s -> s);
+
+        JsonNode saved = new ObjectMapper().readTree(dir.resolve("settings.json").toFile());
+        assertThat(saved.has("RETENTIONCAPGB")).isFalse();
+        assertThat(saved.has("retentionCapGB")).isFalse();
+        assertThat(saved.has("clipPaddingSecond\u017F")).isFalse();
+        assertThat(saved.get("retentionCapGb").asInt()).isEqualTo(400);
+        assertThat(saved.get("clipPaddingSeconds").asInt()).isEqualTo(8);
+        assertThat(saved.get("readOnlyDirs").get(0).asText()).isEqualTo("E:\\Old");
+    }
+
+    @Test
     void freshStore_seedsDotaOnPlusTwoBuiltinRowsOff(@TempDir Path dir) {
         SettingsStore store = new SettingsStore(paths(dir));
 
