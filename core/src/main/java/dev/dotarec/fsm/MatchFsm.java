@@ -681,8 +681,8 @@ public class MatchFsm {
             unconfirmedStarts = 0;
         } catch (ObsStartNotConfirmedException e) {
             // Which OBS took the request, read before anything else: the start held the OBS
-            // controller through its wait, and a reconnect takes a whole handshake, so this is
-            // still the connection StartRecord went over.
+            // controller through its wait, and a reconnect takes a whole handshake, so these still
+            // name the connection StartRecord went over, and its OBS even if that one crashed.
             ObsProcess startedOn = obs.connectedObsProcess();
             long startedOnEpoch = obs.connectionEpoch();
             this.state = MatchState.IDLE;
@@ -754,9 +754,27 @@ public class MatchFsm {
      * now). The switch is one-way for the rest of the process, and the restart is the rate-limited
      * one every failure asks for, so this can't loop. Counting from zero again after asking means a
      * streak that goes on asks again every second run, not on every failure.
+     *
+     * <p>An OBS that is gone by the end of the wait crashed while it started the output, which is
+     * where it opens the encoder: some drivers crash OBS there instead of failing. That asks for x264
+     * at once. Waiting for a second run let such crashes use up the relaunches Electron allows before
+     * x264 was written, which left OBS down for the rest of the Dota session. Nor is OBS restarted:
+     * Electron relaunched it as soon as it exited, so a restart would only end that fresh OBS and
+     * spend one more of those relaunches. The relaunch read the profile before the switch, so it may
+     * crash the same way once more; Electron's relaunch after it loads x264. This can't loop either:
+     * a crash never asks for a restart, so only Electron relaunches OBS, and it stops after a few
+     * crashes in a row.
      */
     private void startNotConfirmed(
             ObsStartNotConfirmedException e, ObsProcess startedOn, long epoch) {
+        if (startedOn != null && !obs.isObsRunning(startedOn)) {
+            log.warn("Recording not confirmed by OBS: {}; the OBS it went to (pid {}) has exited, so"
+                    + " it crashed starting the recording. Not restarting OBS: Electron relaunches"
+                    + " it", e.getMessage(), startedOn.pid());
+            unconfirmedStarts = 0;
+            encoderFallback.fallBackToX264();
+            return;
+        }
         log.warn("Recording not confirmed by OBS: {}; restarting OBS", e.getMessage());
         if (unconfirmedStarts == 0 || startedOnAnotherObs(startedOn, epoch)) {
             unconfirmedStarts++;
