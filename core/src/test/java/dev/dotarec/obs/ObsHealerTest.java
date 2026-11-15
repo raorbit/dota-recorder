@@ -208,6 +208,17 @@ class ObsHealerTest {
     }
 
     @Test
+    void isObsRunning_isTrueWhileAProcessRunsThisAppsObs() {
+        // A real process-table scan that must find a match: pointed at the executable this test JVM
+        // runs, the healer has at least this process to see. A scan that misses a live OBS lets a
+        // socket drop that outlasts two scheduler ticks clear the flag of an OBS still recording.
+        Optional<String> self = ProcessHandle.current().info().command();
+        assumeTrue(self.isPresent(), "this process's executable can't be read here");
+
+        assertThat(healerFor(Path.of(self.get())).isObsRunning()).isTrue();
+    }
+
+    @Test
     void findObsProcess_namesTheOneRunningObs_byItsPidAndStart(@TempDir Path dir) throws Exception {
         Path exe = standInObs(dir);
         Process obs = run(exe);
