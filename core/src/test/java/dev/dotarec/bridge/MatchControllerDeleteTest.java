@@ -2,6 +2,9 @@ package dev.dotarec.bridge;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 
@@ -17,6 +20,8 @@ import dev.dotarec.data.TestDb;
 import dev.dotarec.retention.StorageMaintenanceLock;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -192,7 +197,10 @@ class MatchControllerDeleteTest {
     void delete_isAnnounced_soAViewWhoseRequestGaveUpStillDropsTheRow() throws Exception {
         // The delete waits for the maintenance lock, which an archive pass can hold for minutes;
         // the renderer's request times out first, and only this frame tells it the delete landed.
-        EventPublisher events = mock(EventPublisher.class);
+        // The reload the frame triggers must find the row gone, so it goes out only once the delete
+        // committed: the publisher records the row as the database holds it when the frame is sent.
+        List<Optional<MatchSummary>> rowsWhenAnnounced = new ArrayList<>();
+        EventPublisher events = recordingRowWhenAnnounced(rowsWhenAnnounced);
         MatchController c = new MatchController(repo, markers, new PauseRepository(ds), clips,
                 settings, new StorageMaintenanceLock(), events);
         long id = insert(writeFile("match.mp4", new byte[] {1}).toString(), null);
@@ -200,6 +208,25 @@ class MatchControllerDeleteTest {
         c.delete(id);
 
         verify(events).publish("match.deleted", Map.of("id", id, "outcome", "deleted"));
+        assertThat(rowsWhenAnnounced).containsExactly(Optional.empty());
+    }
+
+    @Test
+    void delete_withClips_isAnnouncedAsStubbed_onceTheRowLostItsVideo() throws Exception {
+        // The with-clips branch: the frame names it, and goes out only after the row was stubbed.
+        List<Optional<MatchSummary>> rowsWhenAnnounced = new ArrayList<>();
+        EventPublisher events = recordingRowWhenAnnounced(rowsWhenAnnounced);
+        MatchController c = new MatchController(repo, markers, new PauseRepository(ds), clips,
+                settings, new StorageMaintenanceLock(), events);
+        long id = insert(writeFile("match.mp4", new byte[] {1}).toString(), null);
+        clips.insert(id, "manual", null, 10.0, 20.0, "carve",
+                null, null, null, "ready", null, 1L);
+
+        c.delete(id);
+
+        verify(events).publish("match.deleted", Map.of("id", id, "outcome", "stubbed"));
+        assertThat(rowsWhenAnnounced).singleElement().satisfies(row ->
+                assertThat(row).hasValueSatisfying(m -> assertThat(m.videoPath()).isNull()));
     }
 
     @Test
@@ -250,6 +277,20 @@ class MatchControllerDeleteTest {
     }
 
     // ── helpers ─────────────────────────────────────────────────────────────
+
+    /**
+     * A publisher that adds, for each {@code match.deleted} frame, the announced row as the database
+     * holds it at that moment to {@code rows}.
+     */
+    private EventPublisher recordingRowWhenAnnounced(List<Optional<MatchSummary>> rows) {
+        EventPublisher events = mock(EventPublisher.class);
+        doAnswer(inv -> {
+            Map<?, ?> payload = inv.getArgument(1);
+            rows.add(repo.findById((Long) payload.get("id")));
+            return null;
+        }).when(events).publish(eq("match.deleted"), any());
+        return events;
+    }
 
     private Path writeFile(String name, byte[] data) throws Exception {
         Path p = dir.resolve(name);
