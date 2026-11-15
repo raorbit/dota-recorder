@@ -13,6 +13,13 @@
 ; The two netsh calls are chained in a single elevated cmd (delete-any-stale then add) so install
 ; raises at most one UAC prompt.
 ;
+; Every program the installer starts is named by its full path. Windows can find a bare name in the
+; installer's own folder (Downloads, for a downloaded installer) or the folder it works in (the
+; install folder, which the user can write to) before the system's, so anything the user ran could
+; have its own cmd.exe or netsh.exe started there, elevated. After /c, cmd drops the first and last
+; quote of the line it is given, which is why each line is wrapped in one more pair.
+; scripts/check-packaging-config.mjs fails CI on a bare name.
+;
 ; Both macros are skipped when the installer/uninstaller runs with --updated (electron-updater's
 ; silent auto-update path; ${isUpdated} is electron-builder's generated LogicLib predicate for
 ; that flag). During an update the OLD version's uninstaller is re-run with --updated before the
