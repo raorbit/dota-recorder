@@ -10,9 +10,11 @@ import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
@@ -40,6 +42,14 @@ import org.slf4j.LoggerFactory;
  * after a folder is chosen, not when it's chosen, so a crash orphan written there before that boot
  * stays on disk too. What's left: a personal OBS recording made into the same folder after its
  * floor, with OBS's default name, is still adopted.
+ *
+ * <p>One exception, for the video folder only. When it gets its first floor in a boot that recovers
+ * an unfinished recording with no journaled path (the upgrade boot after a crash mid-match, say),
+ * the floor starts at the earliest such recording's start, less the link window's grace, rather than
+ * at the scan: the journal is evidence this app was recording there from then, and a floor at the
+ * scan would turn away the very file the journal is about to claim, on this boot and every later
+ * one. An existing floor is never lowered, and archive drives aren't recorded into, so their first
+ * floor is always the scan's.
  *
  * <p>The floors live in their own file in the data folder, never in {@code settings.json}: that
  * file is shared ground with the Go remake, and this app's settings loader rejects a key it doesn't
@@ -101,19 +111,19 @@ final class OrphanAdoptionFloors {
     }
 
     /**
-     * Gives every root that has no floor one at {@code startMs}, drops the floor of any folder not in
-     * {@code roots}, and makes that durable before returning, so no file is adopted against a floor a
-     * crash could lose. {@code roots} must be every root the scan reads (the Go remake prunes only in
-     * its full scan, never in its separate link pass). Never throws: whatever goes wrong, the answer
-     * is to adopt nothing.
+     * Gives every root that has no floor one, at {@code startMs} for an archive and at {@code
+     * firstVideoFloorMs} for the video folder, drops the floor of any other folder, and makes that
+     * durable before returning, so no file is adopted against a floor a crash could lose. The roots
+     * must be every root the scan reads (the Go remake prunes only in its full scan, never in its
+     * separate link pass). Never throws: whatever goes wrong, the answer is to adopt nothing.
      */
-    Snapshot prepare(Collection<Path> roots, long startMs) {
+    Snapshot prepare(Path videoDir, Collection<Path> archives, long startMs, long firstVideoFloorMs) {
         if (file == null) {
             log.warn("No data folder to keep orphan adoption floors in; adopting no orphan recordings");
             return new Snapshot(null);
         }
         try {
-            return prepareOrThrow(roots, startMs);
+            return prepareOrThrow(videoDir, archives, startMs, firstVideoFloorMs);
         } catch (RuntimeException | java.io.IOError e) {
             log.warn("Could not prepare the orphan adoption floors {}; adopting no orphan recordings"
                     + " this time: {}", file, e.toString());
@@ -121,7 +131,11 @@ final class OrphanAdoptionFloors {
         }
     }
 
-    private Snapshot prepareOrThrow(Collection<Path> roots, long startMs) {
+    private Snapshot prepareOrThrow(
+            Path videoDir, Collection<Path> archives, long startMs, long firstVideoFloorMs) {
+        List<Path> roots = new ArrayList<>();
+        roots.add(videoDir);
+        roots.addAll(archives);
         Map<String, Long> floors;
         boolean changed = false;
         try {
@@ -133,16 +147,18 @@ final class OrphanAdoptionFloors {
             changed = true;
         }
         Set<String> current = new HashSet<>();
-        for (Path root : roots) {
+        for (int i = 0; i < roots.size(); i++) {
+            Path root = roots.get(i);
             if (root == null) {
                 continue;
             }
             String key = key(root);
             current.add(key);
             if (!floors.containsKey(key)) {
-                floors.put(key, startMs);
+                long first = i == 0 ? firstVideoFloorMs : startMs;
+                floors.put(key, first);
                 changed = true;
-                log.info("Only recordings written to {} from now on can be adopted as orphans", root);
+                log.info("Only recordings written to {} from {} on can be adopted as orphans", root, first);
             }
         }
         for (Iterator<String> keys = floors.keySet().iterator(); keys.hasNext(); ) {
