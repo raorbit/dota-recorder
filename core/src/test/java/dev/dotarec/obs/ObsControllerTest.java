@@ -683,7 +683,7 @@ class ObsControllerTest {
     }
 
     @Test
-    void attachAudio_aFailedReconcileIsRetriedOnTheNextStart() {
+    void attachAudio_aFailedReconcileIsRetriedOnALaterStart() {
         // The input list timed out (OBS stalled while Dota loads) or a capture failed to create: the
         // attach must not count as applied, or every later start retry no-ops while the readiness
         // gate keeps waiting for a live audio input and the whole match goes unrecorded.
@@ -691,11 +691,37 @@ class ObsControllerTest {
         OBSRemoteController obs = mock(OBSRemoteController.class);
         when(cfg.reconcileAudioInputs(obs, true)).thenReturn(false, true);
         ObsController controller = connectedTo(obs, cfg);
+        long[] now = {0L};
+        ReflectionTestUtils.setField(controller, "nanoTime", (LongSupplier) () -> now[0]);
 
         controller.attachAudio(); // fails
+        now[0] += ObsController.AUDIO_ATTACH_RETRY_MS * 1_000_000L;
         controller.attachAudio(); // retried, succeeds
         controller.attachAudio(); // applied now: no-op
 
+        verify(cfg, times(2)).reconcileAudioInputs(obs, true);
+    }
+
+    @Test
+    void attachAudio_aFailedReconcileWaitsBeforeTheNextTry() {
+        // Starts retry at ~10Hz under the FSM's monitor; a reconcile OBS keeps rejecting must not run
+        // the whole input reconcile against it on every one of those frames.
+        ObsSceneConfigurer cfg = mock(ObsSceneConfigurer.class);
+        OBSRemoteController obs = mock(OBSRemoteController.class);
+        when(cfg.reconcileAudioInputs(obs, true)).thenReturn(false);
+        ObsController controller = connectedTo(obs, cfg);
+        long[] now = {0L};
+        ReflectionTestUtils.setField(controller, "nanoTime", (LongSupplier) () -> now[0]);
+
+        controller.attachAudio(); // fails
+        for (int frame = 0; frame < 40; frame++) {
+            now[0] += 100L * 1_000_000L; // 4 s of 10Hz start retries
+            controller.attachAudio();
+        }
+        verify(cfg, times(1)).reconcileAudioInputs(obs, true);
+
+        now[0] += 1_000L * 1_000_000L; // past the retry delay
+        controller.attachAudio();
         verify(cfg, times(2)).reconcileAudioInputs(obs, true);
     }
 

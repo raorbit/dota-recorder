@@ -94,6 +94,13 @@ public class ObsController implements ObsRecorder, MatchFsm.RecordStatusProbe {
      */
     static final long AUDIO_IDLE_RELEASE_MS = 30_000L;
 
+    /**
+     * How long {@link #attachAudio()} waits after one that failed before reconciling again. Starts
+     * retry on every frame at ~10Hz under the FSM's monitor, and a reconcile OBS rejects fails fast, so
+     * without it each frame would run the whole input reconcile against OBS again.
+     */
+    static final long AUDIO_ATTACH_RETRY_MS = 5_000L;
+
     /** How long to wait for the websocket to become identified/ready after connect(). */
     private static final int CONNECT_TIMEOUT_SECONDS = 3;
 
@@ -155,6 +162,12 @@ public class ObsController implements ObsRecorder, MatchFsm.RecordStatusProbe {
      */
     private Boolean audioApplied;
 
+    /**
+     * {@link #nanoTime} of the last {@link #attachAudio()} reconcile that failed, or null when none
+     * failed on this connection; see {@link #AUDIO_ATTACH_RETRY_MS}. Guarded by {@code this}.
+     */
+    private Long audioFailedAtNanos;
+
     public ObsController(
             SettingsStore settings,
             ObsHealth health,
@@ -202,9 +215,14 @@ public class ObsController implements ObsRecorder, MatchFsm.RecordStatusProbe {
 
     @Override
     public synchronized void attachAudio() {
-        audioWantedAtNanos = nanoTime.getAsLong();
+        long now = nanoTime.getAsLong();
+        audioWantedAtNanos = now;
         audioWanted = true;
         if (Boolean.TRUE.equals(audioApplied)) {
+            return;
+        }
+        if (audioFailedAtNanos != null
+                && now - audioFailedAtNanos < AUDIO_ATTACH_RETRY_MS * 1_000_000L) {
             return;
         }
         OBSRemoteController c = connectedController();
@@ -212,11 +230,16 @@ public class ObsController implements ObsRecorder, MatchFsm.RecordStatusProbe {
             return; // the next connect's scene setup attaches it
         }
         if (!sceneConfigurer.reconcileAudioInputs(c, true)) {
-            // Left unapplied so the next start retry reconciles again: marked applied, the retries
-            // would no-op and the readiness gate would hold the match unrecorded.
+            // Left unapplied so a later start retry reconciles again: marked applied, the retries
+            // would no-op and the readiness gate would hold the match unrecorded. Not on the very
+            // next frame, though: see AUDIO_ATTACH_RETRY_MS.
             audioApplied = null;
+            audioFailedAtNanos = now;
+            log.warn("Could not attach every audio capture; trying again in {}s",
+                    AUDIO_ATTACH_RETRY_MS / 1000);
             return;
         }
+        audioFailedAtNanos = null;
         audioApplied = Boolean.TRUE;
         log.info("Attached audio captures for recording");
     }
@@ -255,6 +278,7 @@ public class ObsController implements ObsRecorder, MatchFsm.RecordStatusProbe {
         OBSRemoteController c = buildController(s, latch);
         this.controller = c;
         this.audioApplied = null; // a new connection (maybe a new OBS) has nothing applied yet
+        this.audioFailedAtNanos = null; // and nothing has failed on it
         events.reset();
         c.connect();
     }
