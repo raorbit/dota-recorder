@@ -869,6 +869,41 @@ class ObsControllerTest {
     }
 
     @Test
+    void attachAudio_afterAFailure_isRetriedAtOnceOnANewConnection() {
+        // The attach failed against an OBS the core then reconnected away from, maybe to a relaunched
+        // one. Nothing has failed on the new connection, and the readiness gate holds the match
+        // unrecorded until a capture is live, so its first start attaches without waiting.
+        ObsHealth health = new ObsHealth();
+        SettingsStore settings = mock(SettingsStore.class);
+        when(settings.get()).thenReturn(new SettingsStore.Settings());
+        ObsSceneConfigurer cfg = mock(ObsSceneConfigurer.class);
+        when(cfg.reconcileAudioInputs(any(), eq(true))).thenReturn(false);
+        OBSRemoteController next = mock(OBSRemoteController.class);
+        ObsController controller =
+                new ObsController(
+                        settings, health, new ObsEvents(health, mock(CaptureBlackFrameGuard.class)),
+                        cfg) {
+                    @Override
+                    OBSRemoteController buildController(SettingsStore.Settings s, CountDownLatch latch) {
+                        latch.countDown();
+                        return next;
+                    }
+                };
+        ReflectionTestUtils.setField(controller, "controller", mock(OBSRemoteController.class));
+        health.setConnected(true);
+        long[] now = {0L};
+        ReflectionTestUtils.setField(controller, "nanoTime", (LongSupplier) () -> now[0]);
+
+        controller.attachAudio(); // fails
+        now[0] += 1_000L * 1_000_000L;
+        controller.connect();
+        controller.attachAudio();
+
+        verify(cfg, times(2)).reconcileAudioInputs(any(), eq(true));
+        verify(cfg).reconcileAudioInputs(next, true);
+    }
+
+    @Test
     void configureScene_aFailedAudioReconcileLeavesTheAttachToRetry() throws Exception {
         ObsSceneConfigurer cfg = mock(ObsSceneConfigurer.class);
         OBSRemoteController obs = mock(OBSRemoteController.class);
