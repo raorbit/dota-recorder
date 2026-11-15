@@ -217,10 +217,10 @@ describe('startLibrary storage-events wiring', () => {
     teardown();
   });
 
-  it('stops a bulk delete at a delete that timed out, then reconciles', async () => {
-    // 7's delete waited out its whole timeout behind the core's maintenance lock (the core finishes
-    // it later). 8 and 9 would only wait as long behind it, so they aren't sent; the reconcile
-    // reload shows what the core holds.
+  it('sends every row of a bulk delete past one that timed out, then reconciles', async () => {
+    // 7's delete waited out its whole timeout behind the core's maintenance lock, and the core
+    // finishes it once the lock frees. 8 and 9 are still sent, and the core finishes them then too;
+    // only the reconcile reload shows that 7 went as well.
     const deletes = serveLibrary(
       { matches: [{ id: 7 }, { id: 8 }, { id: 9 }], clips: [] },
       (url) => (url.endsWith('/matches/7') ? timedOut() : deleted()),
@@ -231,8 +231,24 @@ describe('startLibrary storage-events wiring', () => {
     await useLibraryStore.getState().deleteMatches([7, 8, 9]);
     await flush();
 
-    expect(deletes).toHaveLength(1);
-    expect(matchIds()).toEqual([8, 9]);
+    expect(deletes).toHaveLength(3);
+    expect(matchIds()).toEqual([]);
+    teardown();
+  });
+
+  it('sends every clip of a bulk delete past one that timed out, then reconciles', async () => {
+    const clips = [7, 8, 9].map((id) => ({ id, parentMatchId: 1 }));
+    const deletes = serveLibrary({ matches: [{ id: 1 }], clips }, (url) =>
+      url.endsWith('/clips/7') ? timedOut() : deleted(),
+    );
+    const teardown = startLibrary();
+    await flush();
+
+    await useLibraryStore.getState().deleteClips([7, 8, 9]);
+    await flush();
+
+    expect(deletes).toHaveLength(3);
+    expect(clipIds()).toEqual([]);
     teardown();
   });
 
