@@ -10,9 +10,14 @@ import static org.mockito.Mockito.when;
 
 import dev.dotarec.bridge.EventPublisher;
 import io.obswebsocket.community.client.OBSRemoteController;
+import java.time.Instant;
 import org.junit.jupiter.api.Test;
 
 class ObsConnectionSchedulerTest {
+
+    /** The OBS process the last connection reached. */
+    private static final ObsProcess OBS_RUN =
+            new ObsProcess(4_242L, Instant.parse("2026-11-15T18:00:00Z"));
 
     private final ObsController obs = mock(ObsController.class);
     private final ObsHealth health = new ObsHealth();
@@ -67,6 +72,36 @@ class ObsConnectionSchedulerTest {
         health.setRecording(true);
         obsProcessRunning = true;
 
+        scheduler.tryConnectAndConfigure();
+
+        assertThat(health.isRecording()).isTrue();
+    }
+
+    @Test
+    void anObsThatCrashedMidRecording_noLongerCountsAsRecording_whileItsRelaunchRuns() {
+        // Electron relaunched the crashed OBS at once, but the relaunch's websocket isn't up yet.
+        // The relaunch running says nothing about the crashed one's output: with its flag kept, a
+        // finalize now takes the still-recording stop retry and saves the row without its file.
+        health.setRecording(true);
+        when(obs.connectedObsProcess()).thenReturn(OBS_RUN);
+        when(obs.isObsRunning(OBS_RUN)).thenReturn(false);
+        obsProcessRunning = true; // the relaunched OBS
+
+        scheduler.tryConnectAndConfigure();
+        assertThat(health.isRecording()).isTrue(); // one miss is never enough
+        scheduler.tryConnectAndConfigure();
+
+        assertThat(health.isRecording()).isFalse();
+    }
+
+    @Test
+    void aDroppedSocketToTheNamedObs_keepsTheRecordingFlag_whileThatObsRuns() {
+        health.setRecording(true);
+        when(obs.connectedObsProcess()).thenReturn(OBS_RUN);
+        when(obs.isObsRunning(OBS_RUN)).thenReturn(true);
+        obsProcessRunning = false; // the named OBS decides, not a scan for any OBS
+
+        scheduler.tryConnectAndConfigure();
         scheduler.tryConnectAndConfigure();
 
         assertThat(health.isRecording()).isTrue();
