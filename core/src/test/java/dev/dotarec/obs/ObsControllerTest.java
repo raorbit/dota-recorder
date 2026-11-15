@@ -18,7 +18,9 @@ import static org.mockito.Mockito.when;
 
 import dev.dotarec.config.SettingsStore;
 import dev.dotarec.config.SettingsStore.AudioSource;
+import io.obswebsocket.community.client.OBSCommunicator;
 import io.obswebsocket.community.client.OBSRemoteController;
+import io.obswebsocket.community.client.message.response.general.GetVersionResponse;
 import io.obswebsocket.community.client.message.response.inputs.GetInputListResponse;
 import io.obswebsocket.community.client.message.response.inputs.GetInputMuteResponse;
 import io.obswebsocket.community.client.message.response.record.GetRecordStatusResponse;
@@ -40,9 +42,11 @@ import org.springframework.test.util.ReflectionTestUtils;
 /**
  * Unit coverage for the parts of {@link ObsController} that don't need a live OBS websocket.
  *
- * <p>The connect/identify handshake needs a real socket, but {@code startRecording}'s pre-flight --
- * the per-recording anchor reset and the corrective StopRecord for a dangling recording -- can be
- * exercised against a mocked {@link OBSRemoteController} injected onto the private field.
+ * <p>The socket and its identify handshake need a live OBS, but the {@code buildController} seam
+ * stands in for them (a test reports the connection identified, or not), and {@code
+ * startRecording}'s pre-flight -- the per-recording anchor reset and the corrective StopRecord for
+ * a dangling recording -- can be exercised against a mocked {@link OBSRemoteController} injected
+ * onto the private field.
  */
 class ObsControllerTest {
 
@@ -517,6 +521,60 @@ class ObsControllerTest {
         // Asserting getVersion is never called is the real fail-fast guard (a wall-clock timing bound
         // would only measure the mock, and flakes on a loaded CI box).
         verify(obs, never()).getVersion(anyLong());
+    }
+
+    @Test
+    void ensureConnected_eachIdentifiedConnectionGetsANewEpoch() {
+        // The FSM tells the connection a recording started on from a later one by this count. Frozen,
+        // an OBS that crashed and was relaunched would look like the recording's own, and the rest of
+        // the match would go unrecorded against its idle output.
+        ObsHealth health = new ObsHealth();
+        ObsController controller = identifyingController(health, mock(OBSRemoteController.class));
+
+        assertThat(controller.ensureConnected()).isTrue();
+        long first = controller.connectionEpoch();
+        assertThat(controller.ensureConnected()).as("still connected: no new connection").isTrue();
+        assertThat(controller.connectionEpoch()).isEqualTo(first);
+
+        health.setConnected(false); // the socket dropped
+        assertThat(controller.ensureConnected()).isTrue();
+
+        assertThat(controller.connectionEpoch()).isGreaterThan(first);
+    }
+
+    @Test
+    void startedOutputPath_isThePathTheStartEventReported() {
+        ObsHealth health = new ObsHealth();
+        ObsEvents events = new ObsEvents(health, mock(CaptureBlackFrameGuard.class));
+        ObsController controller = new ObsController(null, health, events, sceneConfigurer());
+
+        events.onRecordStateChanged(ObsEvents.OUTPUT_STARTED, "C:\\videos\\match.mkv");
+
+        assertThat(controller.startedOutputPath()).isEqualTo("C:\\videos\\match.mkv");
+    }
+
+    /**
+     * A controller whose every connect attempt reaches an OBS that completes the handshake:
+     * {@code buildController} hands back {@code obs} and reports it identified, as onReady does, and
+     * {@code obs} answers GetVersion with this client's protocol.
+     */
+    private static ObsController identifyingController(ObsHealth health, OBSRemoteController obs) {
+        SettingsStore settings = mock(SettingsStore.class);
+        when(settings.get()).thenReturn(new SettingsStore.Settings());
+        GetVersionResponse version = mock(GetVersionResponse.class);
+        when(version.isSuccessful()).thenReturn(true);
+        when(version.getRpcVersion()).thenReturn(OBSCommunicator.RPC_VERSION);
+        when(obs.getVersion(anyLong())).thenReturn(version);
+        return new ObsController(
+                settings, health, new ObsEvents(health, mock(CaptureBlackFrameGuard.class)),
+                sceneConfigurer()) {
+            @Override
+            OBSRemoteController buildController(SettingsStore.Settings s, CountDownLatch latch) {
+                ReflectionTestUtils.setField(this, "connectionReady", true);
+                latch.countDown();
+                return obs;
+            }
+        };
     }
 
     @Test
