@@ -4,8 +4,11 @@ import {
   applyMatchesDeleted,
   applyMatchVideosDeleted,
   applyRecordingsDeleted,
+  applyRecordingsOutcome,
   applyClipDeleted,
   applyClipsDeleted,
+  deletingRows,
+  matchDeleteDone,
   type DeleteSlice,
 } from './library-delete';
 
@@ -119,6 +122,68 @@ describe('applyRecordingsDeleted (the server rule: clips are never touched)', ()
     expect(stubbed.selectedMatchId).toBeNull();
     const dropped = applyRecordingsDeleted(slice({ selectedMatchId: 3 }), new Set([3]));
     expect(dropped.selectedMatchId).toBeNull();
+  });
+});
+
+describe('applyRecordingsOutcome (what the core says the delete did)', () => {
+  it('drops the rows the core deleted, even where the local clip list says clips', () => {
+    // The core read its own clip table under its lock; ours may lag it.
+    const next = applyRecordingsOutcome(slice(), new Set([1]), 'deleted');
+    expect(next.matches.map((m) => m.id)).toEqual([2, 3]);
+  });
+
+  it('keeps the rows the core stubbed, videoless, even where the local clip list says none', () => {
+    const next = applyRecordingsOutcome(slice(), new Set([3]), 'stubbed');
+    expect(next.matches.map((m) => m.id)).toEqual([1, 2, 3]);
+    expect(next.matches[2]!.videoPath).toBeNull();
+  });
+
+  it('falls back to the local guess when the core says nothing (an older core)', () => {
+    const next = applyRecordingsOutcome(slice(), new Set([1, 3]), null);
+    expect(next.matches.map((m) => m.id)).toEqual([1, 2]);
+    expect(next.matches[0]!.videoPath).toBeNull();
+  });
+});
+
+describe('matchDeleteDone (a match.deleted frame)', () => {
+  it('reads the recording and what its delete did', () => {
+    expect(
+      matchDeleteDone({ type: 'match.deleted', payload: { id: 7, outcome: 'stubbed' } }),
+    ).toEqual({ id: 7, outcome: 'stubbed' });
+    expect(
+      matchDeleteDone({ type: 'match.deleted', payload: { id: 7, outcome: 'deleted' } }),
+    ).toEqual({ id: 7, outcome: 'deleted' });
+  });
+
+  it('reads an outcome it does not know as none, for the local guess', () => {
+    expect(matchDeleteDone({ type: 'match.deleted', payload: { id: 7 } })).toEqual({
+      id: 7,
+      outcome: null,
+    });
+    expect(matchDeleteDone({ type: 'match.deleted', payload: { id: 7, outcome: 'x' } })).toEqual({
+      id: 7,
+      outcome: null,
+    });
+  });
+
+  it('ignores other frames and a payload without a numeric id', () => {
+    expect(matchDeleteDone({ type: 'match.enriched', payload: { id: 7 } })).toBeNull();
+    expect(matchDeleteDone({ type: 'match.deleted', payload: { id: '7' } })).toBeNull();
+    expect(matchDeleteDone({ type: 'match.deleted', payload: null })).toBeNull();
+  });
+});
+
+describe('deletingRows', () => {
+  it('shows a row as being deleted while its request is in flight or the core has it queued', () => {
+    const rows = deletingRows(new Set([1, 2]), new Set([2, 3]));
+    expect([...rows].sort()).toEqual([1, 2, 3]);
+  });
+
+  it('hands back either set as it is when the other is empty', () => {
+    const inFlight = new Set([1]);
+    const queued = new Set([2]);
+    expect(deletingRows(inFlight, new Set())).toBe(inFlight);
+    expect(deletingRows(new Set(), queued)).toBe(queued);
   });
 });
 

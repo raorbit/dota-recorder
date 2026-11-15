@@ -66,6 +66,46 @@ export function applyRecordingsDeleted(s: DeleteSlice, deleted: ReadonlySet<numb
   return applyMatchesDeleted(applyMatchVideosDeleted(s, withClips), fully);
 }
 
+// What the core says a recording delete did, mirrored: 'stubbed' keeps the rows videoless, 'deleted'
+// drops them, and no outcome (an older core) falls back to the local guess.
+export function applyRecordingsOutcome(
+  s: DeleteSlice,
+  deleted: ReadonlySet<number>,
+  outcome: 'deleted' | 'stubbed' | null,
+): DeleteSlice {
+  if (outcome === 'stubbed') return applyMatchVideosDeleted(s, deleted);
+  if (outcome === 'deleted') return applyMatchesDeleted(s, deleted);
+  return applyRecordingsDeleted(s, deleted);
+}
+
+// The recording a match.deleted frame says is done ({ id, outcome }), or null for any other frame or a
+// payload without a numeric id. The core sends it once a recording delete has gone through, wherever
+// it was asked for and however long it waited, so for a delete the core queued it is the only word
+// that it is done. An outcome other than 'deleted' / 'stubbed' reads as null (the local guess).
+export function matchDeleteDone(evt: {
+  readonly type: string;
+  readonly payload: unknown;
+}): { readonly id: number; readonly outcome: 'deleted' | 'stubbed' | null } | null {
+  if (evt.type !== 'match.deleted') return null;
+  const payload = evt.payload;
+  if (typeof payload !== 'object' || payload === null) return null;
+  const { id, outcome } = payload as { id?: unknown; outcome?: unknown };
+  if (typeof id !== 'number') return null;
+  return { id, outcome: outcome === 'deleted' || outcome === 'stubbed' ? outcome : null };
+}
+
+// The rows to show as being deleted: those this window has a delete request in flight for, and those
+// the core still has a delete of, queued behind its maintenance lock. One set for a table or the
+// player's strip; either input is handed back as it is when the other is empty.
+export function deletingRows(
+  inFlight: ReadonlySet<number>,
+  queued: ReadonlySet<number>,
+): ReadonlySet<number> {
+  if (queued.size === 0) return inFlight;
+  if (inFlight.size === 0) return queued;
+  return new Set([...inFlight, ...queued]);
+}
+
 // Clip delete: drop the clip row; clear a clip auto-play selection that pointed at it (the parent
 // match selection survives — only the clip is gone).
 export function applyClipDeleted(s: DeleteSlice, clipId: number): DeleteSlice {

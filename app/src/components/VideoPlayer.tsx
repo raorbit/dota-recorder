@@ -23,6 +23,7 @@ import {
   afterStripClipDelete,
   releaseStaleMedia,
 } from '../lib/video-availability';
+import { deletingRows } from '../lib/library-delete';
 import { useLibraryStore } from '../store/library';
 import { PopupMenu } from './PopupMenu';
 import './video-player.css';
@@ -141,7 +142,8 @@ export function VideoPlayer({
   const [activeClipId, setActiveClipId] = useState<number | null>(null);
   // Mirror of activeClipId for the clip-socket handler: the subscription effect is keyed on matchId
   // only, so its closure would otherwise see a stale activeClipId when a clip.deleted frame arrives.
-  // onDeleteClip reads it too, after a delete that may have waited minutes behind an archive pass.
+  // onDeleteClip reads it too, after a delete that may have waited half a minute for the core's
+  // maintenance lock.
   const activeClipIdRef = useRef<number | null>(null);
   // Right-click menu over a clip-strip row (null = closed) + its two-step delete arm. Deleting a clip
   // lives ONLY here (and in the library's right-click menus) — there is deliberately no always-visible
@@ -174,11 +176,14 @@ export function VideoPlayer({
   // Refresh the library list/counts after a clip star toggle so the "Clips" bucket shows it at once
   // (the local reload doesn't wait for any frame).
   const reloadLibrary = useLibraryStore((s) => s.load);
-  // A strip clip delete goes through the library store, like the Clips bucket's: one pending set for
-  // both views (a clip being deleted shows "Deleting…" in each, and neither offers a second delete),
-  // and the store drops the clip from the Clips bucket and its badge when the delete lands.
+  // A strip clip delete goes through the library store, like the Clips bucket's: one pending state for
+  // both views (a clip being deleted, or queued in the core, shows "Deleting…" in each, and neither
+  // offers a second delete), and the store drops the clip from the Clips bucket and its badge when
+  // the delete lands.
   const deleteClip = useLibraryStore((s) => s.deleteClip);
   const deletingClipIds = useLibraryStore((s) => s.deletingClipIds);
+  const queuedClipIds = useLibraryStore((s) => s.queuedClipIds);
+  const deletingClips = deletingRows(deletingClipIds, queuedClipIds);
 
   const matchId = match?.id ?? null;
   // Mirror of matchId for onDeleteClip, which resumes after its delete with the click's closure.
@@ -657,10 +662,13 @@ export function VideoPlayer({
   // and its badge) and rejects when the delete didn't go through.
   async function onDeleteClip(clip: Clip): Promise<void> {
     try {
-      await deleteClip(clip.id);
-      // The delete can finish minutes after the click, so go by what the player shows now (the refs),
-      // not by this closure's activeClipId: the user may have played another clip or opened another
-      // match meanwhile.
+      // Queued in the core behind its maintenance lock: the row stays, marked as being deleted, until
+      // the core does the delete. Its clip.deleted frame then leaves the clip and refreshes the strip
+      // (the clip socket above), as for a delete asked for from the Clips bucket.
+      if ((await deleteClip(clip.id)) === 'queued') return;
+      // The delete can finish half a minute after the click, so go by what the player shows now (the
+      // refs), not by this closure's activeClipId: the user may have played another clip or opened
+      // another match meanwhile.
       const { dropFromStrip, leaveClip } = afterStripClipDelete(clip, {
         matchId: matchIdRef.current,
         activeClipId: activeClipIdRef.current,
@@ -679,8 +687,8 @@ export function VideoPlayer({
         setClips((prev) => prev.filter((c) => c.id !== clip.id));
       }
     } catch {
-      // Leave the row: the banner says why (unless the delete only timed out, which the core still
-      // finishes), and the next clip.* frame / re-select reconciles.
+      // Leave the row: the banner says why (unless the delete only timed out, which the core may still
+      // finish), and the next clip.* frame / re-select reconciles.
     }
   }
 
@@ -1012,14 +1020,14 @@ export function VideoPlayer({
           )}
           {clips.map((clip) => {
             const pct = clipProgress[clip.id];
-            const deleting = deletingClipIds.has(clip.id);
+            const deleting = deletingClips.has(clip.id);
             return (
               <div
                 className="vp-clip-item"
                 key={clip.id}
                 data-status={clip.status}
                 data-active={activeClipId === clip.id}
-                // Its delete is queued or in flight (it can wait minutes behind an archive pass).
+                // Its delete is in flight, or queued in the core behind its maintenance lock.
                 data-deleting={deleting ? 'true' : undefined}
                 aria-busy={deleting || undefined}
                 // Focusable so a keyboard user can reach the row's context menu (the ONLY delete
@@ -1106,8 +1114,8 @@ export function VideoPlayer({
           onClose={closeClipMenu}
           ariaLabel={`Actions for clip ${clipLabel(clipMenu.clip)}`}
         >
-          {deletingClipIds.has(clipMenu.clip.id) ? (
-            // Its delete is already queued or in flight: no second one (it would only join the first).
+          {deletingClips.has(clipMenu.clip.id) ? (
+            // Already being deleted: no second delete (the core would only answer that it has it).
             <div
               className="ctx-item"
               role="menuitem"

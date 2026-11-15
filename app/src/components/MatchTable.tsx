@@ -24,6 +24,7 @@ import {
 } from '../lib/match-columns';
 import { clipLabel } from '../lib/clip-format';
 import { deleteMenuLabel, deleteBlockedLabel, clipDeleteMenuLabel } from '../lib/delete-labels';
+import { deletingRows } from '../lib/library-delete';
 import './match-table.css';
 
 function matchesResultFilter(match: MatchSummary, filter: ResultFilter): boolean {
@@ -44,14 +45,15 @@ function matchesSearch(match: MatchSummary, query: string): boolean {
 }
 
 // Context threaded to each cell renderer: the star toggle (for the hero cell's keep-from-deletion
-// button) and the recordings whose delete is queued or in flight (the hero cell tags them).
+// button) and the recordings being deleted (the hero cell tags them).
 interface CellCtx {
   readonly onToggleStar: (id: number, starred: boolean) => void;
   readonly deleting: ReadonlySet<number>;
 }
 
-// The tag on a row whose delete is queued or in flight: it can wait minutes for the core's
-// maintenance lock (an archive pass holds it), and until then the row is still there.
+// The tag on a row being deleted: its delete request is in flight, or the core has queued the delete
+// (it waits for the core's maintenance lock, which an archive pass can hold for minutes). Until the
+// delete is done the row is still there.
 const DELETING_LABEL = 'Deleting…';
 
 // A rendered column = its pure metadata (from match-columns) plus the JSX cell renderer and the
@@ -211,7 +213,7 @@ function ClipThumb({ clip }: { readonly clip: Clip }): React.JSX.Element {
 interface ClipRowProps {
   readonly clip: Clip;
   readonly selected: boolean;
-  // Its delete is queued or in flight: dimmed and tagged until it settles.
+  // Its delete is in flight or queued in the core: dimmed and tagged until it is done.
   readonly deleting: boolean;
   readonly onSelect: (
     clip: Clip,
@@ -306,6 +308,11 @@ function ClipTable(): React.JSX.Element {
   const deleteClip = useLibraryStore((s) => s.deleteClip);
   const deleteClips = useLibraryStore((s) => s.deleteClips);
   const deletingClipIds = useLibraryStore((s) => s.deletingClipIds);
+  const queuedClipIds = useLibraryStore((s) => s.queuedClipIds);
+  const deleting = useMemo(
+    () => deletingRows(deletingClipIds, queuedClipIds),
+    [deletingClipIds, queuedClipIds],
+  );
 
   // Multi-selection for bulk row actions, mirroring the match table: shift-click = range from the
   // anchor, Ctrl/Cmd-click = toggle one. LOCAL to this table (the player only cares about the single
@@ -411,7 +418,7 @@ function ClipTable(): React.JSX.Element {
               key={c.id}
               clip={c}
               selected={isRowSelected(c.id)}
-              deleting={deletingClipIds.has(c.id)}
+              deleting={deleting.has(c.id)}
               onSelect={onRowSelect}
               onToggleStar={(id, starred) => void toggleClipStar(id, starred)}
               onOpenMenu={openRowMenu}
@@ -431,9 +438,9 @@ function ClipTable(): React.JSX.Element {
           const idSet = new Set(ids);
           const targets = clips.filter((c) => idSet.has(c.id));
           const revealable = targets.filter((c) => canReveal(c));
-          // A clip whose delete is already queued or in flight gets no second one (it would only join
-          // the first), so the item deletes the rest, or just says so when there is no rest.
-          const deletable = ids.filter((id) => !deletingClipIds.has(id));
+          // A clip already being deleted gets no second delete (the core would only answer that it has
+          // it already), so the item deletes the rest, or just says so when there is no rest.
+          const deletable = ids.filter((id) => !deleting.has(id));
           const deleteLabel = clipDeleteMenuLabel(deletable.length);
           // Mirror the match table's bulk menu: offer Star only when something is unstarred, Unstar
           // only when something is starred (mixed selections get both).
@@ -659,6 +666,11 @@ export function MatchTable(): React.JSX.Element {
   const deleteMatch = useLibraryStore((s) => s.deleteMatch);
   const deleteMatches = useLibraryStore((s) => s.deleteMatches);
   const deletingMatchIds = useLibraryStore((s) => s.deletingMatchIds);
+  const queuedMatchIds = useLibraryStore((s) => s.queuedMatchIds);
+  const deleting = useMemo(
+    () => deletingRows(deletingMatchIds, queuedMatchIds),
+    [deletingMatchIds, queuedMatchIds],
+  );
 
   // Multi-selection for bulk row actions: shift-click = range from the anchor, Ctrl/Cmd-click =
   // toggle one. LOCAL to the table (the player only cares about the single selectedMatchId). A plain
@@ -743,9 +755,9 @@ export function MatchTable(): React.JSX.Element {
   const cellCtx = useMemo<CellCtx>(
     () => ({
       onToggleStar: (id, starred) => void toggleStar(id, starred),
-      deleting: deletingMatchIds,
+      deleting,
     }),
-    [toggleStar, deletingMatchIds],
+    [toggleStar, deleting],
   );
 
   // Look up a match by id for the bulk menu actions (reveal / copy id over the whole selection).
@@ -971,9 +983,9 @@ export function MatchTable(): React.JSX.Element {
             .map((id) => matchById.get(id))
             .filter((m): m is MatchSummary => m != null);
           const revealable = targets.filter((m) => canReveal(m));
-          // A recording whose delete is already queued or in flight gets no second one (it would only
-          // join the first), so the delete item acts on the rest, or just says so when there is none.
-          const deletable = ids.filter((id) => !deletingMatchIds.has(id));
+          // A recording already being deleted gets no second delete (the core would only answer that it
+          // has it already), so the delete item acts on the rest, or just says so when there is none.
+          const deletable = ids.filter((id) => !deleting.has(id));
           // A recording delete never touches clips (they're deleted separately, from their own
           // right-click menus) — but when the targets carry clips, say so: the row will visibly
           // survive as a videoless stub, and the label explains why.

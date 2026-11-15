@@ -1,6 +1,5 @@
 // Minimal typed client for the local core bridge: REST over fetch plus a
 // WebSocket client with exponential-backoff reconnect.
-import { createDeleteQueue } from '../lib/delete-queue';
 
 // Endpoints resolve from the preload-exposed bridge when present (packaged /
 // Electron), falling back to the known loopback defaults (dev / browser).
@@ -369,31 +368,26 @@ async function postJsonBody<TBody, TResult>(path: string, body: TBody): Promise<
   return (await res.json()) as TResult;
 }
 
-// How long a delete may take once it is sent (its wait in the delete queue below doesn't count). It
-// waits for the core's storage-maintenance lock, which the archiver holds through a whole pass of
-// cross-drive copies (minutes for multi-GB VODs onto a slow HDD). The core finishes a delete even
-// after the request gives up and announces it (match.deleted / clip.deleted), so this only bounds a
-// wedged core.
-const DELETE_TIMEOUT_MS = 10 * 60_000;
+// How long a delete request may take. The core answers one within about half a minute: a delete waits
+// that long for its storage-maintenance lock (the archiver holds it through a whole pass of
+// cross-drive copies, minutes for multi-GB VODs onto a slow drive), and is then queued in the core,
+// answered 'queued' at once and done once the lock frees, its match.deleted / clip.deleted frame saying
+// so. So this only bounds a core that stopped answering, with room to spare over that half minute.
+const DELETE_TIMEOUT_MS = 90_000;
 
-// Every recording and clip delete goes through this one queue, a single request at a time, and a
-// delete of a row already queued or in flight joins it (see lib/delete-queue). They are the only
-// requests the core makes wait on its maintenance lock, so they are the only ones queued: everything
-// else goes straight out, and a delete held up behind an archive pass can't hold it back.
-const deletes = createDeleteQueue();
-
-// DELETE returning no body (204/200).
-async function delVoid(path: string): Promise<void> {
+// Sends a delete. A refusal throws with the core's own reason where it gave one, like putJson: the
+// delete-failure banner shows it.
+async function sendDelete(path: string): Promise<Response> {
   const res = await fetch(`${bridgeBase()}${path}`, {
     method: 'DELETE',
-    headers: { ...authHeaders() },
+    headers: { Accept: 'application/json', ...authHeaders() },
     signal: AbortSignal.timeout(DELETE_TIMEOUT_MS),
   });
   if (!res.ok) {
-    // The core's own reason where it gave one, like putJson: the delete-failure banner shows it.
     const detail = await errorBodyMessage(res);
     throw new Error(detail ?? `DELETE ${path} failed: ${res.status} ${res.statusText}`);
   }
+  return res;
 }
 
 export function fetchHealth(): Promise<Health> {
@@ -644,10 +638,14 @@ export function createClip(
   return postJsonBody<typeof body, Clip>(`/matches/${matchId}/clips`, body);
 }
 
-// Permanently deletes a clip (DELETE /clips/{id}): unlinks the .mp4 then drops the row. Sent through
-// the delete queue (see `deletes`).
-export function deleteClip(clipId: number): Promise<void> {
-  return deletes.run(`clip:${clipId}`, () => delVoid(`/clips/${clipId}`));
+// What DELETE /clips/{id} did: 'deleted', or 'queued' when the core does it later, as for a recording
+// (see MatchDeleteOutcome); its clip.deleted frame then says it is done.
+export type ClipDeleteOutcome = 'deleted' | 'queued';
+
+// Permanently deletes a clip (DELETE /clips/{id}): unlinks the .mp4 then drops the row.
+export async function deleteClip(clipId: number): Promise<ClipDeleteOutcome> {
+  const res = await sendDelete(`/clips/${clipId}`);
+  return res.status === 202 ? 'queued' : 'deleted';
 }
 
 // Toggles the star on a match (PATCH /matches/{id}) and returns the updated row.
@@ -662,8 +660,10 @@ export function setClipStarred(clipId: number, starred: boolean): Promise<Clip> 
 }
 
 // Which branch DELETE /matches/{id} took: 'deleted' = the row went entirely (it had no clips);
-// 'stubbed' = the row survives videoless because its clips still need it.
-export type MatchDeleteOutcome = 'deleted' | 'stubbed';
+// 'stubbed' = the row survives videoless because its clips still need it; 'queued' = not yet: the core
+// waits for its maintenance lock and does the delete once it frees, and its match.deleted frame then
+// says which of the other two it was.
+export type MatchDeleteOutcome = 'deleted' | 'stubbed' | 'queued';
 
 // Permanently deletes a recording (DELETE /matches/{id}) — and only the recording; clips are their
 // own objects with their own delete. Clipless: the row + markers/pauses (FK cascade) and the .mp4 +
@@ -673,23 +673,10 @@ export type MatchDeleteOutcome = 'deleted' | 'stubbed';
 // Returns the server's outcome so the store can mirror the AUTHORITATIVE branch: the server decides
 // stub-vs-delete from the clip table under its maintenance lock, and the store's own clip list can
 // lag it (a clip created in the ~200ms before its clip.created reload lands). Null when the body is
-// missing/unrecognized (an older core) — the caller then falls back to its local guess. Sent through
-// the delete queue (see `deletes`).
-export function deleteMatch(id: number): Promise<MatchDeleteOutcome | null> {
-  return deletes.run(`match:${id}`, () => sendMatchDelete(id));
-}
-
-async function sendMatchDelete(id: number): Promise<MatchDeleteOutcome | null> {
-  const res = await fetch(`${bridgeBase()}/matches/${id}`, {
-    method: 'DELETE',
-    headers: { Accept: 'application/json', ...authHeaders() },
-    signal: AbortSignal.timeout(DELETE_TIMEOUT_MS),
-  });
-  if (!res.ok) {
-    // The core's own reason where it gave one, as in delVoid.
-    const detail = await errorBodyMessage(res);
-    throw new Error(detail ?? `DELETE /matches/${id} failed: ${res.status} ${res.statusText}`);
-  }
+// missing/unrecognized (an older core) — the caller then falls back to its local guess.
+export async function deleteMatch(id: number): Promise<MatchDeleteOutcome | null> {
+  const res = await sendDelete(`/matches/${id}`);
+  if (res.status === 202) return 'queued';
   try {
     const body: unknown = await res.json();
     const outcome = isRecord(body) ? body.outcome : null;
