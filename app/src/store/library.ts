@@ -114,8 +114,9 @@ export interface LibraryState {
   readonly deleteClips: (ids: readonly number[]) => Promise<void>;
   readonly setDiskWarning: (warning: DiskWarning | null) => void;
   readonly setUpdate: (update: UpdateState | null) => void;
-  // A `silent` reload (reconnect reconciliation) refreshes in the background without flipping the
-  // table to its loading spinner, so an open player isn't torn down on every reconnect.
+  // A `silent` reload (reconnect reconciliation, a library frame, a delete's reconcile) refreshes in
+  // the background without flipping the table to its loading spinner, so the rows stay on screen and
+  // an open player isn't torn down.
   readonly load: (opts?: { readonly silent?: boolean }) => Promise<void>;
 }
 
@@ -338,7 +339,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
 
     load: async (opts) => {
       const token = ++loadToken;
-      // A silent reload (reconnect reconciliation) skips the 'loading' flip so the table + open player
+      // A silent reload (see LibraryState.load) skips the 'loading' flip so the table + open player
       // aren't torn down by a spinner; the merge below still settles loadState to 'ready'/'error'.
       if (!opts?.silent) set({ loadState: 'loading' });
       // Matches, counts, and clips are independent; settle all three so one failing
@@ -439,12 +440,17 @@ export function startLibrary(): () => void {
   // Coalesce bursts: a backlog enriching can fire several frames in quick succession. The store's
   // loadToken already prevents stale results from clobbering, but without coalescing each frame still
   // issues its own fetch pair. Collapse a burst into a single reload fired shortly after the first.
+  //
+  // Silent, so the list refreshes in place: the loading state hides every row until the fetches land,
+  // which after each delete (its match.deleted frame) blanked the table and threw away its scroll
+  // position. Silent only skips that state; a core that can't be reached still shows the error state,
+  // and the first load above still shows the loading one.
   let reloadTimer: ReturnType<typeof setTimeout> | null = null;
   const scheduleReload = (): void => {
     if (reloadTimer !== null) return;
     reloadTimer = setTimeout(() => {
       reloadTimer = null;
-      void useLibraryStore.getState().load();
+      void useLibraryStore.getState().load({ silent: true });
     }, 200);
   };
   const off = subscribeToMatchEvents(socket, scheduleReload);

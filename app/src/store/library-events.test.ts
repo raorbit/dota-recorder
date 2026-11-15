@@ -185,6 +185,53 @@ describe('startLibrary storage-events wiring', () => {
     teardown();
   });
 
+  it('reloads in place on a library frame, unlike the first load', async () => {
+    const teardown = startLibrary();
+    // The first load has nothing to show yet, so it shows the loading state.
+    expect(useLibraryStore.getState().loadState).toBe('loading');
+    await flush();
+    expect(useLibraryStore.getState().loadState).toBe('ready');
+    // Hold the frame's reload in flight to see what the table shows meanwhile.
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const serve = fetchMock.getMockImplementation() as (url: unknown) => Promise<unknown>;
+    fetchMock.mockImplementation(async (url: unknown) => {
+      await held;
+      return serve(url);
+    });
+    const before = matchesCallCount();
+
+    FakeWebSocket.instances[0].emitMessage({
+      type: 'match.deleted',
+      payload: { id: 7, outcome: 'deleted' },
+    });
+    await vi.advanceTimersByTimeAsync(200); // scheduleReload's coalescing delay
+
+    // The reload is in flight and the rows stay up: the loading state would hide them all.
+    expect(matchesCallCount()).toBeGreaterThan(before);
+    expect(useLibraryStore.getState().loadState).toBe('ready');
+    release();
+    await flush();
+    expect(useLibraryStore.getState().loadState).toBe('ready');
+    teardown();
+  });
+
+  it('still shows the error state when a frame reload cannot reach the core', async () => {
+    const teardown = startLibrary();
+    await flush();
+    fetchMock.mockImplementation(() => Promise.reject(new TypeError('Failed to fetch')));
+
+    FakeWebSocket.instances[0].emitMessage({
+      type: 'retention.swept',
+      payload: { deletedIds: [] },
+    });
+    await vi.advanceTimersByTimeAsync(200);
+    await flush();
+
+    expect(useLibraryStore.getState().loadState).toBe('error');
+    teardown();
+  });
+
   it('reconciles with the core when a recording delete times out', async () => {
     // The DELETE gives up behind a long archive pass, and the core finishes it once the lock frees.
     // Only the reconcile reload can show that 7 went.
