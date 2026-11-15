@@ -21,6 +21,7 @@ import dev.dotarec.data.TestDb;
 import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.FileSystemException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -451,6 +452,46 @@ class RecordingArchiverTest {
                 .doesNotExist();
         assertThat(videoDir.resolve("old.mp4")).doesNotExist();
         assertThat(matches.findById(oldest).orElseThrow().videoPath()).isEqualTo(dst.toString());
+    }
+
+    @Test
+    void aCopyGoneWithItsDriveAfterTheRename_failsTheMove_andKeepsTheSource() throws Exception {
+        // The archive drive drops off during the flush after the rename, which never reached it:
+        // plugged back in, it holds only the .partial. That flush failing must not let the move go
+        // on, or the row would point at a file that is gone and the source, the only full copy left,
+        // would be deleted. The newer VOD is too big for the archive's cap, so only the oldest moves.
+        Path archive = configureArchive("hdd", 2);
+        settings.get().retentionCapGb = 1;
+        long oldest = seed(videoDir, "old.mp4", "old.jpg", 4 * 1024, 1_000L, false);
+        seed(videoDir, "new.mp4", "new.jpg", 5 * GIB / 2, 2_000L, false);
+        Path src = videoDir.resolve("old.mp4");
+        Path thumb = videoDir.resolve("thumbs").resolve("old.jpg");
+        Path dst = archive.resolve(oldest + "-old.mp4");
+        Path partial = archive.resolve(oldest + "-old.mp4" + RecordingArchiver.PARTIAL_SUFFIX);
+        RecordingArchiver droppingDrive =
+                new RecordingArchiver(matches, clips, settings, sweeper, hugeFreeProbe()) {
+                    @Override
+                    void syncToDisk(Path file) throws IOException {
+                        if (file.equals(dst)) {
+                            Files.move(dst, partial); // what the drive holds once it is back
+                            throw new FileSystemException(file.toString(), null,
+                                    "The device is not ready");
+                        }
+                        super.syncToDisk(file);
+                    }
+                };
+
+        try (MockedStatic<Files> ignored = forceCrossStoreMoves()) {
+            assertThat(droppingDrive.archive(null).movedIds()).isEmpty();
+        }
+
+        assertThat(src).exists();
+        assertThat(Files.size(src)).isEqualTo(4 * 1024);
+        assertThat(thumb).exists();
+        var row = matches.findById(oldest).orElseThrow();
+        assertThat(row.videoPath()).isEqualTo(src.toString());
+        assertThat(row.thumbPath()).isEqualTo(thumb.toString());
+        assertThat(dst).doesNotExist();
     }
 
     @Test
