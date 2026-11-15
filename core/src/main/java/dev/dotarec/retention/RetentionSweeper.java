@@ -350,14 +350,16 @@ public class RetentionSweeper {
                     // Re-check starred ATOMICALLY at deletion time: a star PATCH commits outside the
                     // maintenance lock, so a row starred between the candidate snapshot and this turn
                     // must win. The claim's WHERE re-tests starred=0 (and that the row still points at
-                    // the snapshotted file) in the same UPDATE that prunes the paths — no
-                    // check-then-unlink window remains — and the unlink runs inside that UPDATE's
-                    // transaction, which commits only once the file is gone: a failed unlink rolls the
-                    // prune back, so the row keeps referencing its intact VOD and the next sweep
-                    // retries, and a process ended part way never leaves a pruned row whose file is
-                    // still on disk. The claim also prunes the VOD row only (markers/stats survive with
-                    // nulled paths); its clips are NOT cascade-deleted: clips are standalone files,
-                    // kept and evicted LAST — after every non-starred VOD — in the clip phase below.
+                    // the snapshotted file) in one UPDATE that changes nothing, and only a row it
+                    // matched has its file unlinked. The prune comes last, once the file is gone, and
+                    // nothing — no transaction, no pooled connection — is held across the unlink, which
+                    // can block for seconds on an archive drive: a failed unlink leaves the row exactly
+                    // as it was, so it keeps referencing its intact VOD and the next sweep retries, and
+                    // a process ended part way never leaves a pruned row whose file is still on disk (a
+                    // row left pointing at a deleted file is the missing-file reconcile's to catch up).
+                    // The claim also prunes the VOD row only (markers/stats survive with nulled paths);
+                    // its clips are NOT cascade-deleted: clips are standalone files, kept and evicted
+                    // LAST — after every non-starred VOD — in the clip phase below.
                     VideoUnlink unlink = new VideoUnlink(m.videoPath());
                     boolean pruned;
                     try {
@@ -366,19 +368,19 @@ public class RetentionSweeper {
                         if (!unlink.gone) {
                             throw e; // nothing changed: logged below, and the next sweep retries
                         }
-                        // The video is gone but its prune didn't commit (an I/O error or a full disk
-                        // under the database), so the row still points at the vanished file until the
-                        // missing-file reconcile catches it up. The bytes ARE gone: credit them below,
-                        // or this pass would go on evicting VODs to offset them — every one of them,
-                        // if no commit can land. freed/deletedIds stay uncredited, as nothing was
-                        // fully evicted.
+                        // The video is gone but its prune didn't land (a SQLITE_BUSY, an I/O error or a
+                        // full disk under the database), so the row still points at the vanished file
+                        // until the missing-file reconcile catches it up. The bytes ARE gone: credit
+                        // them below, or this pass would go on evicting VODs to offset them — every one
+                        // of them, if no prune can land. freed/deletedIds stay uncredited, as nothing
+                        // was fully evicted.
                         log.warn("Retention sweep deleted match {}'s video but could not prune its row: {}",
                                 m.id(), e.toString());
                         pruned = false;
                     }
                     if (!unlink.gone) {
                         if (unlink.attempted) {
-                            // The file is still on disk and the claim rolled back. The thumbnail is
+                            // The file is still on disk and the claim changed nothing. The thumbnail is
                             // deliberately left untouched — it is unlinked only AFTER the video delete
                             // is confirmed below, so a failed video delete (e.g. a locked .mp4) never
                             // leaves the row pointing at a deleted thumb.
@@ -400,8 +402,8 @@ public class RetentionSweeper {
                     }
                 } catch (RuntimeException e) {
                     // One match failing (e.g. a SQLITE_BUSY on the claim) must not abort the whole
-                    // pass: log and keep evicting. A failed claim changed nothing — its prune rolls
-                    // back with it — and retries next sweep.
+                    // pass: log and keep evicting. A failed claim changed nothing and retries next
+                    // sweep.
                     log.warn("Retention sweep could not evict match {}: {}", m.id(), e.toString());
                 }
             }
@@ -442,12 +444,12 @@ public class RetentionSweeper {
                     // above: a star PATCH commits outside the maintenance lock, so a clip starred
                     // between the candidate snapshot and this turn must win. The claim's WHERE
                     // re-tests starred=0 (and that the row still points at the snapshotted file) in
-                    // one UPDATE — no check-then-unlink window. Unlike the match claim (whose
-                    // nulled paths ARE the swept row's end state), the clip claim mutates NOTHING:
-                    // a clip row is deleted outright after the unlink, so a path-nulling claim
-                    // would only open a crash window — a hard kill between the committed null and
-                    // the unlink would leave a pathless row whose .mp4 still exists, invisible to
-                    // the budget (measureStoredBytes skips null-path clip rows) and never swept.
+                    // one UPDATE — no check-then-unlink window. Like the match claim, the clip claim
+                    // mutates NOTHING, and here nothing is pruned after the unlink either: a clip row
+                    // is deleted outright once its file is gone, so a path-nulling claim would only
+                    // open a crash window — a hard kill between the committed null and the unlink
+                    // would leave a pathless row whose .mp4 still exists, invisible to the budget
+                    // (measureStoredBytes skips null-path clip rows) and never swept.
                     if (!clips.claimForSweep(clip.id(), clip.videoPath())) {
                         continue; // starred (or repointed/deleted) since the snapshot — not deletable
                     }
@@ -835,9 +837,9 @@ public class RetentionSweeper {
     }
 
     /**
-     * The unlink {@link MatchRepository#claimForSweep} runs inside its transaction. It remembers
-     * whether it ran and whether the video is gone, so a database failure after it can be told from
-     * one before it.
+     * The unlink {@link MatchRepository#claimForSweep} runs between its claim and its prune. It
+     * remembers whether it ran and whether the video is gone, so a database failure after it (the
+     * prune) can be told from one before it (the claim).
      */
     private final class VideoUnlink implements BooleanSupplier {
         private final String path;

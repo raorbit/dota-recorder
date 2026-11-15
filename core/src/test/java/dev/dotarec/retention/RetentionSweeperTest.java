@@ -363,9 +363,9 @@ class RetentionSweeperTest {
     void failedVideoDeleteLeavesThumbnailIntactAndDoesNotDangleThumbPath() throws Exception {
         // F17: the oldest match's .mp4 can't be deleted (an open handle / locked file on Windows), but
         // its thumbnail IS a normal deletable file. The thumbnail must be unlinked ONLY AFTER the video
-        // delete is confirmed — otherwise the thumb is gone yet the rolled-back claim leaves its path on
-        // the row, a permanent dangling thumb_path. A newer real VOD pushes over cap so the undeletable
-        // (oldest) match is tried first, then the pass continues to evict the real one.
+        // delete is confirmed — otherwise the thumb is gone yet the claim, which changed nothing, leaves
+        // its path on the row, a permanent dangling thumb_path. A newer real VOD pushes over cap so the
+        // undeletable (oldest) match is tried first, then the pass continues to evict the real one.
         settings.get().retentionCapGb = 1;
         long gib = 1024L * 1024 * 1024;
 
@@ -390,9 +390,9 @@ class RetentionSweeperTest {
 
     @Test
     void aSweepCutOffDuringTheUnlink_leavesTheRowPointingAtItsFile() throws Exception {
-        // The app quits or installs an update mid-eviction, the process ended outright. Nothing the
-        // claim did may be on disk by then: a row pruned while its file is still there is counted and
-        // swept by nothing again, and the next boot no longer adopts a file from before its floor.
+        // The app quits or installs an update mid-eviction, the process ended outright. The row must
+        // not be pruned by then: a row pruned while its file is still there is counted and swept by
+        // nothing again, and the next boot no longer adopts a file from before its floor.
         settings.get().retentionCapGb = 1;
         long gib = 1024L * 1024 * 1024;
         long oldest = seedWithFiles("old.mp4", "old.jpg", 2 * gib, 1_000L, false);
@@ -411,24 +411,70 @@ class RetentionSweeperTest {
     }
 
     @Test
+    void aSweepCutOffOnceTheVideoIsGone_leavesARowTheMissingFileReconcileCatchesUp() throws Exception {
+        // The process ends after the unlink but before the prune: the row is left pointing at a file
+        // that is gone. From the next boot's first sweep it counts 0 bytes, so nothing newer is evicted
+        // to offset bytes already freed, and a later sweep at least 30 minutes on prunes it like a
+        // swept row (kept, with its markers, paths and size nulled).
+        settings.get().retentionCapGb = 1;
+        long gib = 1024L * 1024 * 1024;
+        long oldest = seedWithFiles("old.mp4", "old.jpg", 2 * gib, 1_000L, false);
+        long newer = seedWithFiles("new.mp4", "new.jpg", gib / 2, 2_000L, false);
+        markers.insert(oldest, "kill", 10.0, 30, null, "gsi");
+        Path video = videoDir.resolve("old.mp4");
+
+        try (MockedStatic<Files> files = mockStatic(Files.class, CALLS_REAL_METHODS)) {
+            // The unlink's own check that the file is gone runs right after the real delete.
+            files.when(() -> Files.exists(eq(video))).thenThrow(new ProcessEnded());
+            assertThatThrownBy(() -> sweeper.sweep(null)).isInstanceOf(ProcessEnded.class);
+        }
+
+        assertThat(video).doesNotExist();
+        assertThat(matches.findById(oldest).orElseThrow().videoPath()).isEqualTo(video.toString());
+
+        AtomicLong now = new AtomicLong(1_000_000L);
+        RetentionSweeper nextBoot = sweeperAt(now); // a fresh sweeper: an empty miss registry
+        RetentionSweeper.SweepResult first = nextBoot.sweep(null);
+
+        assertThat(first.totalAfterBytes()).isEqualTo(gib / 2);
+        assertThat(first.deletedIds()).isEmpty();
+        assertThat(videoDir.resolve("new.mp4")).exists();
+        assertThat(matches.findById(oldest).orElseThrow().videoPath())
+                .as("a single miss must not strip the row's path")
+                .isEqualTo(video.toString());
+
+        now.addAndGet(31 * 60_000L); // past the 30-minute confirmation age floor
+        RetentionSweeper.SweepResult second = nextBoot.sweep(null);
+
+        assertThat(second.deletedIds()).isEmpty();
+        var reconciled = matches.findById(oldest).orElseThrow();
+        assertThat(reconciled.videoPath()).isNull();
+        assertThat(reconciled.thumbPath()).isNull();
+        assertThat(reconciled.fileSizeBytes()).isNull();
+        assertThat(markers.findByMatchId(oldest)).hasSize(1);
+        assertThat(videoDir.resolve("new.mp4")).exists();
+        assertThat(matches.findById(newer).orElseThrow().videoPath()).isNotNull();
+    }
+
+    @Test
     void aPruneThatFailsOnceTheVideoIsGone_stillCreditsItsBytes() throws Exception {
-        // The claim commits only after the unlink, so the commit can fail with the video already gone
-        // (an I/O error or a full disk under the database). Those bytes are gone all the same, and
-        // crediting them ends the pass where a clean one would end; otherwise it would go on evicting
-        // newer VODs to offset them, every one of them while no commit can land. The row keeps its
-        // path for the missing-file reconcile, and the thumbnail goes with its video.
+        // The claim prunes only after the unlink, so the prune can fail with the video already gone (a
+        // SQLITE_BUSY, an I/O error or a full disk under the database). Those bytes are gone all the
+        // same, and crediting them ends the pass where a clean one would end; otherwise it would go on
+        // evicting newer VODs to offset them, every one of them while no prune can land. The row keeps
+        // its path for the missing-file reconcile, and the thumbnail goes with its video.
         settings.get().retentionCapGb = 2;
         long gib = 1024L * 1024 * 1024;
         long oldest = seedWithFiles("old.mp4", "old.jpg", 2 * gib, 1_000L, false);
         seedWithFiles("mid.mp4", "mid.jpg", gib, 2_000L, false);
         seedWithFiles("new.mp4", "new.jpg", gib, 3_000L, false);
-        MatchRepository noCommits = spy(matches);
+        MatchRepository noPrunes = spy(matches);
         doAnswer(inv -> {
             BooleanSupplier unlink = inv.getArgument(2);
             unlink.getAsBoolean();
-            throw new IllegalStateException("simulated SQLITE_FULL on commit");
-        }).when(noCommits).claimForSweep(anyLong(), anyString(), any());
-        RetentionSweeper failing = new RetentionSweeper(noCommits, clips, settings, events);
+            throw new IllegalStateException("simulated SQLITE_FULL on the prune");
+        }).when(noPrunes).claimForSweep(anyLong(), anyString(), any());
+        RetentionSweeper failing = new RetentionSweeper(noPrunes, clips, settings, events);
 
         RetentionSweeper.SweepResult result = failing.sweep(null);
 
@@ -852,7 +898,7 @@ class RetentionSweeperTest {
     void matchStarredAfterCandidateSnapshotIsNeverDeleted() throws Exception {
         // The user stars the oldest match in the instant between the sweeper's candidate snapshot and
         // that row's eviction turn (a star PATCH commits outside the maintenance lock). The atomic
-        // claim re-checks starred INSIDE the pruning UPDATE, so the claim fails, the file survives,
+        // claim re-checks starred INSIDE its guarded UPDATE, so the claim fails, the file survives,
         // and eviction moves on to the next candidate.
         settings.get().retentionCapGb = 1;
         long gib = 1024L * 1024 * 1024;

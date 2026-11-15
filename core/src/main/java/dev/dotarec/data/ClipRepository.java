@@ -373,14 +373,14 @@ public class ClipRepository {
      * read-then-write race: a star PATCH that commits between the sweeper's candidate snapshot and
      * this clip's eviction turn wins — the claim matches nothing and the file is never unlinked.
      *
-     * <p>Unlike {@link MatchRepository#claimForSweep} — whose nulled paths ARE a swept match row's
-     * end state (the row is kept) — this claim mutates NOTHING ({@code SET video_path =
-     * video_path}): a swept clip's row is deleted outright after the unlink, so pre-nulling the
-     * paths would only open a crash window — a hard kill between the committed null and the unlink
-     * would leave a pathless row whose .mp4 still exists on disk, invisible to the stored-bytes
-     * budget (which skips null-path clip rows) and never swept again. After a successful claim the
-     * caller unlinks the file and {@link #delete}s the row; on any failure the row is simply left
-     * as the sweep found it — no undo step exists or is needed.
+     * <p>Like the claim step of {@link MatchRepository#claimForSweep}, this claim mutates NOTHING
+     * ({@code SET video_path = video_path}), but here no prune follows the unlink: a swept clip's row
+     * is deleted outright once its file is gone, where a match row is kept with nulled paths.
+     * Pre-nulling the paths would only open a crash window — a hard kill between the committed null
+     * and the unlink would leave a pathless row whose .mp4 still exists on disk, invisible to the
+     * stored-bytes budget (which skips null-path clip rows) and never swept again. After a successful
+     * claim the caller unlinks the file and {@link #delete}s the row; on any failure the row is simply
+     * left as the sweep found it — no undo step exists or is needed.
      *
      * @return true only if the row still matches the snapshot; the caller may then unlink the file
      */
