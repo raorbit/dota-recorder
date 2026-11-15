@@ -489,6 +489,39 @@ describe('startLibrary storage-events wiring', () => {
     teardown();
   });
 
+  it('does not mark a queued row again once the core said its delete is over', async () => {
+    // The core queued 8's delete and, the lock free again, did it at once: its frame came before the
+    // bulk run that asked for it settled, since 7's answer was still out. Clip 5 likewise.
+    const held = heldDelete();
+    const core = {
+      matches: [{ id: 7 }, { id: 8, videoPath: 'C:/vods/8.mp4' }],
+      clips: [5, 6].map((id) => ({ id, parentMatchId: 8 })),
+    };
+    serveLibrary(core, (url) =>
+      url.endsWith('/matches/7') || url.endsWith('/clips/6') ? held.answer : QUEUED,
+    );
+    const teardown = startLibrary();
+    await flush();
+    const ws = FakeWebSocket.instances[0];
+
+    const recordings = useLibraryStore.getState().deleteMatches([7, 8]);
+    const clips = useLibraryStore.getState().deleteClips([5, 6]);
+    await flush();
+    ws.emitMessage({ type: 'match.deleted', payload: { id: 8, outcome: 'stubbed' } });
+    core.clips = [{ id: 6, parentMatchId: 8 }];
+    ws.emitMessage({ type: 'clip.deleted', payload: { clipId: 5, parentMatchId: 8 } });
+    held.release();
+    await recordings;
+    await clips;
+
+    expect(queuedMatches()).toEqual([]);
+    expect(queuedClips()).toEqual([]);
+    expect(useLibraryStore.getState().matches).toEqual([
+      expect.objectContaining({ id: 8, videoPath: null }),
+    ]);
+    teardown();
+  });
+
   it('keeps a clip delete and a recording delete with the same id apart', async () => {
     // Recording 7 and clip 7 (of recording 1) both exist: each delete marks, and is done, on its own.
     const held = heldDelete();

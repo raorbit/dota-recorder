@@ -161,6 +161,25 @@ export interface LibraryState {
 // store state) so it never triggers a re-render.
 let loadToken = 0;
 
+// The frames that said a delete is over (match.deleted / clip.deleted, or delete.failed), numbered in
+// the order they came, by row. The core can be done with a delete it answered 'queued' before the
+// request that asked for it has settled (a bulk run settles all at once, and the lock may free at any
+// moment), its frame and its status already in: marking the row as queued then would leave it showing
+// "Deleting…" until the next status. A delete run counts the frames from when it starts, and a row
+// whose delete has been over since is not marked again. Module-scoped like loadToken.
+let finishSeq = 0;
+const matchFinishedAt = new Map<number, number>();
+const clipFinishedAt = new Map<number, number>();
+
+// The ids in `queued` whose delete was not over by a frame that came after `startedAt`.
+function stillQueued(
+  queued: ReadonlySet<number>,
+  finishedAt: ReadonlyMap<number, number>,
+  startedAt: number,
+): number[] {
+  return [...queued].filter((id) => (finishedAt.get(id) ?? -1) <= startedAt);
+}
+
 // One of the deleting* or queued* sets, `from`, with `ids` added or taken out. Always a new set, never
 // `from` changed in place, so a table reading it re-renders.
 function withIds(from: ReadonlySet<number>, ids: Iterable<number>): ReadonlySet<number> {
@@ -238,6 +257,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
   // reload. Returns them.
   const runMatchDeletes = async (ids: readonly number[]): Promise<readonly unknown[]> => {
     set((s) => ({ deletingMatchIds: withIds(s.deletingMatchIds, ids), deleteError: null }));
+    const startedAt = finishSeq;
     const removed = new Set<number>();
     const stubbed = new Set<number>();
     const unknown = new Set<number>(); // no outcome in the response (older core) -> local guess
@@ -275,9 +295,13 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
           )
         : {}),
       deletingMatchIds: withoutIds(s.deletingMatchIds, ids),
-      // Done or refused, the core no longer has the delete; queued, it does until its frame. One that
-      // timed out is left to the core's status, which lists it for as long as the core still has it.
-      queuedMatchIds: withIds(withoutIds(s.queuedMatchIds, [...done, ...refused]), queued),
+      // Done or refused, the core no longer has the delete; queued, it does until its frame (unless
+      // that came already). One that timed out is left to the core's status, which lists it for as
+      // long as the core still has it.
+      queuedMatchIds: withIds(
+        withoutIds(s.queuedMatchIds, [...done, ...refused]),
+        stillQueued(queued, matchFinishedAt, startedAt),
+      ),
       ...failureReport('recording', errors, ids.length),
     }));
     // Reconcile a failed or timed-out delete with the server's list: one that did land must not leave
@@ -299,6 +323,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
     ids: readonly number[],
   ): Promise<{ readonly errors: readonly unknown[]; readonly queued: ReadonlySet<number> }> => {
     set((s) => ({ deletingClipIds: withIds(s.deletingClipIds, ids), deleteError: null }));
+    const startedAt = finishSeq;
     const removed = new Set<number>();
     const queued = new Set<number>();
     const refused = new Set<number>();
@@ -317,7 +342,10 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
     set((s) => ({
       ...(removed.size > 0 ? applyClipsDeleted(s, removed) : {}),
       deletingClipIds: withoutIds(s.deletingClipIds, ids),
-      queuedClipIds: withIds(withoutIds(s.queuedClipIds, [...removed, ...refused]), queued),
+      queuedClipIds: withIds(
+        withoutIds(s.queuedClipIds, [...removed, ...refused]),
+        stillQueued(queued, clipFinishedAt, startedAt),
+      ),
       ...failureReport('clip', errors, ids.length),
     }));
     if (errors.length > 0) void get().load({ silent: true });
@@ -448,6 +476,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
 
     recordingDeleteDone: (id, outcome) => {
       const done = new Set([id]);
+      matchFinishedAt.set(id, ++finishSeq);
       invalidateLoadForFrame();
       set((s) => ({
         ...applyRecordingsOutcome(s, done, outcome),
@@ -456,6 +485,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
     },
 
     clipDeleteDone: (id) => {
+      clipFinishedAt.set(id, ++finishSeq);
       invalidateLoadForFrame();
       set((s) => ({
         ...applyClipDeleted(s, id),
@@ -465,6 +495,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => {
 
     queuedDeleteFailed: (failure) => {
       const recording = failure.kind === 'match';
+      (recording ? matchFinishedAt : clipFinishedAt).set(failure.id, ++finishSeq);
       set((s) => ({
         deleteError: deleteFailureMessage(recording ? 'recording' : 'clip', 1, 1, failure.message),
         ...(recording
