@@ -638,8 +638,8 @@ public class ObsController implements ObsRecorder, MatchFsm.RecordStatusProbe {
             throw new ObsException(
                     "OBS StopRecord failed" + (resp == null ? " (no response / timeout)" : ""));
         }
-        // PRIMARY path source: the StopRecord response. The OUTPUT_STARTED event carries a null
-        // outputPath in v5, so this is the authoritative way to learn where OBS wrote the file.
+        // PRIMARY path source: the StopRecord response, the authoritative word on where OBS wrote the
+        // file (the OUTPUT_STARTED event's path, null from older obs-websocket, is only a last resort).
         String path = resp.getOutputPath();
         if (path == null || path.isBlank()) {
             // Fallback to the STOPPED event path if the response somehow omitted it.
