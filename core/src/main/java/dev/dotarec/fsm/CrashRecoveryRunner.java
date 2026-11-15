@@ -190,7 +190,7 @@ public class CrashRecoveryRunner implements ApplicationRunner {
             }
             OrphanAdoptionFloors.Snapshot floors =
                     plan.save(plan.linksBack() && anyStillJournaled(reachedBackFor(unfinished)));
-            releaseRowsAdoptedBeforeTheFloors(plan.earliestReadFloor().orElse(startMs), floors);
+            releaseRowsAdoptedBeforeTheFloors(plan.earliestReadFloor().orElse(Long.MAX_VALUE), floors);
             reconcileOrphanVods(floors);
         } finally {
             maintenanceLock.unlock();
@@ -447,8 +447,12 @@ public class CrashRecoveryRunner implements ApplicationRunner {
      * journal is replayed (a link may reach back before the floor, and never takes a file a row still
      * has), and before the orphan scan. Its marker is written only once its transaction commits, so a
      * boot that fails retries; the cutoff, the earliest floor the floors file held when this boot
-     * began (or this boot's scan, with no file), keeps a retry from releasing any row adopted under a
-     * floor, since an adoption always comes more than the quiescence window after its floor.
+     * began, keeps a retry from releasing any row adopted under a floor, since an adoption always
+     * comes more than the quiescence window after its floor. With no floor read (no file, or one that
+     * couldn't be read) there is no cutoff, and every such row goes whenever it was created: a row's
+     * {@code created_at} is the clock of the boot that adopted it, so this boot's own clock could
+     * only add its error, and a boot running behind (a reset CMOS clock before time sync) would
+     * release nothing and still write the marker.
      */
     private void releaseRowsAdoptedBeforeTheFloors(long cutoffMs, OrphanAdoptionFloors.Snapshot floors) {
         if (!floors.saved() || adoptionFloors.released()) {

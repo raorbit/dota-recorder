@@ -1609,6 +1609,28 @@ class CrashRecoveryRunnerTest {
         assertThat(matches.findById(since)).isPresent();
     }
 
+    @org.junit.jupiter.params.ParameterizedTest(name = "floors file {0}")
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"missing", "unreadable"})
+    void withNoFloorReadTheReleaseTakesEveryAdoptedRowWhateverItsCreatedAt(String floorsFile) throws Exception {
+        // This boot's clock is a year behind the boot that adopted the row (a reset CMOS clock before
+        // time sync, say). With no floor read, no row can have been adopted under one, so the boot's
+        // own clock is no cutoff: taken as one, it would release nothing and mark the release done.
+        if (floorsFile.equals("missing")) {
+            Files.delete(floorsFile());
+        } else {
+            Files.writeString(floorsFile(), "not json");
+        }
+        long yearAhead = System.currentTimeMillis() + 365L * 24 * 60 * 60_000L;
+        Path personal = writeModifiedAt(videoDir.resolve("2024-05-01 18-30-12.mkv"), LONG_AGO_MS);
+        long row = adoptedBeforeTheFloors(personal, yearAhead);
+
+        runner.run(null);
+
+        assertThat(matches.findById(row)).isEmpty();
+        assertThat(personal).exists();
+        assertThat(new ObjectMapper().readTree(releaseMarker().toFile()).get("rows").intValue()).isEqualTo(1);
+    }
+
     @Test
     void theReleaseRunsOnceEvenWhenTheFloorsFileIsLostLater() throws Exception {
         Files.delete(floorsFile());

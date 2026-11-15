@@ -54,9 +54,10 @@ import org.slf4j.LoggerFactory;
  * already had may hold the user's own recordings as library rows. Once, on the first boot whose
  * floors are saved, {@link CrashRecoveryRunner} releases them: it removes from the library each
  * unstarred row the import adopted ({@code gsi_only}) before the earliest floor the floors file held
- * when that boot began, or before that boot's scan when there was no file, unless the row is
- * certainly this app's, and leaves its file where it is, below its folder's floor, as the floors
- * would have. Then it writes {@value #RELEASE_FILE_NAME} next to the floors, exactly {@code
+ * when that boot began, or every such row, whenever it was created, when that boot read no floor (no
+ * file, or one it couldn't read), unless the row is certainly this app's, and leaves its file where
+ * it is, below its folder's floor, as the floors would have. Then it writes {@value
+ * #RELEASE_FILE_NAME} next to the floors, exactly {@code
  * {"version":1,"releasedAtMs":<epoch millis>,"rows":<rows released>}}, and never releases again
  * while that file exists, even if the floors file goes. The Go remake can port the step under the
  * same file name and format.
