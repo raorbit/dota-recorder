@@ -498,11 +498,16 @@ class RecordingArchiverTest {
     void interruptedCopiesLeftOnAnArchiveDrive_areRemoved_andNothingElse() throws Exception {
         Path archive = configureArchive("hdd", 10);
         Path thumbs = Files.createDirectories(archive.resolve("thumbs"));
-        Path stale = Files.writeString(archive.resolve("42-2026-11-14 20-01-02.mp4.partial"), "half");
-        Path staleClip = Files.writeString(archive.resolve("clip-7-42-clip-7.mp4.partial"), "half");
-        Path staleThumb = Files.writeString(thumbs.resolve("42-2026-11-14 20-01-02.jpg.partial"), "half");
+        String name = "2026-11-14 20-01-02";
+        long match = seed(videoDir, name + ".mp4", name + ".jpg", 1024, 1_000L, false);
+        String clipName = match + "-clip";
+        long clip = seedClip(videoDir, match, clipName + ".mp4", clipName + ".jpg", 1024, 2_000L, false);
+        Path stale = Files.writeString(archive.resolve(match + "-" + name + ".mp4.partial"), "half");
+        Path staleClip =
+                Files.writeString(archive.resolve("clip-" + clip + "-" + clipName + ".mp4.partial"), "half");
+        Path staleThumb = Files.writeString(thumbs.resolve(match + "-" + name + ".jpg.partial"), "half");
         Path usersOwn = Files.writeString(archive.resolve("holiday.partial"), "mine");
-        Path archived = Files.writeString(archive.resolve("42-2026-11-14 20-01-02.mp4"), "whole");
+        Path archived = Files.writeString(archive.resolve(match + "-" + name + ".mp4"), "whole");
 
         archiver.archive(null);
 
@@ -511,6 +516,44 @@ class RecordingArchiverTest {
         assertThat(staleThumb).doesNotExist();
         assertThat(usersOwn).exists();
         assertThat(archived).exists();
+    }
+
+    @Test
+    void partialsNotLeftForARowWhoseFileIsStillThere_areLeftAlone() throws Exception {
+        // An archive dir can be the user's own folder, a whole drive even, and other tools give their
+        // in-flight files the same suffix. Only the exact copy this archiver writes for a row whose own
+        // file is still in place may go; anything that merely looks like one stays.
+        Path archive = configureArchive("hdd", 10);
+        Path thumbs = Files.createDirectories(archive.resolve("thumbs"));
+        String name = "2026-11-14 20-01-02";
+        long match = seed(videoDir, name + ".mp4", name + ".jpg", 1024, 1_000L, false);
+        long lost = seed(videoDir, "lost.mp4", "lost.jpg", 1024, 2_000L, false);
+        Files.delete(videoDir.resolve("lost.mp4"));
+        // The match's thumbnail copy, which some row points at itself.
+        Path pointedAt = Files.writeString(thumbs.resolve(match + "-" + name + ".jpg.partial"), "x");
+        Path clipVideo = Files.writeString(videoDir.resolve("odd.mp4"), "clip");
+        clips.insert(match, "manual", null, 0.0, 10.0, null, clipVideo.toString(),
+                pointedAt.toString(), 4L, "ready", null, 3_000L);
+        List<Path> leftAlone = List.of(
+                // rclone's in-flight copy, a download, and a row id with someone else's file name
+                Files.writeString(archive.resolve("2025-06-01 Lisbon.mp4.a1b2c3d4.partial"), "theirs"),
+                Files.writeString(archive.resolve("20-backup.zip.partial"), "theirs"),
+                Files.writeString(archive.resolve(match + "-backup.zip.partial"), "theirs"),
+                // a copy's name for a row that doesn't exist
+                Files.writeString(archive.resolve("999-" + name + ".mp4.partial"), "x"),
+                // the video's copy name in thumbs, where only the thumbnail's copy goes
+                Files.writeString(thumbs.resolve(match + "-" + name + ".mp4.partial"), "x"),
+                // a copy of a file its row no longer has, which may be the only one left
+                Files.writeString(archive.resolve(lost + "-lost.mp4.partial"), "x"),
+                pointedAt);
+        Path ours = Files.writeString(archive.resolve(match + "-" + name + ".mp4.partial"), "half");
+
+        archiver.archive(null);
+
+        assertThat(ours).as("this archive dir was cleared").doesNotExist();
+        for (Path p : leftAlone) {
+            assertThat(p).as(p.getFileName().toString()).exists();
+        }
     }
 
     @Test
