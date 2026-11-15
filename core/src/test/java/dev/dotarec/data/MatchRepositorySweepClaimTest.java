@@ -1,11 +1,14 @@
 package dev.dotarec.data;
 
+import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.dotarec.data.MatchRepository.NewMatch;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.sqlite.SQLiteConfig;
+import org.sqlite.SQLiteConnection;
+import org.sqlite.SQLiteDataSource;
 
 import javax.sql.DataSource;
 import java.nio.file.Path;
@@ -23,7 +26,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * Verifies the retention sweep's atomic row operations: {@link MatchRepository#claimForSweep}
  * claims only a still-non-starred row that still points at the snapshotted video (the starred
  * re-check is one UPDATE), runs the unlink only for a row it claimed and with no write lock or
- * pooled connection held, and prunes only once that unlink has removed the file;
+ * pooled connection held, and prunes only once that unlink has removed the file, even on a pooled
+ * connection that a failed BEGIN left with auto-commit off;
  * {@link MatchRepository#reconcileMissingVideo} prunes regardless of starred but only while the
  * row still points at the vanished path.
  */
@@ -191,6 +195,54 @@ class MatchRepositorySweepClaimTest {
     }
 
     @Test
+    void aClaimOnAConnectionAFailedBeginLeftWithAutoCommitOffPrunesNothingBeforeTheUnlink()
+            throws Exception {
+        // A BEGIN IMMEDIATE that times out (another writer held the lock past busy_timeout) leaves
+        // its pooled connection with sqlite-jdbc's flag off and no transaction open, and the pool
+        // hands it out as it is. A transaction begun on it commits statement by statement, so a
+        // claim that counted on one would have pruned the row by now; this unlink fails (a locked
+        // .mp4), and the row must still point at its file.
+        long id = insert("C:\\vods\\locked.mp4", "C:\\vods\\locked.jpg", 100L, false);
+        try (HikariDataSource pool = oneConnectionPool()) {
+            leaveAutoCommitOffAfterAFailedBegin(pool);
+            MatchRepository pooled = new MatchRepository(pool);
+
+            assertThat(pooled.claimForSweep(id, "C:\\vods\\locked.mp4", () -> false)).isFalse();
+        }
+
+        MatchSummary kept = repo.findById(id).orElseThrow();
+        assertThat(kept.videoPath()).isEqualTo("C:\\vods\\locked.mp4");
+        assertThat(kept.thumbPath()).isEqualTo("C:\\vods\\locked.jpg");
+        assertThat(kept.fileSizeBytes()).isEqualTo(100L);
+    }
+
+    @Test
+    void aClaimThatFindsTheDatabaseLockedLeavesItsConnectionInAutoCommit() throws Exception {
+        // The claim failing with SQLITE_BUSY must not leave its connection in the state above, for
+        // the next caller's transaction on it to commit statement by statement.
+        long id = insert("C:\\vods\\old.mp4", "C:\\vods\\old.jpg", 100L, false);
+        AtomicBoolean unlinked = new AtomicBoolean();
+        try (HikariDataSource pool = oneConnectionPool()) {
+            MatchRepository pooled = new MatchRepository(pool);
+            try (Connection locker = openConnection(); Statement st = locker.createStatement()) {
+                st.execute("BEGIN IMMEDIATE");
+                assertThatThrownBy(() -> pooled.claimForSweep(id, "C:\\vods\\old.mp4",
+                        () -> unlinked.getAndSet(true)))
+                        .isInstanceOf(IllegalStateException.class);
+                st.execute("ROLLBACK");
+            }
+
+            try (Connection conn = pool.getConnection()) {
+                assertThat(conn.unwrap(SQLiteConnection.class).getAutoCommit())
+                        .as("the driver's auto-commit flag after the failed claim")
+                        .isTrue();
+            }
+        }
+        assertThat(unlinked).isFalse();
+        assertThat(repo.findById(id).orElseThrow().videoPath()).isEqualTo("C:\\vods\\old.mp4");
+    }
+
+    @Test
     void reconcileMissingVideoPrunesStarredRowsToo() {
         long id = insert("C:\\vods\\gone.mp4", "C:\\vods\\gone.jpg", 100L, true);
 
@@ -218,6 +270,53 @@ class MatchRepositorySweepClaimTest {
                 1, 2, 3, 400, 500, 10000, 120,
                 "win", 7, 22, null, null, 1800,
                 1_000L, videoPath, thumbPath, fileSizeBytes, starred, 1_000L, null));
+    }
+
+    /**
+     * A pool of ONE connection over this test's database, with the production settings
+     * (DataSourceConfig: WAL, BEGIN IMMEDIATE) but a short busy_timeout: the test knows which
+     * physical connection the next call borrows, and a wait for the write lock fails fast.
+     */
+    private HikariDataSource oneConnectionPool() {
+        SQLiteConfig config = new SQLiteConfig();
+        config.setBusyTimeout(200);
+        config.setJournalMode(SQLiteConfig.JournalMode.WAL);
+        config.setSynchronous(SQLiteConfig.SynchronousMode.NORMAL);
+        config.enforceForeignKeys(true);
+        config.setTransactionMode(SQLiteConfig.TransactionMode.IMMEDIATE);
+        SQLiteDataSource sqlite = new SQLiteDataSource(config);
+        sqlite.setUrl("jdbc:sqlite:" + dbFile);
+        HikariConfig hikari = new HikariConfig();
+        hikari.setDataSource(sqlite);
+        hikari.setMaximumPoolSize(1);
+        return new HikariDataSource(hikari);
+    }
+
+    /**
+     * Has the pool's only connection fail a BEGIN IMMEDIATE while another connection holds the
+     * write lock, which leaves it with sqlite-jdbc's auto-commit flag off and no transaction open,
+     * and checks that it did: sqlite-jdbc sets the flag before it runs the BEGIN, and Hikari
+     * records the change only once the driver call returns, so it neither knows nor resets it.
+     */
+    private void leaveAutoCommitOffAfterAFailedBegin(HikariDataSource pool) throws SQLException {
+        try (Connection locker = openConnection(); Statement st = locker.createStatement()) {
+            st.execute("BEGIN IMMEDIATE");
+            try (Connection conn = pool.getConnection()) {
+                assertThatThrownBy(() -> conn.setAutoCommit(false))
+                        .isInstanceOf(SQLException.class);
+            }
+            st.execute("ROLLBACK");
+        }
+        try (Connection conn = pool.getConnection()) {
+            assertThat(conn.unwrap(SQLiteConnection.class).getAutoCommit())
+                    .as("the driver's auto-commit flag after the failed BEGIN")
+                    .isFalse();
+        }
+    }
+
+    /** A plain connection of its own to this test's database. */
+    private Connection openConnection() throws SQLException {
+        return new SQLiteConfig().createConnection("jdbc:sqlite:" + dbFile);
     }
 
     /** Tries to take the write lock on a connection of its own that never waits for it. */
