@@ -3,6 +3,7 @@ import {
   shouldShowNoVideoPlaceholder,
   retentionAffectsMatch,
   libraryEventRemovesVod,
+  afterStripClipDelete,
   releaseStaleMedia,
   type ReleasableMedia,
 } from './video-availability';
@@ -67,6 +68,41 @@ describe('libraryEventRemovesVod', () => {
     expect(libraryEventRemovesVod({ type: 'match.enriched', payload: { id: 2 } }, 2)).toBe(false);
     expect(libraryEventRemovesVod({ type: 'match.deleted', payload: null }, 2)).toBe(false);
     expect(libraryEventRemovesVod({ type: 'match.deleted', payload: { id: '2' } }, 2)).toBe(false);
+  });
+});
+
+describe('afterStripClipDelete', () => {
+  const clip = { id: 5, parentMatchId: 2 };
+
+  it('drops the clip and leaves it for the full VOD while it is still the one playing', () => {
+    expect(afterStripClipDelete(clip, { matchId: 2, activeClipId: 5 })).toEqual({
+      dropFromStrip: true,
+      leaveClip: true,
+    });
+  });
+
+  it('keeps whatever plays now when another clip or the full VOD took over meanwhile', () => {
+    expect(afterStripClipDelete(clip, { matchId: 2, activeClipId: 6 })).toEqual({
+      dropFromStrip: true,
+      leaveClip: false,
+    });
+    expect(afterStripClipDelete(clip, { matchId: 2, activeClipId: null })).toEqual({
+      dropFromStrip: true,
+      leaveClip: false,
+    });
+  });
+
+  it('touches neither the strip nor playback once another match is open', () => {
+    for (const activeClipId of [null, 9]) {
+      expect(afterStripClipDelete(clip, { matchId: 3, activeClipId })).toEqual({
+        dropFromStrip: false,
+        leaveClip: false,
+      });
+    }
+    expect(afterStripClipDelete(clip, { matchId: null, activeClipId: null })).toEqual({
+      dropFromStrip: false,
+      leaveClip: false,
+    });
   });
 });
 

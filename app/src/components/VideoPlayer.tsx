@@ -21,6 +21,7 @@ import { SPACE_OWNING_TARGETS, shouldSpaceTogglePlayback } from '../lib/playback
 import {
   shouldShowNoVideoPlaceholder,
   libraryEventRemovesVod,
+  afterStripClipDelete,
   releaseStaleMedia,
 } from '../lib/video-availability';
 import { useLibraryStore } from '../store/library';
@@ -141,6 +142,7 @@ export function VideoPlayer({
   const [activeClipId, setActiveClipId] = useState<number | null>(null);
   // Mirror of activeClipId for the clip-socket handler: the subscription effect is keyed on matchId
   // only, so its closure would otherwise see a stale activeClipId when a clip.deleted frame arrives.
+  // onDeleteClip reads it too, after a delete that may have waited minutes behind an archive pass.
   const activeClipIdRef = useRef<number | null>(null);
   // Right-click menu over a clip-strip row (null = closed) + its two-step delete arm. Deleting a clip
   // lives ONLY here (and in the library's right-click menus) — there is deliberately no always-visible
@@ -175,6 +177,8 @@ export function VideoPlayer({
   const reloadLibrary = useLibraryStore((s) => s.load);
 
   const matchId = match?.id ?? null;
+  // Mirror of matchId for onDeleteClip, which resumes after its delete with the click's closure.
+  const matchIdRef = useRef<number | null>(matchId);
 
   // Self-contained per-selection fetch: markers + detail (for durationS + video
   // availability) + pauses in parallel via allSettled. Video availability comes
@@ -364,6 +368,10 @@ export function VideoPlayer({
   useEffect(() => {
     activeClipIdRef.current = activeClipId;
   }, [activeClipId]);
+
+  useEffect(() => {
+    matchIdRef.current = matchId;
+  }, [matchId]);
 
   // After the <video> src swaps to a selected clip's stream, load + start it. Keyed on
   // activeClipId so it fires once per selection, after React has rendered the new src
@@ -640,22 +648,31 @@ export function VideoPlayer({
   }
 
   // Delete a clip (unlinks the .mp4, drops the row), then refresh the strip. Reached only
-  // through the right-click menu's armed confirm. If the deleted clip was playing, fall
+  // through the right-click menu's armed confirm. If the deleted clip is still playing, fall
   // back to the full VOD.
   async function onDeleteClip(clip: Clip): Promise<void> {
     try {
       await deleteClip(clip.id);
-      if (activeClipId === clip.id) {
+      // The delete can finish minutes after the click, so go by what the player shows now (the refs),
+      // not by this closure's activeClipId: the user may have played another clip or opened another
+      // match meanwhile.
+      const { dropFromStrip, leaveClip } = afterStripClipDelete(clip, {
+        matchId: matchIdRef.current,
+        activeClipId: activeClipIdRef.current,
+      });
+      if (leaveClip) {
         setActiveClipId(null);
         // Same transient as playFullVod: null the clip's media duration so the parent-VOD overlay
         // stays hidden until the reloaded VOD reports its real duration, rather than positioning
         // markers against the deleted clip's duration for the render(s) before metadata loads.
         setMediaDurationS(null);
       }
-      // Bump so an in-flight clip fetch (e.g. a clip.* refresh issued before this delete) can't
-      // resolve afterward and resurrect the just-deleted clip with pre-delete data.
-      clipFetchTokenRef.current++;
-      setClips((prev) => prev.filter((c) => c.id !== clip.id));
+      if (dropFromStrip) {
+        // Bump so an in-flight clip fetch (e.g. a clip.* refresh issued before this delete) can't
+        // resolve afterward and resurrect the just-deleted clip with pre-delete data.
+        clipFetchTokenRef.current++;
+        setClips((prev) => prev.filter((c) => c.id !== clip.id));
+      }
       // The strip above is player-local; refresh the store so the library "Clips" bucket list and the
       // sidebar badge drop the deleted clip immediately (the core also publishes a clip.deleted frame,
       // which the store follows too, but this local reload doesn't wait for the round-trip). Silent,
