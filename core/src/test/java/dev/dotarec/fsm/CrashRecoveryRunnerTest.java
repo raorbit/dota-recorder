@@ -524,6 +524,27 @@ class CrashRecoveryRunnerTest {
     }
 
     @Test
+    void relinkNeverTakesAThumbnailCopyCutShort() throws Exception {
+        Path archiveDir = configureArchive("hdd");
+        String recordingBytes = "bytes";
+        long id =
+                insertMatch(
+                        videoDir.resolve("gone.mp4").toString(), null, (long) recordingBytes.length());
+        Path stranded = archiveDir.resolve(id + "-gone.mp4");
+        Files.writeString(stranded, recordingBytes);
+        // An older archiver's thumbnail copy cut short sits under the final name, full size and all
+        // zeros: re-linking the row to it would show a blank image.
+        Path cutShort = Files.createDirectories(archiveDir.resolve("thumbs")).resolve(id + "-gone.jpg");
+        Files.write(cutShort, new byte[4096]);
+
+        runner.run(null);
+
+        MatchSummary row = matches.findById(id).orElseThrow();
+        assertThat(row.videoPath()).isEqualTo(stranded.toString());
+        assertThat(row.thumbPath()).isNotEqualTo(cutShort.toString());
+    }
+
+    @Test
     void doesNotRelinkIdPrefixedArchiveFileWithMismatchedBasename() throws Exception {
         Path archiveDir = configureArchive("hdd");
         // The row LOST its video (missing path), which used to make ANY "<id>-..." file its new VOD. A
@@ -923,6 +944,34 @@ class CrashRecoveryRunnerTest {
     }
 
     @Test
+    void aCopyCutShortIsNeverReLinkedToTheRowThatLostItsVideo() throws Exception {
+        // The recording's drive isn't back at this boot, and the archive holds an older archiver's copy
+        // of it cut short: the row's name and size, but a zeroed tail, so it isn't the recording. The
+        // match keeps its path for the boot its drive is back on, the clip too, and the copies stay.
+        Path archive = chooseArchive("hdd");
+        seedAdoptionFloor(archive, System.currentTimeMillis());
+        byte[] recording = recordingOf(256 * 1024);
+        Path usb = dir.resolve("usb");
+        String videoPath = usb.resolve("2026-10-01 20-00-00.mp4").toString();
+        long id = insertMatch(videoPath, null, (long) recording.length);
+        Path copy = writeModifiedAt(
+                archive.resolve(id + "-2026-10-01 20-00-00.mp4"), cutShortAt(recording, 100 * 1024), LONG_AGO_MS);
+        String clipPath = usb.resolve("clips").resolve(id + "-clip-1.mp4").toString();
+        long clipId = insertClip(id, clipPath, (long) recording.length);
+        Path clipCopy = writeModifiedAt(
+                archive.resolve("clip-" + clipId + "-" + id + "-clip-1.mp4"), new byte[recording.length], LONG_AGO_MS);
+
+        runner.run(null);
+
+        assertThat(matches.findAll())
+                .singleElement()
+                .satisfies(row -> assertThat(row.videoPath()).isEqualTo(videoPath));
+        assertThat(clips.findById(clipId).orElseThrow().videoPath()).isEqualTo(clipPath);
+        assertThat(copy).exists();
+        assertThat(clipCopy).exists();
+    }
+
+    @Test
     void genuineMoveResidueIsDeletedThoughItPredatesTheArchivesFloor() throws Exception {
         Path archive = chooseArchive("hdd");
         seedAdoptionFloor(archive, System.currentTimeMillis());
@@ -1010,6 +1059,80 @@ class CrashRecoveryRunnerTest {
         assertThat(uncompared).exists();
         assertThat(besideIt).exists();
         assertThat(matches.findAll()).hasSize(4);
+    }
+
+    @Test
+    void aRowReLinkedToACopyCutShortGoesBackOnItsOriginal() throws Exception {
+        // Every 0.1.x archiver before the ".partial" copy wrote its copy under the final "<id>-<name>",
+        // full size from the start, so one cut short (a quit, an update, a shutdown) has a zeroed tail,
+        // and a boot that ran before the recording's drive was back re-linked the row to it by its name
+        // and size. The boot that sees the original again puts the row back on it, thumbnail too,
+        // rather than deleting the only good copy as a source left behind; the next boot drops the
+        // copy as move residue.
+        Path archive = configureArchive("hdd");
+        seedAdoptionFloor(videoDir, System.currentTimeMillis());
+        byte[] recording = recordingOf(256 * 1024);
+        byte[] thumbnail = recordingOf(16 * 1024);
+        long id = insertMatch("placeholder", null, (long) recording.length);
+        Path copy = writeModifiedAt(
+                archive.resolve(id + "-2026-10-01 20-00-00.mp4"), cutShortAt(recording, 100 * 1024), LONG_AGO_MS);
+        Path thumbCopy = writeModifiedAt(
+                Files.createDirectories(archive.resolve("thumbs")).resolve(id + "-surrogate-1.jpg"),
+                cutShortAt(thumbnail, 4 * 1024), LONG_AGO_MS);
+        matches.updateVideoPath(id, copy.toString(), thumbCopy.toString());
+        Path original = writeModifiedAt(videoDir.resolve("2026-10-01 20-00-00.mp4"), recording, LONG_AGO_MS);
+        Path thumbOriginal = writeModifiedAt(
+                Files.createDirectories(videoDir.resolve("thumbs")).resolve("surrogate-1.jpg"), thumbnail,
+                LONG_AGO_MS);
+
+        runner.run(null);
+
+        assertThat(original).exists();
+        assertThat(thumbOriginal).exists();
+        assertThat(matches.findAll())
+                .singleElement()
+                .satisfies(
+                        row -> {
+                            assertThat(row.videoPath()).isEqualTo(original.toString());
+                            assertThat(row.thumbPath()).isEqualTo(thumbOriginal.toString());
+                        });
+
+        newRunner().run(null);
+
+        assertThat(copy).doesNotExist();
+        assertThat(original).exists();
+        assertThat(matches.findById(id).orElseThrow().videoPath()).isEqualTo(original.toString());
+    }
+
+    @Test
+    void aSourceGoesOnlyWhenItsCopyHoldsItsBytes() throws Exception {
+        // A copy can be full size and end in data and still not hold the recording: one cut short in
+        // its last 64 KiB, or one an older archiver left with a stretch its drive never got (a power
+        // cut before the cache was written). The source goes only when the copy matches it at its
+        // start, middle and end; otherwise the row goes back on the source. A whole copy still takes
+        // its source.
+        Path archive = configureArchive("hdd");
+        seedAdoptionFloor(videoDir, System.currentTimeMillis());
+        byte[] recording = recordingOf(256 * 1024);
+        byte[] holed = recording.clone();
+        java.util.Arrays.fill(holed, 96 * 1024, 160 * 1024, (byte) 0);
+        long cutLate = archivedRow(
+                archive, "2026-10-01 20-00-00.mp4", cutShortAt(recording, recording.length - 10 * 1024));
+        long withAHole = archivedRow(archive, "2026-10-02 20-00-00.mp4", holed);
+        long whole = archivedRow(archive, "2026-10-03 20-00-00.mp4", recording);
+        Path cutLateSource = writeModifiedAt(videoDir.resolve("2026-10-01 20-00-00.mp4"), recording, LONG_AGO_MS);
+        Path holedSource = writeModifiedAt(videoDir.resolve("2026-10-02 20-00-00.mp4"), recording, LONG_AGO_MS);
+        Path wholeSource = writeModifiedAt(videoDir.resolve("2026-10-03 20-00-00.mp4"), recording, LONG_AGO_MS);
+
+        runner.run(null);
+
+        assertThat(matches.findById(cutLate).orElseThrow().videoPath()).isEqualTo(cutLateSource.toString());
+        assertThat(matches.findById(withAHole).orElseThrow().videoPath()).isEqualTo(holedSource.toString());
+        assertThat(cutLateSource).exists();
+        assertThat(holedSource).exists();
+        assertThat(wholeSource).doesNotExist();
+        assertThat(matches.findById(whole).orElseThrow().videoPath())
+                .isEqualTo(archive.resolve(whole + "-2026-10-03 20-00-00.mp4").toString());
     }
 
     @Test
@@ -1635,6 +1758,26 @@ class CrashRecoveryRunnerTest {
     }
 
     @Test
+    void theReleaseKeepsNoSourceOfACopyCutShort() throws Exception {
+        // 0.1.20 re-linked a match to its archived copy cut short while the recording's drive was out,
+        // and its next boot with the drive back adopted the original as a row of its own. That row is
+        // no duplicate of a whole copy: it leaves the library like any other adopted before the floors,
+        // so retention can't delete the only good copy, and the match goes back on it.
+        Files.delete(floorsFile());
+        Path archive = chooseArchive("hdd");
+        byte[] recording = recordingOf(256 * 1024);
+        long match = archivedRow(archive, "2024-05-03 18-30-12.mp4", cutShortAt(recording, 100 * 1024));
+        Path original = writeModifiedAt(videoDir.resolve("2024-05-03 18-30-12.mp4"), recording, LONG_AGO_MS);
+        long adopted = adoptedBeforeTheFloors(original, System.currentTimeMillis() - 30L * 24 * 60 * 60_000L);
+
+        runner.run(null);
+
+        assertThat(matches.findById(adopted)).isEmpty();
+        assertThat(original).exists();
+        assertThat(matches.findById(match).orElseThrow().videoPath()).isEqualTo(original.toString());
+    }
+
+    @Test
     void theCutoffIsTheEarliestFloorTheFileHeldWhenTheBootBegan() throws Exception {
         // The floors file predates the release (an earlier build kept floors but never released, or
         // its marker couldn't be saved): only a row adopted before its earliest floor predates the
@@ -1820,6 +1963,39 @@ class CrashRecoveryRunnerTest {
         Files.writeString(file, "recording bytes");
         Files.setLastModifiedTime(file, java.nio.file.attribute.FileTime.fromMillis(modifiedMs));
         return file;
+    }
+
+    private static Path writeModifiedAt(Path file, byte[] bytes, long modifiedMs) throws Exception {
+        Files.write(file, bytes);
+        Files.setLastModifiedTime(file, java.nio.file.attribute.FileTime.fromMillis(modifiedMs));
+        return file;
+    }
+
+    /** {@code size} bytes of a recording, none of them zero. */
+    private static byte[] recordingOf(int size) {
+        byte[] bytes = new byte[size];
+        for (int i = 0; i < size; i++) {
+            bytes[i] = (byte) (1 + i % 251);
+        }
+        return bytes;
+    }
+
+    /**
+     * {@code bytes} as an older archiver's copy cut short at {@code at} holds them: CopyFileEx sized
+     * the copy to full length up front, so from there on it reads as zeros.
+     */
+    private static byte[] cutShortAt(byte[] bytes, int at) {
+        byte[] copy = bytes.clone();
+        java.util.Arrays.fill(copy, at, copy.length, (byte) 0);
+        return copy;
+    }
+
+    /** A match row on its archived copy {@code <archive>/<id>-<name>}, which holds {@code bytes}. */
+    private long archivedRow(Path archive, String name, byte[] bytes) throws Exception {
+        long id = insertMatch("placeholder", null, (long) bytes.length);
+        Path copy = writeModifiedAt(archive.resolve(id + "-" + name), bytes, LONG_AGO_MS);
+        matches.updateVideoPath(id, copy.toString(), null);
+        return id;
     }
 
     /** A session that crashed mid-recording with no journaled path; its link window spans ~5_000ms. */
