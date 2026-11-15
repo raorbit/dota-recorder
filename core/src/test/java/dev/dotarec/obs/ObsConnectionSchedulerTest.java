@@ -53,14 +53,47 @@ class ObsConnectionSchedulerTest {
 
     @Test
     void anObsTheScanMissesOnceKeepsTheRecordingFlag() {
-        // An elevated OBS can't be read by this process, so the scan misses it; its websocket blip
-        // reconnects within a tick. Two misses in a row must come before the flag is cleared.
+        // A scan that misses a live OBS once and then sees it again starts the count over: only two
+        // misses in a row clear the flag.
         health.setRecording(true);
         obsProcessRunning = false;
         scheduler.tryConnectAndConfigure(); // missed once
         obsProcessRunning = true;
         scheduler.tryConnectAndConfigure(); // seen: the count starts over
         obsProcessRunning = false;
+        scheduler.tryConnectAndConfigure(); // missed once again
+
+        assertThat(health.isRecording()).isTrue();
+    }
+
+    @Test
+    void missesOnEitherSideOfAConnectedTick_dontAddUpToAClear() {
+        // The scan never sees an OBS run elevated, so each tick its socket is down counts a miss.
+        // Two blips far apart must not add up: the connected ticks between them start the count
+        // over, or the second blip's first tick clears the flag of an OBS that still records.
+        health.setRecording(true);
+        obsProcessRunning = false;
+        scheduler.tryConnectAndConfigure(); // the first blip: missed once
+
+        health.setConnected(true); // reconnected
+        scheduler.tryConnectAndConfigure();
+
+        health.setConnected(false); // the second blip, minutes later
+        scheduler.tryConnectAndConfigure();
+
+        assertThat(health.isRecording()).isTrue();
+    }
+
+    @Test
+    void missesOnEitherSideOfATickWithNothingRecording_dontAddUpToAClear() {
+        health.setRecording(true);
+        obsProcessRunning = false;
+        scheduler.tryConnectAndConfigure(); // missed once
+
+        health.setRecording(false); // that recording ended
+        scheduler.tryConnectAndConfigure();
+
+        health.setRecording(true); // the next one runs
         scheduler.tryConnectAndConfigure(); // missed once again
 
         assertThat(health.isRecording()).isTrue();
