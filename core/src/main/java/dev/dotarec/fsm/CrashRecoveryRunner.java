@@ -161,7 +161,7 @@ public class CrashRecoveryRunner implements ApplicationRunner {
             long startMs = System.currentTimeMillis();
             OrphanAdoptionFloors.Snapshot floors =
                     adoptionFloors.prepare(
-                            videoDir(), archiveDirs(), startMs, firstVideoFloorMs(unfinished, startMs));
+                            videoDir(), archiveDirs(), startMs, videoLinkFromMs(unfinished, startMs));
             if (unfinished.isEmpty()) {
                 reconcileOrphanVods(floors);
                 return;
@@ -362,13 +362,14 @@ public class CrashRecoveryRunner implements ApplicationRunner {
     }
 
     /**
-     * The floor a video folder with none gets: the scan's start, or, when the journal holds an
-     * unfinished session with no path, that session's record start less the link window's grace if
-     * earlier. The journal is evidence this app was recording there from then, and a floor at the scan
-     * would turn away the very file {@link #linkOrphanVideo} is about to claim, on this boot and every
-     * later one (see {@link OrphanAdoptionFloors}).
+     * How far back {@link #linkOrphanVideo} may claim a file in a video folder that gets its first
+     * floor this boot: the scan's start, or, when the journal holds an unfinished session with no
+     * path, that session's record start less the link window's grace if earlier. The journal is
+     * evidence this app was recording then, and the scan's floor would turn away the very file the
+     * link is about to claim. Only the link reaches back; the stored floor stays the scan's (see
+     * {@link OrphanAdoptionFloors}).
      */
-    static long firstVideoFloorMs(List<RecordingSessionRow> unfinished, long startMs) {
+    static long videoLinkFromMs(List<RecordingSessionRow> unfinished, long startMs) {
         long first = startMs;
         for (RecordingSessionRow session : unfinished) {
             boolean pathless = session.videoPath() == null || session.videoPath().isBlank();
@@ -804,13 +805,15 @@ public class CrashRecoveryRunner implements ApplicationRunner {
      *
      * <p>A link makes the file a match's video as surely as an import does, so it takes the same
      * basename gate and adoption floor: a window of minutes can still hold the user's own recording.
+     * The floor is the link's own, which reaches back for a folder floored this boot (see {@link
+     * OrphanAdoptionFloors.Snapshot#linkFloorOf}).
      */
     private String linkOrphanVideo(RecordingSessionRow session, OrphanAdoptionFloors.Snapshot floors) {
         Path videoDir = videoDir();
         if (videoDir == null || !Files.isDirectory(videoDir)) {
             return null;
         }
-        OrphanAdoptionFloors.Floor floor = floors.of(videoDir);
+        OrphanAdoptionFloors.Floor floor = floors.linkFloorOf(videoDir);
         Set<String> referenced = referencedVideoPaths();
         long fromMs = session.recordStartedWallMs() - LINK_WINDOW_GRACE_MS;
         long toMs = session.updatedAt() + LINK_WINDOW_GRACE_MS;

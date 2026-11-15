@@ -1164,18 +1164,23 @@ class CrashRecoveryRunnerTest {
     }
 
     @Test
-    void aFirstVideoFloorReachesBackToAPathlessJournal() throws Exception {
+    void aNewVideoFolderLinksItsPathlessJournalsFileFromBeforeItsFloor() throws Exception {
         // The upgrade boot after a crash mid-match (or the first boot in a newly chosen folder) gives
         // the video folder its first floor in the same boot that recovers the pathless journal. The
-        // journal is evidence of recording from its start, so the floor starts there, less the link
-        // grace, and the file is linked rather than turned away for good. Archives still start at the
-        // scan.
+        // journal is evidence of recording from its start, so the link reaches back there, less the
+        // link grace, and the file is linked rather than turned away for good. The stored floor is
+        // still the scan's, so the import takes nothing else from before it, and archives start at the
+        // scan too.
         Path videos = chooseVideoDir("Videos");
         Path archive = chooseArchive("hdd");
         Crash crash = crashedHalfAnHourAgo(null);
         Path crashed = writeModifiedAt(videos.resolve("2026-11-14 10-00-00.mp4"), crash.updatedMs());
         Path older = writeModifiedAt(videos.resolve("2026-11-14 09-00-00.mp4"),
                 crash.startedMs() - 5L * 60_000L - 60_000L);
+        // The user's own OBS, after the crashed match's window and before this boot: past the link's
+        // reach, and before the folder's floor, so nothing may adopt it.
+        Path personal = writeModifiedAt(videos.resolve("2026-11-14 10-20-00.mp4"),
+                System.currentTimeMillis() - 10L * 60_000L);
         Path archived = writeModifiedAt(archive.resolve("2026-11-14 09-50-00.mkv"), crash.startedMs());
         long scanStart = System.currentTimeMillis();
 
@@ -1189,8 +1194,9 @@ class CrashRecoveryRunnerTest {
                             assertThat(row.videoPath()).isEqualTo(crashed.toString());
                         });
         assertThat(older).exists();
+        assertThat(personal).exists();
         assertThat(archived).exists();
-        assertThat(storedFloor(videos)).isEqualTo(crash.startedMs() - 5L * 60_000L);
+        assertThat(storedFloor(videos)).isNotNull().isGreaterThanOrEqualTo(scanStart);
         assertThat(storedFloor(archive)).isNotNull().isGreaterThanOrEqualTo(scanStart);
     }
 
@@ -1230,15 +1236,15 @@ class CrashRecoveryRunnerTest {
     }
 
     @Test
-    void firstVideoFloorReachesBackOnlyForPathlessSessionsWithAStart() {
+    void theLinkReachesBackOnlyForPathlessSessionsWithAStart() {
         RecordingSessionRow pathless = sessionAt("pathless", 100_000_000L, null);
         RecordingSessionRow withPath = sessionAt("with-path", 50_000_000L, "C:\\v\\own.mp4");
         RecordingSessionRow noStart = sessionAt("no-start", 0L, null);
 
-        assertThat(CrashRecoveryRunner.firstVideoFloorMs(List.of(), 200_000_000L)).isEqualTo(200_000_000L);
-        assertThat(CrashRecoveryRunner.firstVideoFloorMs(List.of(pathless, withPath, noStart), 200_000_000L))
+        assertThat(CrashRecoveryRunner.videoLinkFromMs(List.of(), 200_000_000L)).isEqualTo(200_000_000L);
+        assertThat(CrashRecoveryRunner.videoLinkFromMs(List.of(pathless, withPath, noStart), 200_000_000L))
                 .isEqualTo(100_000_000L - 5L * 60_000L);
-        assertThat(CrashRecoveryRunner.firstVideoFloorMs(List.of(pathless), 10_000_000L)).isEqualTo(10_000_000L);
+        assertThat(CrashRecoveryRunner.videoLinkFromMs(List.of(pathless), 10_000_000L)).isEqualTo(10_000_000L);
     }
 
     private record Crash(long startedMs, long updatedMs) {}
