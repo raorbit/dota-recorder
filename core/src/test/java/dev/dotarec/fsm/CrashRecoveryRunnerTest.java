@@ -1169,6 +1169,122 @@ class CrashRecoveryRunnerTest {
     }
 
     @Test
+    void anOriginalThatCantBeReadLeavesItAndItsCopyAloneUntilItCan() throws Exception {
+        // The source the archiver left behind can't be read at its start (here another handle locks
+        // its first 64 KiB, the way a bad sector fails a read), but its end can. That tells nothing
+        // about the copy: the row stays on it and both files stay, boot after boot, and once the
+        // source reads again it goes as a source left behind.
+        Path archive = configureArchive("hdd");
+        seedAdoptionFloor(videoDir, System.currentTimeMillis());
+        byte[] recording = recordingOf(256 * 1024);
+        long id = archivedRow(archive, "2026-10-05 20-00-00.mp4", recording);
+        Path copy = archive.resolve(id + "-2026-10-05 20-00-00.mp4");
+        Path source = writeModifiedAt(videoDir.resolve("2026-10-05 20-00-00.mp4"), recording, LONG_AGO_MS);
+
+        try (java.nio.channels.FileChannel held = java.nio.channels.FileChannel.open(
+                        source, java.nio.file.StandardOpenOption.READ, java.nio.file.StandardOpenOption.WRITE);
+                java.nio.channels.FileLock lock = held.lock(0, 64 * 1024, false)) {
+            runner.run(null);
+            newRunner().run(null);
+
+            assertThat(matches.findAll())
+                    .singleElement()
+                    .satisfies(row -> assertThat(row.videoPath()).isEqualTo(copy.toString()));
+            assertThat(copy).exists();
+            assertThat(source).exists();
+        }
+
+        newRunner().run(null);
+
+        assertThat(source).doesNotExist();
+        assertThat(copy).exists();
+        assertThat(matches.findById(id).orElseThrow().videoPath()).isEqualTo(copy.toString());
+    }
+
+    @Test
+    void anOriginalDamagedSinceItWasCopiedNeverTakesTheRowFromAWholeCopy() throws Exception {
+        // Whole copies, beside sources that changed since they were copied: one reads as zeros in its
+        // middle (a file system error), one holds other bytes there. Neither shows the copy is the
+        // damaged one, so no row moves onto its source, which would make the next boot drop the
+        // whole copy as move residue, and every file stays.
+        Path archive = configureArchive("hdd");
+        seedAdoptionFloor(videoDir, System.currentTimeMillis());
+        byte[] recording = recordingOf(256 * 1024);
+        byte[] holed = recording.clone();
+        java.util.Arrays.fill(holed, 96 * 1024, 160 * 1024, (byte) 0);
+        byte[] altered = recording.clone();
+        for (int i = 120 * 1024; i < 136 * 1024; i++) {
+            altered[i] = (byte) (altered[i] == (byte) 0x7f ? 0x7e : 0x7f);
+        }
+        long overHoled = archivedRow(archive, "2026-10-01 20-00-00.mp4", recording);
+        long overAltered = archivedRow(archive, "2026-10-02 20-00-00.mp4", recording);
+        Path holedSource = writeModifiedAt(videoDir.resolve("2026-10-01 20-00-00.mp4"), holed, LONG_AGO_MS);
+        Path alteredSource = writeModifiedAt(videoDir.resolve("2026-10-02 20-00-00.mp4"), altered, LONG_AGO_MS);
+
+        runner.run(null);
+        newRunner().run(null);
+
+        for (long id : List.of(overHoled, overAltered)) {
+            Path copy = Path.of(matches.findById(id).orElseThrow().videoPath());
+            assertThat(copy.getParent()).isEqualTo(archive);
+            assertThat(copy).exists();
+        }
+        assertThat(holedSource).exists();
+        assertThat(alteredSource).exists();
+        assertThat(matches.findAll()).hasSize(2);
+    }
+
+    @Test
+    void aRowGoesBackOnItsOriginalOnlyWhenTheOriginalHoldsAllItsCopyDoes() throws Exception {
+        // The copy is cut short, and its samples show it, but the original also changed since, at a
+        // stretch the samples don't read. Put back on it, the row would make the next boot drop the
+        // copy, the only file holding that stretch. Read end to end, the two differ where the copy
+        // holds data, so both stay and the row stays on the copy.
+        Path archive = configureArchive("hdd");
+        seedAdoptionFloor(videoDir, System.currentTimeMillis());
+        byte[] recording = recordingOf(256 * 1024);
+        long id = archivedRow(archive, "2026-10-01 20-00-00.mp4", cutShortAt(recording, 200 * 1024));
+        Path copy = archive.resolve(id + "-2026-10-01 20-00-00.mp4");
+        byte[] changed = recording.clone();
+        for (int i = 70 * 1024; i < 80 * 1024; i++) {
+            changed[i] = (byte) (changed[i] == (byte) 0x7f ? 0x7e : 0x7f);
+        }
+        Path original = writeModifiedAt(videoDir.resolve("2026-10-01 20-00-00.mp4"), changed, LONG_AGO_MS);
+
+        runner.run(null);
+        newRunner().run(null);
+
+        assertThat(matches.findById(id).orElseThrow().videoPath()).isEqualTo(copy.toString());
+        assertThat(copy).exists();
+        assertThat(original).exists();
+    }
+
+    @Test
+    void aRecordingThatEndsInZerosIsSettledByReadingItEndToEnd() throws Exception {
+        // Recordings an OS crash cut short (a power cut before their end reached the drive), so they
+        // end in zeros. One was archived whole and its source left behind: the copy is the source end
+        // to end, so the source goes, and no second row takes it. The other's copy an older archiver
+        // cut short before that: it lacks what the source holds and holds nothing the source
+        // doesn't, so the row goes back on the source.
+        Path archive = configureArchive("hdd");
+        long tenMinutesAgo = System.currentTimeMillis() - 10L * 60_000L;
+        byte[] crashed = cutShortAt(recordingOf(256 * 1024), 180 * 1024);
+        long wholeRow = archivedRow(archive, "2026-10-03 20-00-00.mp4", crashed);
+        Path wholeCopy = archive.resolve(wholeRow + "-2026-10-03 20-00-00.mp4");
+        Path leftBehind = writeModifiedAt(videoDir.resolve("2026-10-03 20-00-00.mp4"), crashed, tenMinutesAgo);
+        long cutRow = archivedRow(archive, "2026-10-04 20-00-00.mp4", cutShortAt(crashed, 100 * 1024));
+        Path original = writeModifiedAt(videoDir.resolve("2026-10-04 20-00-00.mp4"), crashed, tenMinutesAgo);
+
+        runner.run(null);
+
+        assertThat(leftBehind).doesNotExist();
+        assertThat(wholeCopy).exists();
+        assertThat(matches.findById(wholeRow).orElseThrow().videoPath()).isEqualTo(wholeCopy.toString());
+        assertThat(matches.findById(cutRow).orElseThrow().videoPath()).isEqualTo(original.toString());
+        assertThat(matches.findAll()).hasSize(2);
+    }
+
+    @Test
     void reconciliationWaitsForTheStorageMaintenanceLock() throws Exception {
         // The archiver/sweeper @Scheduled clocks start at context refresh while this runner executes
         // after it, so a locked maintenance pass can overlap recovery. Mid-move, the archiver's fresh

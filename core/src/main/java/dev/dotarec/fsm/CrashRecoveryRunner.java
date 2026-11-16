@@ -63,7 +63,8 @@ import org.springframework.stereotype.Component;
  *       before any floor existed, leaving their files where they are;</li>
  *   <li>scans the roots for files no row references: a source the archiver failed to delete from the
  *       video folder is deleted once its copy proves complete, or its row put back on it when an
- *       earlier boot re-linked that row to a copy cut short; an archive drive's leftover from an
+ *       earlier boot re-linked that row to a copy cut short, and left as it is while neither can be
+ *       shown to be the damaged one; an archive drive's leftover from an
  *       interrupted move is re-linked to its row or deleted; and a recorder-named file written since
  *       its folder's floor is adopted as a {@code gsi_only} row.</li>
  * </ol>
@@ -907,18 +908,22 @@ public class CrashRecoveryRunner implements ApplicationRunner {
      * <matchId>-}, in another folder, and the same size is that source, and then:
      *
      * <ul>
-     *   <li>when the copy is complete ({@link #isCompleteCopy}), {@code file} is deleted whatever its
-     *       age: the attribution is exact, so it needs no adoption floor, which the source's original
+     *   <li>when the copy is whole ({@link Verdict#WHOLE}), {@code file} is deleted whatever its age:
+     *       the attribution is exact, so it needs no adoption floor, which the source's original
      *       modification time would fail. Nothing else would ever reclaim it, and no row counts it
      *       against a drive's cap. A delete that fails is tried again next boot;</li>
-     *   <li>when it isn't and {@code file} ends in data, the row goes back on {@code file}, the only
-     *       good copy: an earlier boot re-linked it to a copy cut short while {@code file}'s drive
-     *       was out. The copy is then move residue, which a later boot drops.</li>
+     *   <li>when the copy lacks data {@code file} has and holds nothing {@code file} doesn't ({@link
+     *       Verdict#LACKING}, read end to end), the row goes back on {@code file}: an earlier boot
+     *       re-linked it to a copy cut short while {@code file}'s drive was out. The copy is then move
+     *       residue, which a later boot drops;</li>
+     *   <li>otherwise ({@link Verdict#UNREADABLE}, {@link Verdict#DIFFERENT}: either may be the
+     *       damaged one) both stay as they are and {@code file} gets no row. The next boot looks
+     *       again.</li>
      * </ul>
      *
-     * <p>A row is put back before any file is deleted, and when in doubt nothing is. With {@code
-     * thumbnail} the copies are thumbnails, and a row goes back on its thumbnail alone. The caller
-     * hands over only recorder-named files, or thumbnails.
+     * <p>A row is put back before any file is deleted, and when in doubt about any copy nothing is.
+     * With {@code thumbnail} the copies are thumbnails, and a row goes back on its thumbnail alone.
+     * The caller hands over only recorder-named files, or thumbnails.
      */
     private boolean settleArchivedSource(
             Path file, Map<String, List<ArchivedCopy>> copiesByName, boolean thumbnail) {
@@ -926,20 +931,17 @@ public class CrashRecoveryRunner implements ApplicationRunner {
         if (copies == null) {
             return false;
         }
-        ArchivedCopy complete = null;
-        Boolean fileEndsInData = null;
+        ArchivedCopy whole = null;
+        Verdict doubt = null;
+        ArchivedCopy doubted = null;
         for (ArchivedCopy copy : copies) {
             if (!isSourceOf(file, copy.path())) {
                 continue;
             }
-            if (isCompleteCopy(copy.path(), file)) {
-                complete = complete == null ? copy : complete;
-                continue;
-            }
-            if (fileEndsInData == null) {
-                fileEndsInData = endsInData(file);
-            }
-            if (fileEndsInData) {
+            Verdict verdict = judgeCopy(copy.path(), file);
+            if (verdict == Verdict.WHOLE) {
+                whole = whole == null ? copy : whole;
+            } else if (verdict == Verdict.LACKING) {
                 try {
                     if (putBackOnOriginal(copy, file, thumbnail)) {
                         return true;
@@ -949,17 +951,25 @@ public class CrashRecoveryRunner implements ApplicationRunner {
                             + " next boot tries again: {}", copy.rowId(), file, copy.path(), e.toString());
                     return true;
                 }
+            } else {
+                doubt = verdict;
+                doubted = copy;
             }
         }
-        if (complete == null) {
+        if (doubted != null) {
+            log.warn("Left {} and {}, the archived copy made from it, as they are, with no new row: {}; the"
+                    + " next boot looks again", file, doubted.path(), doubt.reason());
+            return true;
+        }
+        if (whole == null) {
             return false;
         }
         try {
             Files.deleteIfExists(file);
-            log.warn("Removed {}, left behind when it was archived to {}", file, complete.path());
+            log.warn("Removed {}, left behind when it was archived to {}", file, whole.path());
         } catch (Exception e) {
             log.warn("Could not remove {}, left behind when it was archived to {}: {}",
-                    file, complete.path(), e.toString());
+                    file, whole.path(), e.toString());
         }
         return true;
     }
@@ -1002,17 +1012,146 @@ public class CrashRecoveryRunner implements ApplicationRunner {
     /** How much of a file the completeness check reads at its end, and at its start and middle. */
     private static final int SAMPLE_BYTES = 64 * 1024;
 
+    /** How much of each file a comparison end to end reads at a time. */
+    private static final int CHUNK_BYTES = 1024 * 1024;
+
     /**
-     * Whether {@code copy} is a complete copy: its last 64 KiB are not all zeros, and when the {@code
-     * original} it was made from is given, its first, middle and last 64 KiB are the original's. A
-     * name and a size prove nothing: every 0.1.x archiver before the {@code .partial} copy wrote its
-     * copy straight under the final {@code <id>-<name>} with Files.copy, which on Windows is
-     * CopyFileEx, and that sizes the destination to full length before it writes to it. So a copy cut
-     * short (a quit, an unattended update, Windows shutting down) is full size with a zeroed tail,
-     * which no finished recording or thumbnail has. A file that can't be read counts as incomplete.
+     * Whether {@code copy} is a complete copy: with no {@code original}, its last 64 KiB are not all
+     * zeros; with the {@code original} it was made from, {@link #judgeCopy} finds it {@link
+     * Verdict#WHOLE}. A name and a size prove nothing: every 0.1.x archiver before the {@code
+     * .partial} copy wrote its copy straight under the final {@code <id>-<name>} with Files.copy,
+     * which on Windows is CopyFileEx, and that sizes the destination to full length before it writes
+     * to it. So a copy cut short (a quit, an unattended update, Windows shutting down) is full size
+     * with a zeroed tail. A recording an OS crash cut short (a power cut, a BSOD) can end in zeros
+     * too, which without its original at hand can't be told from that. A file that can't be read
+     * counts as incomplete.
      */
     private static boolean isCompleteCopy(Path copy, Path original) {
-        return endsInData(copy) && (original == null || sampledBytesMatch(copy, original));
+        return original == null ? endsInData(copy) : judgeCopy(copy, original) == Verdict.WHOLE;
+    }
+
+    /** What an archived copy is to the original it was made from, by {@link #judgeCopy}. */
+    private enum Verdict {
+        /** It holds the original's bytes. */
+        WHOLE(null),
+        /**
+         * Read end to end, it holds the original's bytes and zeros where the original has data: cut
+         * short, or left with a stretch its drive never got. The original holds all of it.
+         */
+        LACKING(null),
+        /** One of them couldn't be read. */
+        UNREADABLE("one of them could not be read"),
+        /** They differ where the copy holds data, so either of them may be the damaged one. */
+        DIFFERENT("they differ where the copy holds data, so either of them may be the damaged one");
+
+        private final String reason;
+
+        Verdict(String reason) {
+            this.reason = reason;
+        }
+
+        String reason() {
+            return reason;
+        }
+    }
+
+    /**
+     * Judges {@code copy} against the {@code original} it was made from by their first, middle and
+     * last 64 KiB, or end to end when those can't settle it. Only a copy reading as zeros where the
+     * original holds data shows which of the two is damaged: a copy cut short, or one an older
+     * archiver left with a stretch its drive never got (a power cut before the cache was written),
+     * reads that way. An original damaged since it was copied (a bad sector, a file system error)
+     * can read as anything, zeros included, or not at all. So a copy that differs where it holds
+     * data is {@link Verdict#DIFFERENT} and a pair that can't be read {@link Verdict#UNREADABLE}:
+     * neither is taken for the damaged one.
+     *
+     * <ul>
+     *   <li>Alike at the samples, with the copy's last 64 KiB holding data: {@link Verdict#WHOLE}.</li>
+     *   <li>Alike at the samples but ending in zeros, or apart only where the copy reads as zeros:
+     *       read end to end. A recording an OS crash cut short ends in zeros too, so an end of
+     *       zeros alone proves nothing; and before the row goes on the original, which makes the
+     *       copy move residue for the next boot to drop, the original has to hold all the copy does.
+     *       Alike end to end is {@link Verdict#WHOLE}, apart only where the copy reads as zeros is
+     *       {@link Verdict#LACKING}.</li>
+     * </ul>
+     */
+    private static Verdict judgeCopy(Path copy, Path original) {
+        Likeness sampled = compare(copy, original, false);
+        if (sampled == Likeness.SAME && endsInData(copy)) {
+            return Verdict.WHOLE;
+        }
+        Likeness whole =
+                sampled == Likeness.SAME || sampled == Likeness.COPY_LACKS_DATA
+                        ? compare(copy, original, true)
+                        : sampled;
+        return switch (whole) {
+            case SAME -> Verdict.WHOLE;
+            case COPY_LACKS_DATA -> Verdict.LACKING;
+            case UNREADABLE -> Verdict.UNREADABLE;
+            case DIFFERENT -> Verdict.DIFFERENT;
+        };
+    }
+
+    /** How a copy's bytes compare with its original's, where {@link #compare} read them. */
+    private enum Likeness {
+        /** Alike. */
+        SAME,
+        /** Alike but where the copy reads as zeros. */
+        COPY_LACKS_DATA,
+        /** Of different sizes, or apart somewhere the copy holds data. */
+        DIFFERENT,
+        /** One of them couldn't be read. */
+        UNREADABLE
+    }
+
+    /**
+     * Compares {@code copy} with {@code original}: at their first, middle and last 64 KiB, or with
+     * {@code endToEnd} all of them.
+     */
+    private static Likeness compare(Path copy, Path original, boolean endToEnd) {
+        try (FileChannel copyBytes = FileChannel.open(copy, StandardOpenOption.READ);
+                FileChannel originalBytes = FileChannel.open(original, StandardOpenOption.READ)) {
+            long size = copyBytes.size();
+            if (originalBytes.size() != size) {
+                return Likeness.DIFFERENT;
+            }
+            Likeness likeness = Likeness.SAME;
+            if (endToEnd) {
+                for (long at = 0; at < size && likeness != Likeness.DIFFERENT; at += CHUNK_BYTES) {
+                    likeness = compareStretch(
+                            likeness, read(copyBytes, at, CHUNK_BYTES), read(originalBytes, at, CHUNK_BYTES));
+                }
+                return likeness;
+            }
+            long[] offsets = {
+                0L, Math.max(0L, size / 2 - SAMPLE_BYTES / 2), Math.max(0L, size - SAMPLE_BYTES)
+            };
+            for (long at : offsets) {
+                likeness = compareStretch(likeness, sample(copyBytes, at), sample(originalBytes, at));
+                if (likeness == Likeness.DIFFERENT) {
+                    break;
+                }
+            }
+            return likeness;
+        } catch (IOException | RuntimeException e) {
+            return Likeness.UNREADABLE;
+        }
+    }
+
+    /** {@code soFar}, less alike by what one stretch of a copy's and its original's bytes show. */
+    private static Likeness compareStretch(Likeness soFar, byte[] copy, byte[] original) {
+        if (copy.length != original.length) {
+            return Likeness.DIFFERENT; // one of them changed size while it was read
+        }
+        for (int i = 0; i < copy.length; i++) {
+            if (copy[i] != original[i]) {
+                if (copy[i] != 0) {
+                    return Likeness.DIFFERENT;
+                }
+                soFar = Likeness.COPY_LACKS_DATA;
+            }
+        }
+        return soFar;
     }
 
     /** Whether the last 64 KiB of {@code file} hold anything but zeros; false when it can't be read. */
@@ -1029,31 +1168,14 @@ public class CrashRecoveryRunner implements ApplicationRunner {
         }
     }
 
-    /** Whether {@code a} and {@code b} are the same size and alike at their start, middle and end. */
-    private static boolean sampledBytesMatch(Path a, Path b) {
-        try (FileChannel first = FileChannel.open(a, StandardOpenOption.READ);
-                FileChannel second = FileChannel.open(b, StandardOpenOption.READ)) {
-            long size = first.size();
-            if (second.size() != size) {
-                return false;
-            }
-            long[] offsets = {
-                0L, Math.max(0L, size / 2 - SAMPLE_BYTES / 2), Math.max(0L, size - SAMPLE_BYTES)
-            };
-            for (long at : offsets) {
-                if (!Arrays.equals(sample(first, at), sample(second, at))) {
-                    return false;
-                }
-            }
-            return true;
-        } catch (IOException | RuntimeException e) {
-            return false;
-        }
-    }
-
     /** Up to {@link #SAMPLE_BYTES} of {@code file} from {@code at}: fewer only at its end. */
     private static byte[] sample(FileChannel file, long at) throws IOException {
-        ByteBuffer buffer = ByteBuffer.allocate((int) Math.max(0L, Math.min(SAMPLE_BYTES, file.size() - at)));
+        return read(file, at, SAMPLE_BYTES);
+    }
+
+    /** Up to {@code length} bytes of {@code file} from {@code at}: fewer only at its end. */
+    private static byte[] read(FileChannel file, long at, int length) throws IOException {
+        ByteBuffer buffer = ByteBuffer.allocate((int) Math.max(0L, Math.min(length, file.size() - at)));
         while (buffer.hasRemaining()) {
             if (file.read(buffer, at + buffer.position()) <= 0) {
                 break; // the file ended
