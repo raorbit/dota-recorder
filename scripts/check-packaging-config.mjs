@@ -100,6 +100,12 @@ check(
 // started: the check doesn't read the commands in it, and Windows runs one that an exec
 // instruction starts in a cmd of its own, without /d.
 //
+// Anything the user runs can also set the user's environment variables, which the cmds the hooks
+// start get. So a cmd line with a % in it fails, since cmd puts a %variable%'s value into the line
+// before it reads it, and a & in that value adds a command, even inside quotes. So does a pipe
+// into or out of one of cmd's own commands or a group, or into a command with an @ in front: cmd
+// runs each of those in a cmd of its own, the program %COMSPEC% names.
+//
 // And it reads only the scripts in build-resources, where the hooks are, not the templates
 // electron-builder makes the rest of the installer from, which aren't ours to change. Their check
 // for a running app, for one, starts PowerShell without -NoProfile, or cmd without /d running
@@ -288,20 +294,41 @@ function withCmdCommands(program, commandLine) {
   if (command.startsWith('"') && last > 0) {
     command = command.slice(1, last) + command.slice(last + 1);
   }
-  for (const part of cmdCommands(command)) started.push(...cmdCommandStarts(part));
+  for (const { text, pipedIn, pipedOut, group } of cmdCommands(command)) {
+    const starts = cmdCommandStarts(text);
+    // cmd runs a side of a pipe that is a group or one of its own commands, and the right side
+    // when it starts with an @, in a cmd of its own.
+    if (
+      (pipedIn || pipedOut) &&
+      (group || starts.length === 0 || (pipedIn && /^[\s,;=]*@/.test(text)))
+    ) {
+      started.push({ piped: group ? '(...)' : text.trim() });
+    }
+    started.push(...starts);
+  }
   return started;
 }
 
 // The commands in a cmd command line. cmd splits it at each &, &&, | and || and around a group in
 // parentheses, but not at one in quotes, after a ^ (an escape, which cmd drops), or in a
 // redirection to a handle such as 2>&1. Each command comes back without its escapes, which is how
-// a cmd it starts would get it.
+// a cmd it starts would get it, and with whether a pipe (a lone |) comes before it or after it. A
+// group on a side of a pipe comes back as a command of its own as well, marked as the group, with
+// nothing in it but the group's redirections.
 function cmdCommands(line) {
   const commands = [];
   let command = '';
   let quoted = false;
   let groups = 0; // parentheses open around the command
   let redirect = false; // the last character was a > or <, so a & names a handle
+  let pipedIn = false; // a pipe comes before the command
+  let group = false; // a group ended just before the command
+  const end = (pipedOut) => {
+    commands.push({ text: command, pipedIn, pipedOut, group });
+    command = '';
+    pipedIn = pipedOut;
+    group = false;
+  };
   for (let i = 0; i < line.length; i++) {
     const c = line[i];
     const handle = redirect && c === '&';
@@ -312,23 +339,27 @@ function cmdCommands(line) {
     } else if (c === '^') {
       command += line[++i] ?? '';
     } else if ((c === '&' && !handle) || c === '|') {
+      const pipe = c === '|' && line[i + 1] !== '|';
       if (line[i + 1] === c) i++;
-      commands.push(command);
-      command = '';
+      end(pipe);
     } else if (c === '(' && /^[\s@,;=]*$/.test(command)) {
       // Where a command's name would go, a ( opens a group.
+      if (pipedIn) {
+        group = true;
+        end(false);
+      }
       groups++;
       command = '';
     } else if (c === ')' && groups > 0) {
       groups--;
-      commands.push(command);
-      command = '';
+      end(false);
+      group = true;
     } else {
       redirect = c === '>' || c === '<';
       command += c;
     }
   }
-  commands.push(command);
+  end(false);
   return commands;
 }
 
@@ -385,9 +416,13 @@ function installerProblems(text) {
   const problems = [];
   let programs = 0;
   for (const { number, words } of scriptInstructions(text)) {
-    for (const { program, switches, command, runs } of programsStarted(words)) {
+    for (const { program, switches, command, runs, piped } of programsStarted(words)) {
       if (runs != null) {
         problems.push({ number, problem: 'unread', name: runs });
+        continue;
+      }
+      if (piped != null) {
+        problems.push({ number, problem: 'pipe', name: piped });
         continue;
       }
       programs++;
@@ -399,6 +434,7 @@ function installerProblems(text) {
       if (switches != null && !switches.includes('/d')) {
         problems.push({ number, problem: 'no /d', name: program });
       }
+      if (command?.includes('%')) problems.push({ number, problem: 'variable', name: program });
     }
   }
   return { programs, problems };
@@ -413,6 +449,10 @@ const problemMessages = {
     `starts cmd with no /c command this check can read, so it can't vouch for the programs that cmd runs.`,
   'no /d': () =>
     `starts cmd without /d before its /c, so that cmd would first run the AutoRun commands in the registry, which anything the user runs can set, with its own rights (an administrator's, when elevated). Add /d.`,
+  variable: () =>
+    `starts cmd with a % in its command line. cmd puts a %variable%'s value, which anything the user runs can set, into the line before it reads it, so this check can't vouch for the programs the line runs. Leave % out of cmd lines.`,
+  pipe: (side) =>
+    `pipes into or out of "${side}", which cmd runs in a cmd of its own: the program %COMSPEC% names, which anything the user runs can set. Pipe only between programs named by their full path, with no @ in front of one on the right of a pipe.`,
   unread: (command) =>
     `runs a command through cmd's ${command}, which this check doesn't read, so it can't vouch for the program that command starts. Start that program as a command of its own.`,
 };
@@ -503,7 +543,7 @@ const problemCases = [
     [],
   ],
   [
-    String.raw`ExecWait '"$SYSDIR\cmd.exe" /d /c ("$SYSDIR\netsh.exe" a & 2>"%TEMP%\fw log.txt" "$SYSDIR\netsh.exe" b & ver) 2>nul & exit /b 0 || ver >nul & @echo done'`,
+    String.raw`ExecWait '"$SYSDIR\cmd.exe" /d /c ("$SYSDIR\netsh.exe" a & 2>"$PLUGINSDIR\fw log.txt" "$SYSDIR\netsh.exe" b & ver) 2>nul & exit /b 0 || ver >nul & @echo done'`,
     [],
   ],
   // The characters after one of cmd's own names that still leave it cmd's own command.
@@ -561,7 +601,34 @@ const problemCases = [
   // cmd's call, start, if and for run a command this check doesn't read.
   [
     String.raw`ExecWait '"$SYSDIR\cmd.exe" /d /c call x.cmd & start "" y & if exist z "$SYSDIR\netsh.exe" a & for %i in (a) do w'`,
-    ['1 unread call', '1 unread start', '1 unread if', '1 unread for'],
+    [
+      '1 variable $SYSDIR\\cmd.exe',
+      '1 unread call',
+      '1 unread start',
+      '1 unread if',
+      '1 unread for',
+    ],
+  ],
+  // A % in a cmd line, where cmd puts in a variable's value first, even in quotes, and a %% is no
+  // escape on a /c line. A nested cmd gets the line with the % in it too.
+  [
+    [
+      String.raw`ExecWait '"$SYSDIR\cmd.exe" /d /c ""$SYSDIR\netsh.exe" a 2>"%TEMP%\fw log.txt""'`,
+      String.raw`ExecWait '"$SYSDIR\cmd.exe" /d /c "$SYSDIR\cmd.exe" /d /c echo 100%%'`,
+    ].join('\n'),
+    ['1 variable $SYSDIR\\cmd.exe', '2 variable $SYSDIR\\cmd.exe', '2 variable $SYSDIR\\cmd.exe'],
+  ],
+  // A pipe into or out of one of cmd's own commands or a group, or into a command with an @ in
+  // front, but not one between programs (with an @ on the left, or redirections), nor a ||.
+  [
+    String.raw`ExecWait '"$SYSDIR\cmd.exe" /d /c echo y| "$SYSDIR\netsh.exe" a & "$SYSDIR\netsh.exe" b | ver & ("$SYSDIR\netsh.exe" c) 2>nul | "$SYSDIR\find.exe" d & "$SYSDIR\netsh.exe" e |("$SYSDIR\find.exe" f) & "$SYSDIR\netsh.exe" g | ,@"$SYSDIR\find.exe" h & @"$SYSDIR\netsh.exe" i 2>nul | 2>nul "$SYSDIR\find.exe" j || ver'`,
+    [
+      '1 pipe echo y',
+      '1 pipe ver',
+      '1 pipe (...)',
+      '1 pipe (...)',
+      '1 pipe ,@"$SYSDIR\\find.exe" h',
+    ],
   ],
   // LogicLib's one-liners. A $\" stays escaped until the statement runs.
   [
