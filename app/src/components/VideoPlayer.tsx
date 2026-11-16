@@ -188,6 +188,10 @@ export function VideoPlayer({
   const matchId = match?.id ?? null;
   // Mirror of matchId for onDeleteClip, which resumes after its delete with the click's closure.
   const matchIdRef = useRef<number | null>(matchId);
+  // Counts every change of the open match, so onDeleteClip can tell the match it was asked from
+  // apart from the same match left and opened again while the delete waited (see
+  // afterStripClipDelete).
+  const selectionRef = useRef(0);
 
   // Self-contained per-selection fetch: markers + detail (for durationS + video
   // availability) + pauses in parallel via allSettled. Video availability comes
@@ -380,6 +384,7 @@ export function VideoPlayer({
 
   useEffect(() => {
     matchIdRef.current = matchId;
+    selectionRef.current++;
   }, [matchId]);
 
   // After the <video> src swaps to a selected clip's stream, load + start it. Keyed on
@@ -661,6 +666,7 @@ export function VideoPlayer({
   // back to the full VOD. The store's deleteClip updates the library side (the Clips bucket list
   // and its badge) and rejects when the delete didn't go through.
   async function onDeleteClip(clip: Clip): Promise<void> {
+    const askedIn = selectionRef.current;
     try {
       // Queued in the core behind its maintenance lock: the row stays, marked as being deleted, until
       // the core does the delete. Its clip.deleted frame then leaves the clip and refreshes the strip
@@ -668,9 +674,10 @@ export function VideoPlayer({
       if ((await deleteClip(clip.id)) === 'queued') return;
       // The delete can finish half a minute after the click, so go by what the player shows now (the
       // refs), not by this closure's activeClipId: the user may have played another clip or opened
-      // another match meanwhile.
-      const { dropFromStrip, leaveClip } = afterStripClipDelete(clip, {
+      // another match meanwhile, or left this one and come back.
+      const { dropFromStrip, refetchStrip, leaveClip } = afterStripClipDelete(clip, askedIn, {
         matchId: matchIdRef.current,
+        selection: selectionRef.current,
         activeClipId: activeClipIdRef.current,
       });
       if (leaveClip) {
@@ -685,6 +692,22 @@ export function VideoPlayer({
         // resolve afterward and resurrect the just-deleted clip with pre-delete data.
         clipFetchTokenRef.current++;
         setClips((prev) => prev.filter((c) => c.id !== clip.id));
+      }
+      if (refetchStrip) {
+        // The match was opened again while the delete waited, so the fetch the bump just threw away
+        // may be the one that reopening's strip was waiting on. Fetch it again, now the delete is
+        // done, rather than leave it empty or stale until the next clip.* frame.
+        const token = clipFetchTokenRef.current;
+        const selection = selectionRef.current;
+        void fetchClips(clip.parentMatchId)
+          .then((rows) => {
+            if (selection === selectionRef.current && token === clipFetchTokenRef.current) {
+              setClips(rows);
+            }
+          })
+          .catch(() => {
+            /* transient: the next clip.* frame (or a re-select) reconciles */
+          });
       }
     } catch {
       // Leave the row: the banner says why (unless the delete only timed out, which the core may still

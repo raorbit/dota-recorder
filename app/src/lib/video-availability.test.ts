@@ -74,36 +74,47 @@ describe('libraryEventRemovesVod', () => {
 
 describe('afterStripClipDelete', () => {
   const clip = { id: 5, parentMatchId: 2 };
+  // The delete was asked for while selection 4 was open.
+  const askedIn = 4;
 
   it('drops the clip and leaves it for the full VOD while it is still the one playing', () => {
-    expect(afterStripClipDelete(clip, { matchId: 2, activeClipId: 5 })).toEqual({
-      dropFromStrip: true,
-      leaveClip: true,
-    });
+    expect(
+      afterStripClipDelete(clip, askedIn, { matchId: 2, selection: 4, activeClipId: 5 }),
+    ).toEqual({ dropFromStrip: true, refetchStrip: false, leaveClip: true });
   });
 
   it('keeps whatever plays now when another clip or the full VOD took over meanwhile', () => {
-    expect(afterStripClipDelete(clip, { matchId: 2, activeClipId: 6 })).toEqual({
-      dropFromStrip: true,
-      leaveClip: false,
-    });
-    expect(afterStripClipDelete(clip, { matchId: 2, activeClipId: null })).toEqual({
-      dropFromStrip: true,
-      leaveClip: false,
-    });
+    expect(
+      afterStripClipDelete(clip, askedIn, { matchId: 2, selection: 4, activeClipId: 6 }),
+    ).toEqual({ dropFromStrip: true, refetchStrip: false, leaveClip: false });
+    expect(
+      afterStripClipDelete(clip, askedIn, { matchId: 2, selection: 4, activeClipId: null }),
+    ).toEqual({ dropFromStrip: true, refetchStrip: false, leaveClip: false });
+  });
+
+  it('fetches the strip again once the same match was left and opened again meanwhile', () => {
+    // Dropping the clip discards the strip fetch in flight, which may be the reopening's own:
+    // without a fetch after the delete the strip would stay empty until the next clip frame.
+    expect(
+      afterStripClipDelete(clip, askedIn, { matchId: 2, selection: 6, activeClipId: null }),
+    ).toEqual({ dropFromStrip: true, refetchStrip: true, leaveClip: false });
+    // The reopening listed the clip (its fetch predates the delete), and it was played again.
+    expect(
+      afterStripClipDelete(clip, askedIn, { matchId: 2, selection: 6, activeClipId: 5 }),
+    ).toEqual({ dropFromStrip: true, refetchStrip: true, leaveClip: true });
   });
 
   it('touches neither the strip nor playback once another match is open', () => {
     for (const activeClipId of [null, 9]) {
-      expect(afterStripClipDelete(clip, { matchId: 3, activeClipId })).toEqual({
-        dropFromStrip: false,
-        leaveClip: false,
-      });
+      for (const selection of [4, 5]) {
+        expect(
+          afterStripClipDelete(clip, askedIn, { matchId: 3, selection, activeClipId }),
+        ).toEqual({ dropFromStrip: false, refetchStrip: false, leaveClip: false });
+      }
     }
-    expect(afterStripClipDelete(clip, { matchId: null, activeClipId: null })).toEqual({
-      dropFromStrip: false,
-      leaveClip: false,
-    });
+    expect(
+      afterStripClipDelete(clip, askedIn, { matchId: null, selection: 5, activeClipId: null }),
+    ).toEqual({ dropFromStrip: false, refetchStrip: false, leaveClip: false });
   });
 });
 

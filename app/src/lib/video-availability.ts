@@ -68,13 +68,31 @@ export function releaseStaleMedia(
 // lock before the core queues it), so it is judged against what the player shows by then, not at the
 // click: the strip drops the clip only while it still lists that clip's match (dropping it means
 // discarding any strip fetch in flight, which by then may be another match's), and playback leaves the
-// clip for the full VOD only if the deleted clip is still the one playing.
+// clip for the full VOD only if the deleted clip is still the one playing. `selection` counts every
+// change of the open match, so `askedIn` (its value at the click) tells that match apart from the
+// same match left and opened again meanwhile. Then the strip was fetched anew for the reopening,
+// maybe before the delete was done, and the fetch that dropping the clip discards may be that very
+// one (or the refresh the clip.deleted frame started), leaving the strip empty or stale: so it is
+// fetched again.
 export function afterStripClipDelete(
   deleted: { readonly id: number; readonly parentMatchId: number },
-  now: { readonly matchId: number | null; readonly activeClipId: number | null },
-): { readonly dropFromStrip: boolean; readonly leaveClip: boolean } {
+  askedIn: number,
+  now: {
+    readonly matchId: number | null;
+    readonly selection: number;
+    readonly activeClipId: number | null;
+  },
+): {
+  readonly dropFromStrip: boolean;
+  readonly refetchStrip: boolean;
+  readonly leaveClip: boolean;
+} {
   const dropFromStrip = now.matchId === deleted.parentMatchId;
-  return { dropFromStrip, leaveClip: dropFromStrip && now.activeClipId === deleted.id };
+  return {
+    dropFromStrip,
+    refetchStrip: dropFromStrip && now.selection !== askedIn,
+    leaveClip: dropFromStrip && now.activeClipId === deleted.id,
+  };
 }
 
 // Whether a library event took the given match's VOD away: a retention.swept that pruned it, or a
