@@ -1099,7 +1099,7 @@ public class CrashRecoveryRunner implements ApplicationRunner {
 
     /** What an archived copy is to the original it was made from, by {@link #judgeCopy}. */
     private enum Verdict {
-        /** It holds the original's bytes. */
+        /** Read end to end, it holds the original's bytes. */
         WHOLE(null),
         /**
          * Read end to end, it holds the original's bytes and zeros where the original has data: cut
@@ -1123,30 +1123,24 @@ public class CrashRecoveryRunner implements ApplicationRunner {
     }
 
     /**
-     * Judges {@code copy} against the {@code original} it was made from by their first, middle and
-     * last 64 KiB, or end to end when those can't settle it. Only a copy reading as zeros where the
-     * original holds data shows which of the two is damaged: a copy cut short, or one an older
-     * archiver left with a stretch its drive never got (a power cut before the cache was written),
-     * reads that way. An original damaged since it was copied (a bad sector, a file system error)
-     * can read as anything, zeros included, or not at all. So a copy that differs where it holds
-     * data is {@link Verdict#DIFFERENT} and a pair that can't be read {@link Verdict#UNREADABLE}:
-     * neither is taken for the damaged one.
+     * Judges {@code copy} against the {@code original} it was made from. Only a copy reading as zeros
+     * where the original holds data shows which of the two is damaged: a copy cut short, or one an
+     * older archiver left with a stretch its drive never got (a power cut before the cache was
+     * written), reads that way. An original damaged since it was copied (a bad sector, a file system
+     * error) can read as anything, zeros included, or not at all. So a copy that differs where it
+     * holds data is {@link Verdict#DIFFERENT} and a pair that can't be read {@link
+     * Verdict#UNREADABLE}: neither is taken for the damaged one.
      *
-     * <ul>
-     *   <li>Alike at the samples, with the copy's last 64 KiB holding data: {@link Verdict#WHOLE}.</li>
-     *   <li>Alike at the samples but ending in zeros, or apart only where the copy reads as zeros:
-     *       read end to end. A recording an OS crash cut short ends in zeros too, so an end of
-     *       zeros alone proves nothing; and before the row goes on the original, which makes the
-     *       copy move residue for the next boot to drop, the original has to hold all the copy does.
-     *       Alike end to end is {@link Verdict#WHOLE}, apart only where the copy reads as zeros is
-     *       {@link Verdict#LACKING}.</li>
-     * </ul>
+     * <p>Their first, middle and last 64 KiB settle only those two. {@link Verdict#WHOLE} and {@link
+     * Verdict#LACKING} each end with a file deleted (the original, or the copy as move residue once
+     * the row is back on the original), so they take a read end to end: a stretch a copy's drive
+     * never got can sit anywhere, and the samples see it only where it overlaps them, while a
+     * recording an OS crash cut short ends in zeros too, so an end of zeros proves nothing either.
+     * Alike end to end is {@link Verdict#WHOLE}, apart only where the copy reads as zeros {@link
+     * Verdict#LACKING}.
      */
     private static Verdict judgeCopy(Path copy, Path original) {
         Likeness sampled = compare(copy, original, false);
-        if (sampled == Likeness.SAME && endsInData(copy)) {
-            return Verdict.WHOLE;
-        }
         Likeness whole =
                 sampled == Likeness.SAME || sampled == Likeness.COPY_LACKS_DATA
                         ? compare(copy, original, true)
