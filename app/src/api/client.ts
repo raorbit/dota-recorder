@@ -208,6 +208,10 @@ export interface Settings {
   // When true the recorder also captures Hero Demo sessions (GSI map "hero_demo_main");
   // off by default so the library only collects real matches.
   readonly recordDemoMatches: boolean;
+  // Not a setting, so never sent back. With the encoder on Auto: the hardware encoder token
+  // Auto picked and swapped for x264 until the core restarts, because OBS couldn't start
+  // recording with it; null otherwise. Saving a different encoder drops the swap.
+  readonly autoEncoderFallbackFrom: string | null;
 }
 
 // Per-drive disk usage from GET /storage/usage, used to show real free/total space and
@@ -233,7 +237,8 @@ export interface StorageUsage {
 // A partial update to Settings. Every field is optional so the renderer can PATCH
 // just what changed; the core carries forward any field the patch omits. Because a
 // null/omitted field means "leave unchanged", clearing accountId needs an explicit flag.
-export type SettingsPatch = Partial<Settings> & {
+// autoEncoderFallbackFrom is the core's to report, not a setting, so it is never patched.
+export type SettingsPatch = Partial<Omit<Settings, 'autoEncoderFallbackFrom'>> & {
   readonly clearAccountId?: boolean;
 };
 
