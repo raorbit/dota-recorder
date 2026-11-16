@@ -21,10 +21,17 @@ function authHeaders(): Record<string, string> {
   return token ? { [TOKEN_HEADER]: token } : {};
 }
 
-function wsUrl(): string {
+// The /ws URL for a socket. One that shows delete failures says so (deleteFailures=1): the core
+// keeps a delete.failed frame until such a socket takes it, and sends it the ones kept while none
+// was open. The player's own socket doesn't, so the frame can't be spent on one that can't show it.
+function wsUrl(showsDeleteFailures: boolean): string {
   const base = window.dotarec?.wsUrl ?? DEFAULT_WS_URL;
   const token = window.dotarec?.bridgeToken;
-  return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+  const params = [
+    ...(token ? [`token=${encodeURIComponent(token)}`] : []),
+    ...(showsDeleteFailures ? ['deleteFailures=1'] : []),
+  ];
+  return params.length > 0 ? `${base}?${params.join('&')}` : base;
 }
 
 // URL the renderer drops straight into <video src> for playback + seeking.
@@ -1019,6 +1026,8 @@ export class StatusSocket {
 
   // Subscribe to delete.failed frames: a delete the core queued and then could not do. Mirrors
   // onDiskWarning(): returns a detacher. The library wiring turns these into the delete-failure banner.
+  // Subscribe before connect(): the socket tells the core it shows them as it opens (see wsUrl),
+  // and only then does the core count it as having taken one, or send it the ones it kept.
   onDeleteFailed(listener: DeleteFailureListener): () => void {
     this.deleteFailureListeners.add(listener);
     return () => this.deleteFailureListeners.delete(listener);
@@ -1054,7 +1063,7 @@ export class StatusSocket {
   }
 
   private open(): void {
-    const ws = new WebSocket(wsUrl());
+    const ws = new WebSocket(wsUrl(this.deleteFailureListeners.size > 0));
     this.socket = ws;
 
     ws.onopen = () => {

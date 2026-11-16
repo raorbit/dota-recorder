@@ -3,6 +3,7 @@ package dev.dotarec.bridge;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
+import java.net.URI;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.List;
@@ -42,13 +43,22 @@ public class StatusWebSocket extends TextWebSocketHandler {
     /** The most frames {@link #broadcastOrKeep} keeps for the next session; older ones are dropped. */
     static final int MAX_KEPT = 20;
 
+    /**
+     * What a client adds to its query when it connects ({@code /ws?deleteFailures=1}) to say it
+     * shows the frames {@link #broadcastOrKeep} sends: the library window's socket does, the
+     * player's own one doesn't. Only such a session counts as having taken one, and only it is sent
+     * those kept.
+     */
+    static final String TAKES_KEPT_PARAM = "deleteFailures=1";
+
     private final StatusService statusService;
     private final ObjectMapper mapper;
     private final Set<WebSocketSession> sessions = new CopyOnWriteArraySet<>();
     /**
-     * Frames {@link #broadcastOrKeep} sent while no session was open, oldest first, for the next one
-     * that connects. Guarded by itself, which also covers adding a session to {@link #sessions}, so a
-     * frame either reaches a new session as a broadcast or is kept for it, never neither.
+     * Frames {@link #broadcastOrKeep} sent while no session that takes them was open, oldest first,
+     * for the next one that connects. Guarded by itself, which also covers adding a session to
+     * {@link #sessions}, so a frame either reaches a new session as a broadcast or is kept for it,
+     * never neither.
      */
     private final Deque<String> kept = new ArrayDeque<>();
     /** {@code kept.size()}, written under its lock, so {@link #keptFrames} reads it without one. */
@@ -77,14 +87,17 @@ public class StatusWebSocket extends TextWebSocketHandler {
                 // Serialization of our own snapshot should never fail; log and keep the session open.
                 log.warn("Failed to serialize initial status frame", e);
             }
-            List<String> missed;
+            List<String> missed = List.of();
             synchronized (kept) {
                 sessions.add(session);
-                missed = List.copyOf(kept);
-                kept.clear();
-                keptCount = 0;
+                if (takesKept(session)) {
+                    missed = List.copyOf(kept);
+                    kept.clear();
+                    keptCount = 0;
+                }
             }
-            // Then what no session got (see broadcastOrKeep), still ahead of any later broadcast.
+            // Then what no session that takes it got (see broadcastOrKeep), still ahead of any
+            // later broadcast. A session that doesn't take them leaves them for one that does.
             for (int i = 0; i < missed.size(); i++) {
                 if (!sendTo(session, missed.get(i))) {
                     unsent = missed.subList(i, missed.size());
@@ -119,9 +132,11 @@ public class StatusWebSocket extends TextWebSocketHandler {
 
     /**
      * {@link #broadcast}s a one-off frame a window must see even when none is open: one that reaches
-     * no session is kept and sent to the next session that connects, right after its status frame. For
-     * news with no other carrier, such as a queued delete that failed while the window was closed to
-     * the tray. At most {@link #MAX_KEPT} are kept.
+     * no session that takes it ({@link #TAKES_KEPT_PARAM}) is kept and sent to the next such
+     * session that connects, right after its status frame. For news with no other carrier, such as
+     * a queued delete that failed while the window was closed to the tray. A session that doesn't
+     * take them (the player's) would only drop it, so it neither counts nor is sent the ones kept.
+     * At most {@link #MAX_KEPT} are kept.
      */
     public void broadcastOrKeep(String json) {
         synchronized (kept) {
@@ -136,23 +151,38 @@ public class StatusWebSocket extends TextWebSocketHandler {
     }
 
     /**
-     * How many frames {@link #broadcastOrKeep} keeps for the next session, which no window has seen
-     * yet. They live only in memory, so the shell's unattended update install waits while there are
-     * any (see {@link StatusSnapshot.KeptStatus}).
+     * How many frames {@link #broadcastOrKeep} keeps for the next session that takes them, which no
+     * window has seen yet. They live only in memory, so the shell's unattended update install waits
+     * while there are any (see {@link StatusSnapshot.KeptStatus}).
      */
     public int keptFrames() {
         return keptCount;
     }
 
-    /** Sends to every open session; returns how many took the frame. */
+    /** Sends to every open session; returns how many that take kept frames took it. */
     private int sendToAll(String json) {
         int sent = 0;
         for (WebSocketSession session : sessions) {
-            if (sendTo(session, json)) {
+            if (sendTo(session, json) && takesKept(session)) {
                 sent++;
             }
         }
         return sent;
+    }
+
+    /** Whether the session connected with {@link #TAKES_KEPT_PARAM} in its query. */
+    static boolean takesKept(WebSocketSession session) {
+        URI uri = session.getUri();
+        String query = uri == null ? null : uri.getRawQuery();
+        if (query == null) {
+            return false;
+        }
+        for (String param : query.split("&")) {
+            if (param.equals(TAKES_KEPT_PARAM)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** False when the session is closed or the send failed; the session is then dropped. */

@@ -7,6 +7,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.net.URI;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -143,9 +144,9 @@ class StatusWebSocketTest {
         socket.broadcast(HEARTBEAT); // an ordinary broadcast nobody took is just gone
 
         List<String> first = new ArrayList<>();
-        socket.afterConnectionEstablished(recording(first));
+        socket.afterConnectionEstablished(window(first));
         List<String> second = new ArrayList<>();
-        socket.afterConnectionEstablished(recording(second));
+        socket.afterConnectionEstablished(window(second));
 
         assertThat(first).hasSize(2);
         assertThat(first.get(0)).contains("\"status\"");
@@ -158,11 +159,11 @@ class StatusWebSocketTest {
     void aFrameASessionTook_isNotKept() throws Exception {
         StatusWebSocket socket = socket();
         List<String> open = new ArrayList<>();
-        socket.afterConnectionEstablished(recording(open));
+        socket.afterConnectionEstablished(window(open));
 
         socket.broadcastOrKeep(FAILED);
         List<String> later = new ArrayList<>();
-        socket.afterConnectionEstablished(recording(later));
+        socket.afterConnectionEstablished(window(later));
 
         assertThat(open).hasSize(2);
         assertThat(open.get(1)).isEqualTo(FAILED);
@@ -177,7 +178,7 @@ class StatusWebSocketTest {
         }
 
         List<String> sent = new ArrayList<>();
-        socket.afterConnectionEstablished(recording(sent));
+        socket.afterConnectionEstablished(window(sent));
 
         // The oldest, 0, was dropped; 1 to MAX_KEPT follow the status frame in order.
         assertThat(sent).hasSize(1 + StatusWebSocket.MAX_KEPT);
@@ -195,7 +196,7 @@ class StatusWebSocketTest {
         socket.broadcastOrKeep(FAILED);
         assertThat(socket.keptFrames()).isEqualTo(2);
 
-        socket.afterConnectionEstablished(recording(new ArrayList<>()));
+        socket.afterConnectionEstablished(window(new ArrayList<>()));
         assertThat(socket.keptFrames()).isZero();
         socket.broadcastOrKeep(FAILED); // taken by the session that is open now
         assertThat(socket.keptFrames()).isZero();
@@ -208,11 +209,65 @@ class StatusWebSocketTest {
 
         // The status frame goes out, the kept one doesn't: the session closed in between.
         WebSocketSession closing = mock(WebSocketSession.class);
+        when(closing.getUri()).thenReturn(URI.create(WS + LIBRARY));
         when(closing.isOpen()).thenReturn(true, false);
         socket.afterConnectionEstablished(closing);
 
         assertThat(socket.keptFrames()).isEqualTo(1);
     }
+
+    @Test
+    void aSessionThatDoesNotTakeKeptFrames_isNotCountedAsHavingTakenOne() throws Exception {
+        // The player's own socket is the only one open (the library's is backing off): it may get
+        // the frame, but has nothing to show it with, so it is kept for the library's.
+        StatusWebSocket socket = socket();
+        List<String> player = new ArrayList<>();
+        socket.afterConnectionEstablished(recording(player, PLAYER));
+
+        socket.broadcastOrKeep(FAILED);
+        assertThat(socket.keptFrames()).isEqualTo(1);
+
+        List<String> library = new ArrayList<>();
+        socket.afterConnectionEstablished(window(library));
+        assertThat(library).hasSize(2);
+        assertThat(library.get(1)).isEqualTo(FAILED);
+        assertThat(socket.keptFrames()).isZero();
+    }
+
+    @Test
+    void aSessionThatDoesNotTakeKeptFrames_isNotSentTheOnesKept() throws Exception {
+        // Both sockets dropped and the player's came back first: the kept frame waits for the
+        // library's.
+        StatusWebSocket socket = socket();
+        socket.broadcastOrKeep(FAILED);
+
+        List<String> player = new ArrayList<>();
+        socket.afterConnectionEstablished(recording(player, PLAYER));
+        assertThat(player).hasSize(1);
+        assertThat(player.get(0)).contains("\"status\"");
+        assertThat(socket.keptFrames()).isEqualTo(1);
+
+        List<String> library = new ArrayList<>();
+        socket.afterConnectionEstablished(window(library));
+        assertThat(library).hasSize(2);
+        assertThat(library.get(1)).isEqualTo(FAILED);
+    }
+
+    @Test
+    void takesKeptReadsTheParamFromTheQueryAlone() {
+        assertThat(StatusWebSocket.takesKept(at(WS + LIBRARY))).isTrue();
+        assertThat(StatusWebSocket.takesKept(at(WS + "?deleteFailures=1"))).isTrue();
+        assertThat(StatusWebSocket.takesKept(at(WS + PLAYER))).isFalse();
+        assertThat(StatusWebSocket.takesKept(at(WS + "?token=t&deleteFailures=0"))).isFalse();
+        assertThat(StatusWebSocket.takesKept(at(WS + "?token=deleteFailures%3D1"))).isFalse();
+        assertThat(StatusWebSocket.takesKept(at(WS))).isFalse();
+        assertThat(StatusWebSocket.takesKept(mock(WebSocketSession.class))).isFalse();
+    }
+
+    private static final String WS = "ws://127.0.0.1:3224/ws";
+    /** The library window's socket says it shows delete failures; the player's doesn't. */
+    private static final String LIBRARY = "?token=t&deleteFailures=1";
+    private static final String PLAYER = "?token=t";
 
     private static final String FAILED =
             "{\"type\":\"delete.failed\",\"payload\":{\"kind\":\"match\",\"id\":7,\"message\":\"locked\"}}";
@@ -224,9 +279,25 @@ class StatusWebSocketTest {
         return new StatusWebSocket(statusService, new ObjectMapper());
     }
 
-    /** An open session that records every frame it is sent into {@code sent}, in order. */
-    private static WebSocketSession recording(List<String> sent) throws Exception {
+    /** The library window's session: it takes kept frames. See {@link #recording}. */
+    private static WebSocketSession window(List<String> sent) throws Exception {
+        return recording(sent, LIBRARY);
+    }
+
+    /** A session connected at {@code uri}, for {@link StatusWebSocket#takesKept}. */
+    private static WebSocketSession at(String uri) {
         WebSocketSession session = mock(WebSocketSession.class);
+        when(session.getUri()).thenReturn(URI.create(uri));
+        return session;
+    }
+
+    /**
+     * An open session connected with {@code query} that records every frame it is sent into {@code
+     * sent}, in order.
+     */
+    private static WebSocketSession recording(List<String> sent, String query) throws Exception {
+        WebSocketSession session = mock(WebSocketSession.class);
+        when(session.getUri()).thenReturn(URI.create(WS + query));
         when(session.isOpen()).thenReturn(true);
         doAnswer(
                         inv -> {
