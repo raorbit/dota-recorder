@@ -17,6 +17,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 import org.junit.jupiter.api.AfterEach;
@@ -112,6 +113,47 @@ class DeleteQueueTest {
         }
         assertThat(log).containsExactly("ran 7", "announced 7 deleted", "ran 8", "announced 8 deleted");
         assertThat(queue.pendingIds(Kind.MATCH)).isEmpty();
+    }
+
+    @Test
+    void runsADeleteThatWaitedOutItsTime_beforeOneQueuedDuringThatWait() throws Exception {
+        // Clip 5 is deleted, then its recording 9 while 5 still waits for the lock. The pass outlasts
+        // 5's wait. 5 must still run first: run after 9, it would leave 9 a stub for a clip about to go.
+        DeleteQueue slow = new DeleteQueue(lock, events, Duration.ofSeconds(1));
+        AtomicReference<Optional<String>> clipOutcome = new AtomicReference<>();
+        try (HeldLock pass = HeldLock.hold(lock)) {
+            Thread clipRequest = runOnItsOwnThread(slow, Kind.CLIP, 5, "clip 5", clipOutcome);
+            awaitPending(slow, Kind.CLIP, 5);
+            assertThat(slow.run(Kind.MATCH, 9, delete("match 9"), announce("match 9"))).isEmpty();
+            clipRequest.join(WORKER.toMillis());
+            assertThat(clipOutcome.get()).as("5 waited out its time, so it was queued").isEmpty();
+
+            pass.release();
+            slow.drain(WORKER);
+        } finally {
+            slow.shutdown();
+        }
+        assertThat(ran()).containsExactly("ran clip 5", "ran match 9");
+    }
+
+    @Test
+    void runsADeleteThatGetsTheLockDuringItsWait_beforeOneQueuedDuringThatWait() throws Exception {
+        // As above, but the pass ends while 5 still waits: 5 runs on its own request, then 9.
+        DeleteQueue slow = new DeleteQueue(lock, events, Duration.ofSeconds(5));
+        AtomicReference<Optional<String>> clipOutcome = new AtomicReference<>();
+        try (HeldLock pass = HeldLock.hold(lock)) {
+            Thread clipRequest = runOnItsOwnThread(slow, Kind.CLIP, 5, "clip 5", clipOutcome);
+            awaitPending(slow, Kind.CLIP, 5);
+            assertThat(slow.run(Kind.MATCH, 9, delete("match 9"), announce("match 9"))).isEmpty();
+
+            pass.release();
+            clipRequest.join(WORKER.toMillis());
+            slow.drain(WORKER);
+        } finally {
+            slow.shutdown();
+        }
+        assertThat(clipOutcome.get()).contains("deleted");
+        assertThat(ran()).containsExactly("ran clip 5", "ran match 9");
     }
 
     @Test
@@ -215,6 +257,30 @@ class DeleteQueueTest {
 
     private Consumer<String> announce(String what) {
         return done -> log.add("announced " + what + " " + done);
+    }
+
+    /** The deletes that ran, in order, without their frames. */
+    private List<String> ran() {
+        return log.stream().filter(entry -> entry.startsWith("ran ")).toList();
+    }
+
+    /** Asks {@code on} for a delete on a request thread of its own, which sets {@code outcome}. */
+    private Thread runOnItsOwnThread(DeleteQueue on, Kind kind, long id, String what,
+                                     AtomicReference<Optional<String>> outcome) {
+        Thread request = new Thread(() -> outcome.set(on.run(kind, id, delete(what), announce(what))),
+                "delete-request");
+        request.setDaemon(true);
+        request.start();
+        return request;
+    }
+
+    /** Polls until {@code on} has the delete pending, so a later one is asked for while it waits. */
+    private static void awaitPending(DeleteQueue on, Kind kind, long id) throws InterruptedException {
+        long deadline = System.nanoTime() + WORKER.toNanos();
+        while (!on.pendingIds(kind).contains(id) && System.nanoTime() < deadline) {
+            Thread.sleep(1);
+        }
+        assertThat(on.pendingIds(kind)).contains(id);
     }
 
     /** Polls until nothing is pending: a shut-down worker can't be drained. */
