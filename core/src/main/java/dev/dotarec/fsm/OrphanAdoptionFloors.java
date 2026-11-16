@@ -60,7 +60,10 @@ import org.slf4j.LoggerFactory;
  * #RELEASE_FILE_NAME} next to the floors, exactly {@code
  * {"version":1,"releasedAtMs":<epoch millis>,"rows":<rows released>}}, and never releases again
  * while that file exists, even if the floors file goes. The Go remake can port the step under the
- * same file name and format.
+ * same file name and format. A build without the floors can still run on this data folder after
+ * they exist (a downgrade, a dev build of an older branch) and adopt what they turn away, so every
+ * boot also releases a row created after its folder's floor whose file predates that floor, which no
+ * build that keeps the floors adopts.
  *
  * <p>One exception, for linking alone. When the video folder gets its first floor in a boot that
  * recovers an unfinished recording with no journaled path (the upgrade boot after a crash mid-match,
