@@ -259,6 +259,53 @@ class ObsConfigWriterTest {
     }
 
     @Test
+    void fallBackToX264_saysWhichEncoderItReplaced_untilAnEncoderChangeDropsIt(@TempDir Path dir)
+            throws Exception {
+        // The switch holds for the rest of a tray session that can last days, with the encoder
+        // still reading Auto, so the Settings UI needs to say so. An encoder the user changes there
+        // drops it: back on Auto, the probed encoder is tried again, as a restart would.
+        AppPaths paths = paths(dir);
+        SettingsStore settings = new SettingsStore(paths);
+        AtomicInteger probes = new AtomicInteger();
+        EncoderProbe intel = new EncoderProbe(() -> {
+            probes.incrementAndGet();
+            return List.of("Intel(R) UHD Graphics 620");
+        });
+        ObsConfigWriter writer = new ObsConfigWriter(paths, settings, intel, "", "0");
+        writer.configure();
+        Path ini = new ObsLayout(paths.obsDir()).profileIni();
+        assertThat(writer.autoEncoderFallbackFrom()).as("auto runs what it picked").isNull();
+
+        assertThat(writer.fallBackToX264()).isTrue();
+        assertThat(writer.autoEncoderFallbackFrom()).isEqualTo("qsv");
+
+        writer.dropAutoEncoderFallback();
+        writer.applyProfile();
+
+        assertThat(writer.autoEncoderFallbackFrom()).isNull();
+        assertThat(Files.readString(ini)).contains("RecEncoder=qsv").contains("StreamEncoder=qsv");
+        assertThat(probes).as("the encoder it probed comes back unprobed").hasValue(1);
+        // And a later failure can switch it again.
+        assertThat(writer.fallBackToX264()).isTrue();
+        assertThat(Files.readString(ini)).contains("StreamEncoder=x264");
+    }
+
+    @Test
+    void fallBackToX264_thatCouldntWriteTheProfile_namesNoFallback(@TempDir Path dir)
+            throws Exception {
+        AppPaths paths = paths(dir);
+        SettingsStore settings = new SettingsStore(paths);
+        ObsConfigWriter writer = writer(paths, settings, "", "0");
+        writer.configure();
+        Path ini = new ObsLayout(paths.obsDir()).profileIni();
+        Files.createDirectory(ini.resolveSibling(ini.getFileName() + ".tmp"));
+
+        assertThat(writer.fallBackToX264()).isFalse();
+
+        assertThat(writer.autoEncoderFallbackFrom()).isNull();
+    }
+
+    @Test
     void fallBackToX264_keepsAnEncoderPickedInSettings_andSaysSo(@TempDir Path dir) throws Exception {
         AppPaths paths = paths(dir);
         SettingsStore settings = new SettingsStore(paths);
