@@ -1254,6 +1254,43 @@ class CrashRecoveryRunnerTest {
     }
 
     @Test
+    void aPairABootCouldDoNothingWithIsLeftUnreadUntilEitherFileChanges() throws Exception {
+        // A copy and the source left behind beside it differ where the copy holds data, so the boot
+        // leaves both. The boots after it don't read them again while neither changes: here the copy
+        // is put right in place, keeping its size and time, and the source is still left. Once the
+        // source changes, a boot reads them again, finds the copy whole and removes the source.
+        Path archive = configureArchive("hdd");
+        seedAdoptionFloor(videoDir, System.currentTimeMillis());
+        byte[] recording = recordingOf(256 * 1024);
+        byte[] altered = recording.clone();
+        for (int i = 120 * 1024; i < 136 * 1024; i++) {
+            altered[i] = (byte) (altered[i] == (byte) 0x7f ? 0x7e : 0x7f);
+        }
+        long row = archivedRow(archive, "2026-10-02 20-00-00.mp4", altered);
+        Path copy = Path.of(matches.findById(row).orElseThrow().videoPath());
+        Path source = writeModifiedAt(videoDir.resolve("2026-10-02 20-00-00.mp4"), recording, LONG_AGO_MS);
+        Path checks = paths.dataDir().resolve(ArchivedCopyChecks.FILE_NAME);
+
+        runner.run(null);
+
+        assertThat(source).exists();
+        assertThat(checks).exists();
+        writeModifiedAt(copy, recording, LONG_AGO_MS);
+
+        newRunner().run(null);
+
+        assertThat(source).exists();
+        Files.setLastModifiedTime(source, java.nio.file.attribute.FileTime.fromMillis(LONG_AGO_MS + 1_000L));
+
+        newRunner().run(null);
+
+        assertThat(source).doesNotExist();
+        assertThat(copy).exists();
+        assertThat(matches.findById(row).orElseThrow().videoPath()).isEqualTo(copy.toString());
+        assertThat(checks).doesNotExist();
+    }
+
+    @Test
     void aRowGoesBackOnItsOriginalOnlyWhenTheOriginalHoldsAllItsCopyDoes() throws Exception {
         // The copy is cut short, and its samples show it, but the original also changed since, at a
         // stretch the samples don't read. Put back on it, the row would make the next boot drop the
