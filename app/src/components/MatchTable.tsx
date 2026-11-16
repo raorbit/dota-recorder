@@ -348,6 +348,15 @@ function ClipTable(): React.JSX.Element {
   useEffect(() => {
     setSelectedIds((prev) => keepListed(prev, (id) => listedClipIds.has(id)));
   }, [listedClipIds]);
+  // So does a menu left open on it (its queued delete finished while the menu showed
+  // "Deleting…"): once the clip cut next takes its id, the menu's Delete would take that clip.
+  // Until this closes it, the menu acts on nothing (see menuTargetIds) and renders nothing.
+  useEffect(() => {
+    if (rowMenu !== null && !listedClipIds.has(rowMenu.clip.id)) {
+      setRowMenu(null);
+      setMenuDeleteArmed(false);
+    }
+  }, [listedClipIds, rowMenu]);
 
   // Row selection, mirroring the match table's onRowSelect: shift = range from the anchor over the
   // CURRENT visible order; Ctrl/Cmd = toggle one; plain = single-select AND open in the player.
@@ -439,9 +448,11 @@ function ClipTable(): React.JSX.Element {
         (() => {
           // The menu acts on the whole multi-selection when the right-clicked row is part of it;
           // otherwise just that row (openRowMenu already collapsed the selection to it). Either way,
-          // only on clips still listed (see menuTargetIds).
+          // only on clips still listed (see menuTargetIds), and on none once the clip it opened on
+          // has gone, which closes it.
           const ids = menuTargetIds(selectedIds, rowMenu.clip.id, (id) => listedClipIds.has(id));
           const count = ids.length;
+          if (count === 0) return null;
           const idSet = new Set(ids);
           const targets = clips.filter((c) => idSet.has(c.id));
           const revealable = targets.filter((c) => canReveal(c));
@@ -775,6 +786,13 @@ export function MatchTable(): React.JSX.Element {
   useEffect(() => {
     setSelectedIds((prev) => keepListed(prev, (id) => matchById.has(id)));
   }, [matchById]);
+  // So does a menu left open on it, as in the clip table: the match recorded next can take its id.
+  useEffect(() => {
+    if (rowMenu !== null && !matchById.has(rowMenu.match.id)) {
+      setRowMenu(null);
+      setMenuDeleteArmed(false);
+    }
+  }, [matchById, rowMenu]);
 
   // Clips live in their own table, not the matches list — render the dedicated
   // clip view for that bucket. (Hooks above still run; the branch is on render only.)
@@ -986,10 +1004,12 @@ export function MatchTable(): React.JSX.Element {
         (() => {
           // The menu acts on the whole multi-selection when the right-clicked row is part of it;
           // otherwise just that row (openRowMenu already collapsed the selection to it). Either way,
-          // only on recordings still listed (see menuTargetIds). `count` drives the labels and which
-          // item set renders.
+          // only on recordings still listed (see menuTargetIds), and on none once the recording it
+          // opened on has gone, which closes it. `count` drives the labels and which item set
+          // renders.
           const ids = menuTargetIds(selectedIds, rowMenu.match.id, (id) => matchById.has(id));
           const count = ids.length;
+          if (count === 0) return null;
           const targets = ids
             .map((id) => matchById.get(id))
             .filter((m): m is MatchSummary => m != null);
