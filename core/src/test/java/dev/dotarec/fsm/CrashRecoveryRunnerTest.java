@@ -2177,6 +2177,97 @@ class CrashRecoveryRunnerTest {
         assertThat(personal).exists();
     }
 
+    @Test
+    void aRowABuildWithoutTheFloorsAdoptedAfterThemIsReleasedOnTheNextBoot() throws Exception {
+        // The release is done, and then 0.1.20 runs on this data folder again (a downgrade, or a dev
+        // build of an older branch) and adopts the user's own old recording, long after the floors
+        // existed. No build that keeps the floors adopts a file older than its folder's floor, so the
+        // next boot that keeps them releases it. A file the floor admits stays a row.
+        long floorMs = System.currentTimeMillis() - 60L * 60_000L;
+        seedAdoptionFloor(videoDir, floorMs);
+        runner.run(null);
+        assertThat(releaseMarker()).exists();
+        Path personal = writeModifiedAt(videoDir.resolve("2024-05-01 18-30-12.mkv"), LONG_AGO_MS);
+        long late = adoptedBeforeTheFloors(personal, floorMs + 10L * 60_000L);
+        long admitted = adoptedBeforeTheFloors(
+                writeModifiedAt(videoDir.resolve("2026-11-16 10-00-00.mp4"), floorMs + 5L * 60_000L),
+                floorMs + 10L * 60_000L);
+
+        newRunner().run(null);
+
+        assertThat(matches.findById(late)).isEmpty();
+        assertThat(personal).exists();
+        assertThat(matches.findById(admitted)).isPresent();
+        newRunner().run(null);
+        assertThat(matches.findAll()).extracting(MatchSummary::id).containsExactly(admitted);
+    }
+
+    @Test
+    void aRowABuildWithoutTheFloorsAdoptedAndArchivedIsReleasedWhenNoRootsFloorAdmitsIt() throws Exception {
+        // As above, and that build's archiver then moved the file to an archive drive, whose floor
+        // says nothing about where it was adopted. Every root's floor came before the row and after
+        // the file, so no build that keeps the floors can have adopted it.
+        long floorMs = System.currentTimeMillis() - 60L * 60_000L;
+        Path archive = chooseArchive("hdd");
+        seedAdoptionFloor(videoDir, floorMs);
+        seedAdoptionFloor(archive, floorMs);
+        runner.run(null);
+        long late = adoptedBeforeTheFloors(
+                writeModifiedAt(videoDir.resolve("2024-05-01 18-30-12.mkv"), LONG_AGO_MS),
+                floorMs + 10L * 60_000L);
+        Path moved = writeModifiedAt(archive.resolve(late + "-2024-05-01 18-30-12.mkv"), LONG_AGO_MS);
+        Files.delete(videoDir.resolve("2024-05-01 18-30-12.mkv"));
+        matches.updateVideoPath(late, moved.toString(), null);
+
+        newRunner().run(null);
+
+        assertThat(matches.findById(late)).isEmpty();
+        assertThat(moved).exists();
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest(name = "archive floored {0} min after the video folder")
+    @org.junit.jupiter.params.provider.ValueSource(longs = {7L, 20L})
+    void aRowAdoptedUnderTheFloorsStaysOnceArchivedToADriveFlooredAfterItsFile(long archiveAfterMin)
+            throws Exception {
+        // The scan adopted a crashed recording under the video folder's floor, and the archiver moved
+        // it, keeping its modification time, to a drive added after it was written. That drive's
+        // floor doesn't admit the file, but the video folder's does (or the drive's floor came after
+        // the row): a build that keeps the floors can have adopted it, so it stays.
+        long floorMs = System.currentTimeMillis() - 60L * 60_000L;
+        Path archive = chooseArchive("hdd");
+        seedAdoptionFloor(videoDir, floorMs);
+        seedAdoptionFloor(archive, floorMs + archiveAfterMin * 60_000L);
+        runner.run(null);
+        long adopted = adoptedBeforeTheFloors(
+                writeModifiedAt(videoDir.resolve("2026-11-16 10-00-00.mp4"), floorMs + 5L * 60_000L),
+                floorMs + 10L * 60_000L);
+        Path moved = writeModifiedAt(archive.resolve(adopted + "-2026-11-16 10-00-00.mp4"), floorMs + 5L * 60_000L);
+        Files.delete(videoDir.resolve("2026-11-16 10-00-00.mp4"));
+        matches.updateVideoPath(adopted, moved.toString(), null);
+
+        newRunner().run(null);
+
+        assertThat(matches.findById(adopted).orElseThrow().videoPath()).isEqualTo(moved.toString());
+    }
+
+    @Test
+    void aRowAdoptedUnderAnOldFloorStaysWhenItsFolderIsFlooredAgain() throws Exception {
+        // The scan adopted a crashed recording under the video folder's floor; the folder was then
+        // left and chosen again, so it starts from a new floor after the file. The row predates that
+        // floor, so the floor tells nothing about how it was adopted, and it stays.
+        long floorMs = System.currentTimeMillis() - 60L * 60_000L;
+        seedAdoptionFloor(videoDir, floorMs);
+        runner.run(null);
+        long adopted = adoptedBeforeTheFloors(
+                writeModifiedAt(videoDir.resolve("2026-11-16 10-00-00.mp4"), floorMs + 5L * 60_000L),
+                floorMs + 10L * 60_000L);
+        seedAdoptionFloor(videoDir, floorMs + 20L * 60_000L);
+
+        newRunner().run(null);
+
+        assertThat(matches.findById(adopted)).isPresent();
+    }
+
     /**
      * A row for {@code file} as the orphan import writes one ({@code gsi_only}, played at the file's
      * modification time), created at {@code createdAt}.

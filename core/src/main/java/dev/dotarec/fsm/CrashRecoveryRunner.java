@@ -198,7 +198,7 @@ public class CrashRecoveryRunner implements ApplicationRunner {
             }
             OrphanAdoptionFloors.Snapshot floors =
                     plan.save(plan.linksBack() && anyStillJournaled(reachedBackFor(unfinished)));
-            releaseRowsAdoptedBeforeTheFloors(plan.earliestReadFloor().orElse(Long.MAX_VALUE), floors);
+            releaseRowsAdoptedWithoutTheFloors(plan.earliestReadFloor().orElse(Long.MAX_VALUE), floors);
             reconcileOrphanVods(floors);
         } finally {
             maintenanceLock.unlock();
@@ -423,12 +423,14 @@ public class CrashRecoveryRunner implements ApplicationRunner {
     }
 
     /**
-     * Releases, once, the rows earlier boots adopted before any adoption floor existed (see {@link
-     * OrphanAdoptionFloors}). Every 0.1.x before the floors adopted the unreferenced recordings in its
-     * roots by their names alone, and a root may be where the user's own OBS saves too, so such a row
-     * may be the user's own recording, first in line for retention's delete and the archiver's move.
-     * Each unstarred {@code gsi_only} row created before {@code cutoffMs} that still holds a video
-     * leaves the library, and its file stays where it is; a row with clips (or markers or pauses,
+     * Releases the rows a boot adopted without the adoption floors (see {@link OrphanAdoptionFloors}).
+     * Every 0.1.x before the floors adopted the unreferenced recordings in its roots by their names
+     * alone, and a root may be where the user's own OBS saves too, so such a row may be the user's own
+     * recording, first in line for retention's delete and the archiver's move. Once, every unstarred
+     * {@code gsi_only} row created before {@code cutoffMs} that still holds a video is looked at; on
+     * every boot, so is each one {@link #adoptedPastTheFloors} shows a build without the floors adopted
+     * after they existed (that build run again on this data folder: a downgrade, say). Each leaves the
+     * library, and its file stays where it is; a row with clips (or markers or pauses,
      * which no import writes) keeps itself and them and drops only its video, so retention leaves the
      * file alone. Kept as they are:
      *
@@ -461,14 +463,26 @@ public class CrashRecoveryRunner implements ApplicationRunner {
      * couldn't be read) there is no cutoff, and every such row goes whenever it was created: a row's
      * {@code created_at} is the clock of the boot that adopted it, so this boot's own clock could
      * only add its error, and a boot running behind (a reset CMOS clock before time sync) would
-     * release nothing and still write the marker.
+     * release nothing and still write the marker. The marker covers only the rows created before the
+     * cutoff: the rows a later boot finds adopted past the floors go whenever it finds them.
      */
-    private void releaseRowsAdoptedBeforeTheFloors(long cutoffMs, OrphanAdoptionFloors.Snapshot floors) {
-        if (!floors.saved() || adoptionFloors.released()) {
+    private void releaseRowsAdoptedWithoutTheFloors(long cutoffMs, OrphanAdoptionFloors.Snapshot floors) {
+        if (!floors.saved()) {
             return;
         }
+        boolean firstRelease = !adoptionFloors.released();
         try {
-            List<MatchSummary> adopted = matches.findAdoptedBefore(cutoffMs);
+            List<Path> roots = new ArrayList<>(archiveDirs());
+            roots.add(0, videoDir());
+            List<MatchSummary> adopted = new ArrayList<>();
+            for (MatchSummary row : matches.findAdoptedBefore(Long.MAX_VALUE)) {
+                if ((firstRelease && row.createdAt() < cutoffMs) || adoptedPastTheFloors(row, floors, roots)) {
+                    adopted.add(row);
+                }
+            }
+            if (!firstRelease && adopted.isEmpty()) {
+                return;
+            }
             Set<Long> adoptedIds = new HashSet<>();
             for (MatchSummary row : adopted) {
                 adoptedIds.add(row.id());
@@ -520,18 +534,21 @@ public class CrashRecoveryRunner implements ApplicationRunner {
                 }
             }
             for (MatchSummary row : deleted) {
-                log.warn("Removed match row {} from the library, adopted before the adoption floors and"
+                log.warn("Removed match row {} from the library, adopted without the adoption floors and"
                         + " maybe the user's own recording; its file {} stays where it is",
                         row.id(), row.videoPath());
             }
             for (MatchSummary row : videoDropped) {
-                log.warn("Dropped the video of match row {}, adopted before the adoption floors and maybe"
+                log.warn("Dropped the video of match row {}, adopted without the adoption floors and maybe"
                         + " the user's own recording, keeping the row for its clips; its file {} stays"
                         + " where it is", row.id(), row.videoPath());
             }
             int released = deleted.size() + videoDropped.size();
-            log.info("Released {} match row(s) adopted before the adoption floors and kept {}; their files"
+            log.info("Released {} match row(s) adopted without the adoption floors and kept {}; their files"
                     + " stay where they are", released, kept);
+            if (!firstRelease) {
+                return;
+            }
             try {
                 adoptionFloors.markReleased(System.currentTimeMillis(), released);
             } catch (Exception e) {
@@ -539,9 +556,44 @@ public class CrashRecoveryRunner implements ApplicationRunner {
                         + " the next boot looks again: {}", e.toString());
             }
         } catch (Exception e) {
-            log.warn("Could not release the rows adopted before the adoption floors; the next boot tries"
+            log.warn("Could not release the rows adopted without the adoption floors; the next boot tries"
                     + " again: {}", e.toString());
         }
+    }
+
+    /**
+     * Whether a build without the floors adopted {@code row} after they existed: its file predates the
+     * floor of every folder it can have been adopted from, and the row came after those floors. No
+     * build that keeps the floors adopts a file older than its folder's floor, so only one that ignores
+     * them does (any 0.1.x before them, run again on this data folder). A file still where it was
+     * adopted is judged by its own folder's floor. One the archiver moved (named {@code <id>-} for this
+     * row) can have come from any root, so every root's floor must be set, older than the row and newer
+     * than the file. A row created before a floor tells nothing: a folder chosen again starts from a
+     * new floor, which a row adopted under the old one predates. A file that can't be read tells
+     * nothing either, and a folder with no floor (one no boot could read yet) keeps its rows.
+     */
+    private static boolean adoptedPastTheFloors(
+            MatchSummary row, OrphanAdoptionFloors.Snapshot floors, List<Path> roots) {
+        Path file = safePath(row.videoPath());
+        if (file == null || file.getParent() == null || !Files.isRegularFile(file)) {
+            return false;
+        }
+        long modifiedMs = lastModifiedMs(file);
+        if (modifiedMs == Long.MIN_VALUE) {
+            return false;
+        }
+        List<Path> folders =
+                file.getFileName().toString().startsWith(row.id() + "-") ? roots : List.of(file.getParent());
+        if (!floors.of(file.getParent()).set()) {
+            return false;
+        }
+        for (Path folder : folders) {
+            OrphanAdoptionFloors.Floor floor = folder == null ? OrphanAdoptionFloors.Floor.NONE : floors.of(folder);
+            if (!floor.set() || row.createdAt() < floor.fromMs() || floor.admits(modifiedMs)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
