@@ -110,6 +110,10 @@ public class CrashRecoveryRunner implements ApplicationRunner {
     private final SettingsStore settings;
     private final StorageMaintenanceLock maintenanceLock;
     private final OrphanAdoptionFloors adoptionFloors;
+    /** Where {@link ArchivedCopyChecks} keeps its file; null when there is no data folder. */
+    private final Path dataDir;
+    /** This boot's {@link ArchivedCopyChecks}, set when {@link #run} starts. */
+    private ArchivedCopyChecks copyChecks = new ArchivedCopyChecks(null, 0L);
 
     @Autowired
     public CrashRecoveryRunner(
@@ -124,7 +128,7 @@ public class CrashRecoveryRunner implements ApplicationRunner {
             StorageMaintenanceLock maintenanceLock,
             AppPaths paths) {
         this(journal, matches, clips, markers, pauses, dataSource, mapper, settings, maintenanceLock,
-                new OrphanAdoptionFloors(paths.dataDir()));
+                new OrphanAdoptionFloors(paths.dataDir()), paths.dataDir());
     }
 
     /**
@@ -143,7 +147,7 @@ public class CrashRecoveryRunner implements ApplicationRunner {
             SettingsStore settings,
             StorageMaintenanceLock maintenanceLock) {
         this(journal, matches, clips, markers, pauses, dataSource, mapper, settings, maintenanceLock,
-                new OrphanAdoptionFloors(null));
+                new OrphanAdoptionFloors(null), null);
     }
 
     private CrashRecoveryRunner(
@@ -156,7 +160,8 @@ public class CrashRecoveryRunner implements ApplicationRunner {
             ObjectMapper mapper,
             SettingsStore settings,
             StorageMaintenanceLock maintenanceLock,
-            OrphanAdoptionFloors adoptionFloors) {
+            OrphanAdoptionFloors adoptionFloors,
+            Path dataDir) {
         this.journal = journal;
         this.matches = matches;
         this.clips = clips;
@@ -167,6 +172,7 @@ public class CrashRecoveryRunner implements ApplicationRunner {
         this.settings = settings;
         this.maintenanceLock = maintenanceLock;
         this.adoptionFloors = adoptionFloors;
+        this.dataDir = dataDir;
     }
 
     @Override
@@ -188,6 +194,7 @@ public class CrashRecoveryRunner implements ApplicationRunner {
             // left unrecovered keeps a new video folder's first floor back so the next boot can still
             // reach back for its file (see OrphanAdoptionFloors).
             long startMs = System.currentTimeMillis();
+            copyChecks = new ArchivedCopyChecks(dataDir, startMs);
             Path videoDir = videoDir();
             OrphanAdoptionFloors.Plan plan =
                     adoptionFloors.plan(
@@ -200,6 +207,7 @@ public class CrashRecoveryRunner implements ApplicationRunner {
                     plan.save(plan.linksBack() && anyStillJournaled(reachedBackFor(unfinished)));
             releaseRowsAdoptedWithoutTheFloors(plan.earliestReadFloor().orElse(Long.MAX_VALUE), floors);
             reconcileOrphanVods(floors);
+            copyChecks.save();
         } finally {
             maintenanceLock.unlock();
         }
@@ -667,7 +675,7 @@ public class CrashRecoveryRunner implements ApplicationRunner {
      * counts only once its row is known to stay. When the row isn't kept, the rows of {@code adopted}
      * whose copy is a complete copy of its file are added to {@code adoptedCopyOwners}.
      */
-    private static boolean keepsAdoptedRow(
+    private boolean keepsAdoptedRow(
             MatchSummary row,
             Path file,
             Map<String, List<ArchivedCopy>> copies,
@@ -683,7 +691,7 @@ public class CrashRecoveryRunner implements ApplicationRunner {
             for (ArchivedCopy copy : copies.getOrDefault(original, List.of())) {
                 if (!normalize(copy.path()).equals(normalize(file))
                         && sameSize(file, copy.path())
-                        && isCompleteCopy(copy.path(), file)) {
+                        && wholeCopyOf(copy.path(), file)) {
                     if (!adopted.contains(copy.rowId())) {
                         return true;
                     }
@@ -692,6 +700,22 @@ public class CrashRecoveryRunner implements ApplicationRunner {
             }
         }
         return floors.of(file.getParent()).admits(lastModifiedMs(file));
+    }
+
+    /**
+     * Whether {@code copy} is a whole copy of {@code original} ({@link #judgeCopy}), for keeping a row
+     * only. A pair an earlier boot compared and neither file has changed since is taken as that boot
+     * found it (see {@link ArchivedCopyChecks}): a row kept or released that way changes nothing on
+     * disk, and a source left behind is deleted only on a fresh read.
+     */
+    private boolean wholeCopyOf(Path copy, Path original) {
+        String earlier = copyChecks.recent(copy, original);
+        if (earlier != null) {
+            return Verdict.WHOLE.name().equals(earlier);
+        }
+        Verdict verdict = judgeCopy(copy, original);
+        copyChecks.found(copy, original, verdict.name());
+        return verdict == Verdict.WHOLE;
     }
 
     private static boolean sameSize(Path a, Path b) {
@@ -1067,15 +1091,20 @@ public class CrashRecoveryRunner implements ApplicationRunner {
      *   <li>when the copy is whole ({@link Verdict#WHOLE}), {@code file} is deleted whatever its age:
      *       the attribution is exact, so it needs no adoption floor, which the source's original
      *       modification time would fail. Nothing else would ever reclaim it, and no row counts it
-     *       against a drive's cap. A delete that fails is tried again next boot;</li>
+     *       against a drive's cap. A delete that fails is tried again by a later boot;</li>
      *   <li>when the copy lacks data {@code file} has and holds nothing {@code file} doesn't ({@link
      *       Verdict#LACKING}, read end to end), the row goes back on {@code file}: an earlier boot
      *       re-linked it to a copy cut short while {@code file}'s drive was out. The copy is then move
      *       residue, which a later boot drops;</li>
      *   <li>otherwise ({@link Verdict#UNREADABLE}, {@link Verdict#DIFFERENT}: either may be the
-     *       damaged one) both stay as they are and {@code file} gets no row. The next boot looks
+     *       damaged one) both stay as they are and {@code file} gets no row. A later boot looks
      *       again.</li>
      * </ul>
+     *
+     * <p>A pair a boot could do nothing with (a copy that differs, or a whole copy whose original
+     * couldn't be deleted) is left as it is by the boots after it, without reading either file, until either
+     * changes or {@link ArchivedCopyChecks#RECHECK_AFTER_MS} has passed (see {@link
+     * ArchivedCopyChecks}); like a doubt, it keeps {@code file} from being deleted for another copy.
      *
      * <p>A row is put back before any file is deleted, and when in doubt about any copy nothing is.
      * With {@code thumbnail} the copies are thumbnails, and a row goes back on its thumbnail alone.
@@ -1090,11 +1119,26 @@ public class CrashRecoveryRunner implements ApplicationRunner {
         ArchivedCopy whole = null;
         Verdict doubt = null;
         ArchivedCopy doubted = null;
+        ArchivedCopy left = null;
+        String leftAs = null;
         for (ArchivedCopy copy : copies) {
             if (!isSourceOf(file, copy.path())) {
                 continue;
             }
+            String earlier = copyChecks.recent(copy.path(), file);
+            if (earlier != null) {
+                // An earlier boot compared these, both unchanged since, and could do nothing with what
+                // it found: left as they are, like a doubt, until either changes or its time is up.
+                left = copy;
+                leftAs = earlier;
+                continue;
+            }
             Verdict verdict = judgeCopy(copy.path(), file);
+            if (verdict == Verdict.DIFFERENT) {
+                // Read, maybe end to end, and found apart. One that can't be read fails fast, and it
+                // may read again soon (another program let go of it), so it is looked at every boot.
+                copyChecks.found(copy.path(), file, verdict.name());
+            }
             if (verdict == Verdict.WHOLE) {
                 whole = whole == null ? copy : whole;
             } else if (verdict == Verdict.LACKING) {
@@ -1113,8 +1157,14 @@ public class CrashRecoveryRunner implements ApplicationRunner {
             }
         }
         if (doubted != null) {
-            log.warn("Left {} and {}, the archived copy made from it, as they are, with no new row: {}; the"
-                    + " next boot looks again", file, doubted.path(), doubt.reason());
+            log.warn("Left {} and {}, the archived copy made from it, as they are, with no new row: {}; a"
+                    + " later boot looks again once either changes, or in {} days", file, doubted.path(),
+                    doubt.reason(), ArchivedCopyChecks.RECHECK_AFTER_MS / (24 * 60 * 60_000L));
+            return true;
+        }
+        if (left != null) {
+            log.info("Left {} and {}, the archived copy made from it, as they are, with no new row: an earlier"
+                    + " boot compared them ({}) and neither has changed since", file, left.path(), leftAs);
             return true;
         }
         if (whole == null) {
@@ -1124,8 +1174,12 @@ public class CrashRecoveryRunner implements ApplicationRunner {
             Files.deleteIfExists(file);
             log.warn("Removed {}, left behind when it was archived to {}", file, whole.path());
         } catch (Exception e) {
-            log.warn("Could not remove {}, left behind when it was archived to {}: {}",
-                    file, whole.path(), e.toString());
+            // Whole, but it can't go now (another program holding it, say): no point reading both again
+            // on every boot, so a later boot does once either changes, or after a while.
+            copyChecks.found(whole.path(), file, Verdict.WHOLE.name());
+            log.warn("Could not remove {}, left behind when it was archived to {}; a later boot tries again"
+                    + " once either changes, or in {} days: {}", file, whole.path(),
+                    ArchivedCopyChecks.RECHECK_AFTER_MS / (24 * 60 * 60_000L), e.toString());
         }
         return true;
     }
