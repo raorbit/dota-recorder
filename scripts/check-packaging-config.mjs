@@ -95,7 +95,9 @@ check(
 // Windows doesn't look a URL up on disk. It doesn't read a program started any other way: through
 // a plugin, a !define, System::Call or a macro from outside build-resources (StdUtils' or UAC's).
 // Nor does it read what a program other than cmd runs (a PowerShell command, say). A command run
-// through cmd's call, start, if or for fails the check, since the check doesn't read it.
+// through cmd's call, start, if or for fails the check, since the check doesn't read it. So does a
+// batch file (.cmd or .bat), however it is started: the check doesn't read the commands in it, and
+// Windows runs one that an exec instruction starts in a cmd of its own, without /d.
 //
 // And it reads only the scripts in build-resources, where the hooks are, not the templates
 // electron-builder makes the rest of the installer from, which aren't ours to change. Their check
@@ -114,6 +116,11 @@ function hasFullPath(program) {
       program.length > root.length &&
       program.slice(0, root.length).toLowerCase() === root.toLowerCase(),
   );
+}
+
+// Windows runs a .cmd or .bat through cmd, even with dots or spaces after the name, which it drops.
+function isBatchFile(program) {
+  return /\.(bat|cmd)[. ]*$/i.test(program);
 }
 
 // The script's lines, numbered. NSIS carries a line that ends in a backslash (spaces after it
@@ -375,6 +382,7 @@ function installerProblems(text) {
       }
       programs++;
       if (!hasFullPath(program)) problems.push({ number, problem: 'bare', name: program });
+      if (isBatchFile(program)) problems.push({ number, problem: 'batch', name: program });
       if (switches != null && command == null) {
         problems.push({ number, problem: 'no /c', name: program });
       }
@@ -389,6 +397,8 @@ function installerProblems(text) {
 const problemMessages = {
   bare: (program) =>
     `starts "${program}" without its full path, so Windows could start a copy left in the installer's folder or the install folder instead. Name it from ${programRoots.join(', ')}.`,
+  batch: (file) =>
+    `starts the batch file "${file}", whose commands this check doesn't read, and which Windows runs in a cmd without /d when an exec instruction starts it. Run those commands through "$SYSDIR\\cmd.exe" /d /c instead.`,
   'no /c': () =>
     `starts cmd with no /c command this check can read, so it can't vouch for the programs that cmd runs.`,
   'no /d': () =>
@@ -522,6 +532,21 @@ const problemCases = [
   [
     String.raw`ExecWait '"$SYSDIR\cmd.exe" /d /c ver.exe & echo. done & echo\tools\fw.exe & cd..'`,
     ['1 bare ver.exe', '1 bare echo.', '1 bare echo\\tools\\fw.exe', '1 bare cd..'],
+  ],
+  // A batch file, by any exec instruction or from a cmd line, in any case and with a dot after it.
+  [
+    [
+      String.raw`ExecShellWait "runas" "$PLUGINSDIR\fw.cmd" "" SW_HIDE`,
+      String.raw`ExecWait '"$INSTDIR\fw.BAT" a'`,
+      String.raw`nsExec::ExecToLog '"$PLUGINSDIR\fw.cmd."'`,
+      String.raw`ExecWait '"$SYSDIR\cmd.exe" /d /c ""$PLUGINSDIR\fw.cmd" & "$SYSDIR\netsh.exe" a"'`,
+    ].join('\n'),
+    [
+      '1 batch $PLUGINSDIR\\fw.cmd',
+      '2 batch $INSTDIR\\fw.BAT',
+      '3 batch $PLUGINSDIR\\fw.cmd.',
+      '4 batch $PLUGINSDIR\\fw.cmd',
+    ],
   ],
   // cmd's call, start, if and for run a command this check doesn't read.
   [
