@@ -16,6 +16,7 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.TreeMap;
@@ -59,8 +60,10 @@ import org.slf4j.LoggerFactory;
  * it is, below its folder's floor, as the floors would have. Then it writes {@value
  * #RELEASE_FILE_NAME} next to the floors, exactly {@code
  * {"version":1,"releasedAtMs":<epoch millis>,"rows":<rows released>}}, and never releases again
- * while that file exists, even if the floors file goes. The Go remake can port the step under the
- * same file name and format. A build without the floors can still run on this data folder after
+ * while that file exists, even if the floors file goes. A row it keeps only because a clip is still
+ * to be cut from it (or from the row holding its copy) is listed as {@code "retry":[<row id>,...]},
+ * present only when there are any, and a later boot decides those rows again and rewrites the list.
+ * The Go remake can port the step under the same file name and format. A build without the floors can still run on this data folder after
  * they exist (a downgrade, a dev build of an older branch) and adopt what they turn away, so every
  * boot also releases a row created after its folder's floor whose file predates that floor, which no
  * build that keeps the floors adopts.
@@ -123,6 +126,14 @@ final class OrphanAdoptionFloors {
 
     /** Records the release as done, written as the floors are, so it never runs again here. */
     void markReleased(long releasedAtMs, int rows) throws IOException {
+        markReleased(releasedAtMs, rows, List.of());
+    }
+
+    /**
+     * Records the release as done, with the rows it kept only for a clip still to be cut ({@code
+     * retry}, written only when there are any), which a later boot decides again.
+     */
+    void markReleased(long releasedAtMs, int rows, Collection<Long> retry) throws IOException {
         if (releaseFile == null) {
             return;
         }
@@ -130,7 +141,45 @@ final class OrphanAdoptionFloors {
         root.put("version", VERSION);
         root.put("releasedAtMs", releasedAtMs);
         root.put("rows", rows);
+        if (!retry.isEmpty()) {
+            retry.stream().sorted().forEach(root.putArray("retry")::add);
+        }
         replace(releaseFile, root);
+    }
+
+    /** What {@link #markReleased} recorded. */
+    record Release(long releasedAtMs, int rows, List<Long> retry) {}
+
+    /**
+     * The release's record, or empty when there is none or it can't be read. A record that can't be
+     * read still counts as {@link #released()}; only its rows to decide again are lost.
+     */
+    Optional<Release> release() {
+        if (releaseFile == null) {
+            return Optional.empty();
+        }
+        try {
+            JsonNode root = MAPPER.readTree(Files.readAllBytes(releaseFile));
+            JsonNode at = root == null ? null : root.get("releasedAtMs");
+            JsonNode rows = root == null ? null : root.get("rows");
+            if (at == null || !at.canConvertToLong() || !at.isIntegralNumber()
+                    || rows == null || !rows.isIntegralNumber() || !rows.canConvertToInt()) {
+                return Optional.empty();
+            }
+            List<Long> retry = new ArrayList<>();
+            JsonNode ids = root.get("retry");
+            if (ids != null && ids.isArray()) {
+                for (JsonNode id : ids) {
+                    if (id.isIntegralNumber() && id.canConvertToLong()) {
+                        retry.add(id.longValue());
+                    }
+                }
+            }
+            return Optional.of(new Release(at.longValue(), rows.intValue(), List.copyOf(retry)));
+        } catch (Exception e) {
+            log.debug("Could not read the adoption release record {}: {}", releaseFile, e.toString());
+            return Optional.empty();
+        }
     }
 
     /** One root's floor. {@link #NONE} admits nothing. */

@@ -2178,6 +2178,40 @@ class CrashRecoveryRunnerTest {
     }
 
     @Test
+    void aRowKeptForAClipBeingCutIsDecidedAgainOnceTheClipIsDone() throws Exception {
+        // The user queued a clip from an adopted recording and the app quit before it was cut. The
+        // upgrade boot can't take the row out from under the clip, so it keeps it, and lists it in
+        // the marker; a boot after the clip is cut drops the row's video, keeping the row for the
+        // clip, and the list goes. The file stays where it is.
+        Files.delete(floorsFile());
+        Path file = writeModifiedAt(videoDir.resolve("2024-05-05 18-30-12.mp4"), LONG_AGO_MS);
+        long cutting = adoptedBeforeTheFloors(file, System.currentTimeMillis() - 30L * 24 * 60 * 60_000L);
+        long clip = clips.insert(cutting, "manual", null, 1.0, 5.0, null, null, null, null, "pending", null, 1_000L);
+
+        runner.run(null);
+        newRunner().run(null);
+
+        assertThat(matches.findById(cutting).orElseThrow().videoPath()).isEqualTo(file.toString());
+        com.fasterxml.jackson.databind.JsonNode marker = new ObjectMapper().readTree(releaseMarker().toFile());
+        assertThat(marker.get("rows").intValue()).isZero();
+        assertThat(marker.get("retry")).extracting(com.fasterxml.jackson.databind.JsonNode::longValue)
+                .containsExactly(cutting);
+        long releasedAt = marker.get("releasedAtMs").longValue();
+        clips.updateStatus(clip, "ready", videoDir.resolve("clips").resolve(cutting + "-clip-1.mp4").toString(),
+                10L, null, null);
+
+        newRunner().run(null);
+
+        assertThat(matches.findById(cutting).orElseThrow().videoPath()).isNull();
+        assertThat(clips.findById(clip)).isPresent();
+        assertThat(file).exists();
+        marker = new ObjectMapper().readTree(releaseMarker().toFile());
+        assertThat(marker.get("rows").intValue()).isEqualTo(1);
+        assertThat(marker.get("releasedAtMs").longValue()).isEqualTo(releasedAt);
+        assertThat(marker.has("retry")).isFalse();
+    }
+
+    @Test
     void aRowABuildWithoutTheFloorsAdoptedAfterThemIsReleasedOnTheNextBoot() throws Exception {
         // The release is done, and then 0.1.20 runs on this data folder again (a downgrade, or a dev
         // build of an older branch) and adopts the user's own old recording, long after the floors
