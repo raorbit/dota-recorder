@@ -462,6 +462,7 @@ export function RecordingSettings({ obs }: RecordingSettingsProps): React.JSX.El
             encoderChoice={encoderChoice}
             setEncoderChoice={setEncoderChoice}
             encoderToken={encoderToken}
+            encoderFallbackFrom={settings?.autoEncoderFallbackFrom ?? null}
             fps={fps}
             setFps={setFps}
             quality={quality}

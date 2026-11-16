@@ -1,4 +1,5 @@
 import type { Dispatch, SetStateAction } from 'react';
+import { encoderFallbackNote } from '../../../lib/encoder-fallback';
 import {
   ENCODER_LABELS,
   FORMAT_PRESETS,
@@ -18,6 +19,8 @@ interface VideoSectionProps {
   readonly setEncoderChoice: Dispatch<SetStateAction<string>>;
   // The core's auto-probed encoder token, shown in the "Auto — …" option label.
   readonly encoderToken: string;
+  // The hardware encoder Auto swapped for x264 this session (Settings.autoEncoderFallbackFrom).
+  readonly encoderFallbackFrom: string | null;
   readonly fps: number;
   readonly setFps: Dispatch<SetStateAction<number>>;
   readonly quality: string;
@@ -31,6 +34,7 @@ export function VideoSection({
   encoderChoice,
   setEncoderChoice,
   encoderToken,
+  encoderFallbackFrom,
   fps,
   setFps,
   quality,
@@ -41,6 +45,7 @@ export function VideoSection({
 }: VideoSectionProps): React.JSX.Element {
   const qualityOptions = withStoredOption(QUALITY_PRESETS, quality);
   const formatOptions = withStoredOption(FORMAT_PRESETS, recFormat);
+  const fallbackNote = encoderFallbackNote(encoderChoice, encoderFallbackFrom, ENCODER_LABELS);
 
   return (
     <section className="rec-card">
@@ -78,6 +83,14 @@ export function VideoSection({
           </select>
         </div>
       </div>
+      {fallbackNote && (
+        <p className="rec-note" role="status">
+          <span className="rec-note-icon" aria-hidden="true">
+            i
+          </span>
+          {fallbackNote}
+        </p>
+      )}
       <div className="rec-row">
         <div className="rec-rowlabel">
           <label className="rec-label" htmlFor="rec-fps">
