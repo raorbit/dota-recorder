@@ -102,7 +102,11 @@ check(
 //
 // Anything the user runs can also set the user's environment variables, which the cmds the hooks
 // start get. So a cmd line with a % in it fails, since cmd puts a %variable%'s value into the line
-// before it reads it, and a & in that value adds a command, even inside quotes. So does a pipe
+// before it reads it, and a & in that value adds a command, even inside quotes. So does an NSIS
+// variable in a cmd line other than $SYSDIR and $WINDIR: NSIS fills it in as the installer runs,
+// from places anything the user runs can set ($PLUGINSDIR and $TEMP from TEMP, $APPDATA and the
+// like from the user's shell folders, $INSTDIR from the install folder), so it can bring a % into
+// the line, and a register ($0, $R0) holds whatever the script put in it. So does a pipe
 // into or out of one of cmd's own commands or a group, or into a command with an @ in front: cmd
 // runs each of those in a cmd of its own, the program %COMSPEC% names.
 //
@@ -410,6 +414,21 @@ function programsIn(text) {
   return scriptInstructions(text).flatMap(({ words }) => programsStarted(words));
 }
 
+// The NSIS variables a cmd line holds that the installer fills in as it runs, each once, less the
+// two the system sets. $$ is a $, $\ starts an escape, ${...} is filled in when the script is
+// compiled and $(...) from the script's own language strings.
+const fixedVariables = new Set(['SYSDIR', 'WINDIR']);
+
+function nsisVariablesIn(command) {
+  const variables = new Set();
+  for (const [, name] of command.matchAll(/\$(\$|\\.|\{[^}]*\}|\([^)]*\)|[A-Za-z0-9_]+)/g)) {
+    if (/^[A-Za-z0-9_]+$/.test(name) && !fixedVariables.has(name.toUpperCase())) {
+      variables.add(`$${name}`);
+    }
+  }
+  return [...variables];
+}
+
 // What breaks the rules in a script, each problem with its line's number, what it is, and the
 // program (or cmd's own command) it is about. `programs` counts the programs the script starts.
 function installerProblems(text) {
@@ -435,6 +454,9 @@ function installerProblems(text) {
         problems.push({ number, problem: 'no /d', name: program });
       }
       if (command?.includes('%')) problems.push({ number, problem: 'variable', name: program });
+      for (const variable of command == null ? [] : nsisVariablesIn(command)) {
+        problems.push({ number, problem: 'nsis variable', name: variable });
+      }
     }
   }
   return { programs, problems };
@@ -451,6 +473,8 @@ const problemMessages = {
     `starts cmd without /d before its /c, so that cmd would first run the AutoRun commands in the registry, which anything the user runs can set, with its own rights (an administrator's, when elevated). Add /d.`,
   variable: () =>
     `starts cmd with a % in its command line. cmd puts a %variable%'s value, which anything the user runs can set, into the line before it reads it, so this check can't vouch for the programs the line runs. Leave % out of cmd lines.`,
+  'nsis variable': (variable) =>
+    `puts ${variable} into a cmd line. NSIS fills it in as the installer runs, from a place anything the user runs can set, so it can bring a % into the line, which cmd fills in before it reads it. Use only $SYSDIR and $WINDIR in cmd lines.`,
   pipe: (side) =>
     `pipes into or out of "${side}", which cmd runs in a cmd of its own: the program %COMSPEC% names, which anything the user runs can set. Pipe only between programs named by their full path, with no @ in front of one on the right of a pipe.`,
   unread: (command) =>
@@ -540,12 +564,18 @@ const problemCases = [
   // cmd syntax that starts nothing more: a redirection, a & in quotes or after a ^, cmd's own
   // commands, and a group with a redirection in it.
   [
-    String.raw`ExecShellWait "runas" "$SYSDIR\cmd.exe" '/d /c ""$SYSDIR\netsh.exe" a name="x & y" b=c^&d >>"$PLUGINSDIR\fw.log" 2>&1"' SW_HIDE`,
+    String.raw`ExecShellWait "runas" "$SYSDIR\cmd.exe" '/d /c ""$SYSDIR\netsh.exe" a name="x & y" b=c^&d >>"$WINDIR\Temp\fw.log" 2>&1"' SW_HIDE`,
     [],
   ],
   [
-    String.raw`ExecWait '"$SYSDIR\cmd.exe" /d /c ("$SYSDIR\netsh.exe" a & 2>"$PLUGINSDIR\fw log.txt" "$SYSDIR\netsh.exe" b & ver) 2>nul & exit /b 0 || ver >nul & @echo done'`,
+    String.raw`ExecWait '"$SYSDIR\cmd.exe" /d /c ("$SYSDIR\netsh.exe" a & 2>"$WINDIR\Temp\fw log.txt" "$SYSDIR\netsh.exe" b & ver) 2>nul & exit /b 0 || ver >nul & @echo done'`,
     [],
+  ],
+  // An NSIS variable in a cmd line that the installer fills in from a place the user can set, or a
+  // register, but not $SYSDIR or $WINDIR, a $$, a compile-time ${...} or a language string.
+  [
+    String.raw`ExecWait '"$SYSDIR\cmd.exe" /d /c ""$SYSDIR\netsh.exe" a >>"$PLUGINSDIR\fw.log" & "$INSTDIR\x.exe" b $0 $$c ${'${PRODUCT}'} $(Note) "$PLUGINSDIR\d""'`,
+    ['1 nsis variable $PLUGINSDIR', '1 nsis variable $INSTDIR', '1 nsis variable $0'],
   ],
   // The characters after one of cmd's own names that still leave it cmd's own command.
   [
@@ -609,6 +639,7 @@ const problemCases = [
       '1 batch $PLUGINSDIR\\fw.cmd',
       '2 batch $INSTDIR\\fw.BAT',
       '3 batch $PLUGINSDIR\\fw.cmd.',
+      '4 nsis variable $PLUGINSDIR',
       '4 batch $PLUGINSDIR\\fw.cmd',
     ],
   ],
