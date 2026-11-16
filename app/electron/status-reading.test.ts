@@ -16,6 +16,7 @@ describe('parseStatusBody', () => {
       fsm: { state: 'RECORDING', activeMatchId: 7 },
       storage: { lowDisk },
       deletes: { matchIds: [7], clipIds: [] },
+      kept: { frames: 1 },
     });
     expect(reading).toEqual({
       wanted: true,
@@ -23,6 +24,7 @@ describe('parseStatusBody', () => {
       fsmState: 'RECORDING',
       lowDisk,
       deletesPending: true,
+      framesKept: true,
     });
   });
 
@@ -34,6 +36,7 @@ describe('parseStatusBody', () => {
       fsmState: 'IDLE',
       lowDisk: null,
       deletesPending: false,
+      framesKept: false,
     });
   });
 
@@ -45,6 +48,17 @@ describe('parseStatusBody', () => {
     expect(pending({ matchIds: [], clipIds: [] })).toBe(false);
     expect(pending({ matchIds: 'lots' })).toBe(false);
     expect(pending(undefined)).toBe(false);
+  });
+
+  it('reads whether the core keeps a frame no window has taken yet', () => {
+    const kept = (value: unknown): boolean | undefined =>
+      parseStatusBody({ fsm: { state: 'IDLE' }, kept: value })?.framesKept;
+    expect(kept({ frames: 2 })).toBe(true);
+    expect(kept({ frames: 0 })).toBe(false);
+    expect(kept({ frames: '2' })).toBe(false);
+    expect(kept({})).toBe(false);
+    expect(kept(null)).toBe(false);
+    expect(kept(undefined)).toBe(false);
   });
 
   it('reads storage.lowDisk null as healthy and drops a malformed observation', () => {
@@ -71,6 +85,7 @@ describe('toObsDemandReading', () => {
       fsmState: 'IDLE',
       lowDisk: null,
       deletesPending: false,
+      framesKept: false,
     };
     expect(toObsDemandReading(base)).toEqual({ wanted: false, busy: false });
     expect(toObsDemandReading({ ...base, recording: true })).toEqual({ wanted: false, busy: true });
@@ -86,6 +101,7 @@ describe('idleForInstall', () => {
     fsmState: 'IDLE',
     lowDisk: null,
     deletesPending: false,
+    framesKept: false,
   };
 
   it('is idle only with nothing recording, OBS not wanted and no delete still to do', () => {
@@ -97,5 +113,9 @@ describe('idleForInstall', () => {
 
   it('waits while the core still has a delete to do, which stopping it would drop', () => {
     expect(idleForInstall({ ...idle, deletesPending: true })).toBe(false);
+  });
+
+  it('waits while the core keeps a delete failure no window has heard of yet', () => {
+    expect(idleForInstall({ ...idle, framesKept: true })).toBe(false);
   });
 });

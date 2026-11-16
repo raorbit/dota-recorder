@@ -31,7 +31,8 @@ import org.springframework.web.socket.handler.TextWebSocketHandler;
  * <p>Bean-cycle note: this handler depends only on {@link StatusService} + {@link ObjectMapper}
  * (to send the initial frame). {@link EventPublisher} depends on <em>this</em> handler to push
  * subsequent broadcasts. Keeping the dependency one-directional (EventPublisher -> StatusWebSocket)
- * avoids a circular bean reference.
+ * avoids a circular bean reference. {@link StatusService} reads {@link #keptFrames} back through a
+ * {@code @Lazy} reference, which is what keeps that one from being a cycle too.
  */
 @Component
 public class StatusWebSocket extends TextWebSocketHandler {
@@ -50,6 +51,8 @@ public class StatusWebSocket extends TextWebSocketHandler {
      * frame either reaches a new session as a broadcast or is kept for it, never neither.
      */
     private final Deque<String> kept = new ArrayDeque<>();
+    /** {@code kept.size()}, written under its lock, so {@link #keptFrames} reads it without one. */
+    private volatile int keptCount;
 
     public StatusWebSocket(StatusService statusService, ObjectMapper mapper) {
         this.statusService = statusService;
@@ -79,6 +82,7 @@ public class StatusWebSocket extends TextWebSocketHandler {
                 sessions.add(session);
                 missed = List.copyOf(kept);
                 kept.clear();
+                keptCount = 0;
             }
             // Then what no session got (see broadcastOrKeep), still ahead of any later broadcast.
             for (int i = 0; i < missed.size(); i++) {
@@ -95,6 +99,7 @@ public class StatusWebSocket extends TextWebSocketHandler {
                 for (int i = unsent.size() - 1; i >= 0; i--) {
                     kept.addFirst(unsent.get(i));
                 }
+                keptCount = kept.size();
             }
         }
     }
@@ -125,8 +130,18 @@ public class StatusWebSocket extends TextWebSocketHandler {
                 while (kept.size() > MAX_KEPT) {
                     kept.removeFirst();
                 }
+                keptCount = kept.size();
             }
         }
+    }
+
+    /**
+     * How many frames {@link #broadcastOrKeep} keeps for the next session, which no window has seen
+     * yet. They live only in memory, so the shell's unattended update install waits while there are
+     * any (see {@link StatusSnapshot.KeptStatus}).
+     */
+    public int keptFrames() {
+        return keptCount;
     }
 
     /** Sends to every open session; returns how many took the frame. */

@@ -29,7 +29,8 @@ class StatusWebSocketTest {
                 new StatusSnapshot.ObsStatus(false, false, false, false, false),
                 new StatusSnapshot.FsmStatus("IDLE", null),
                 new StatusSnapshot.StorageStatus(null),
-                new StatusSnapshot.DeleteStatus(List.of(), List.of()));
+                new StatusSnapshot.DeleteStatus(List.of(), List.of()),
+                new StatusSnapshot.KeptStatus(0));
     }
 
     @Test
@@ -183,6 +184,34 @@ class StatusWebSocketTest {
         assertThat(sent.get(1)).isEqualTo("{\"n\":1}");
         assertThat(sent.get(StatusWebSocket.MAX_KEPT))
                 .isEqualTo("{\"n\":" + StatusWebSocket.MAX_KEPT + "}");
+    }
+
+    @Test
+    void keptFramesCountsWhatWaitsForTheNextSession() throws Exception {
+        // /status carries this, so the shell's update install doesn't restart the core over them.
+        StatusWebSocket socket = socket();
+        assertThat(socket.keptFrames()).isZero();
+        socket.broadcastOrKeep(FAILED);
+        socket.broadcastOrKeep(FAILED);
+        assertThat(socket.keptFrames()).isEqualTo(2);
+
+        socket.afterConnectionEstablished(recording(new ArrayList<>()));
+        assertThat(socket.keptFrames()).isZero();
+        socket.broadcastOrKeep(FAILED); // taken by the session that is open now
+        assertThat(socket.keptFrames()).isZero();
+    }
+
+    @Test
+    void keptFramesStillCountsWhatTheNextSessionCouldNotTake() throws Exception {
+        StatusWebSocket socket = socket();
+        socket.broadcastOrKeep(FAILED);
+
+        // The status frame goes out, the kept one doesn't: the session closed in between.
+        WebSocketSession closing = mock(WebSocketSession.class);
+        when(closing.isOpen()).thenReturn(true, false);
+        socket.afterConnectionEstablished(closing);
+
+        assertThat(socket.keptFrames()).isEqualTo(1);
     }
 
     private static final String FAILED =

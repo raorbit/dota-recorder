@@ -27,6 +27,11 @@ export interface StatusReading {
    * queued behind its maintenance lock, which it keeps only in memory. False on an older core.
    */
   readonly deletesPending: boolean;
+  /**
+   * The core keeps a frame no window has taken yet (kept.frames): a queued delete's failure, sent
+   * to the next window that connects. It too lives only in memory. False on an older core.
+   */
+  readonly framesKept: boolean;
 }
 
 /**
@@ -44,6 +49,7 @@ export function parseStatusBody(body: unknown): StatusReading | null {
     fsmState: body.fsm.state,
     lowDisk: parseLowDisk(body.storage),
     deletesPending: parseDeletesPending(body.deletes),
+    framesKept: parseFramesKept(body.kept),
   };
 }
 
@@ -54,12 +60,18 @@ export function toObsDemandReading(reading: StatusReading): ObsDemandReading {
 
 /**
  * Whether the core is quiet enough for an unattended update install, which stops it: nothing is
- * arming, recording or stopping, OBS is not wanted, and no delete is still to do (stopping the core
- * would drop it, and its row would come back as an ordinary one).
+ * arming, recording or stopping, OBS is not wanted, no delete is still to do (stopping the core
+ * would drop it, and its row would come back as an ordinary one), and no window has yet to hear of
+ * a delete that failed (stopping the core would lose that too, and the row would come back with
+ * nothing to say why).
  */
 export function idleForInstall(reading: StatusReading): boolean {
   return (
-    reading.fsmState === 'IDLE' && !reading.recording && !reading.wanted && !reading.deletesPending
+    reading.fsmState === 'IDLE' &&
+    !reading.recording &&
+    !reading.wanted &&
+    !reading.deletesPending &&
+    !reading.framesKept
   );
 }
 
@@ -67,6 +79,10 @@ function parseDeletesPending(deletes: unknown): boolean {
   if (!isRecord(deletes)) return false;
   const listsAny = (ids: unknown): boolean => Array.isArray(ids) && ids.length > 0;
   return listsAny(deletes.matchIds) || listsAny(deletes.clipIds);
+}
+
+function parseFramesKept(kept: unknown): boolean {
+  return isRecord(kept) && typeof kept.frames === 'number' && kept.frames > 0;
 }
 
 function parseLowDisk(storage: unknown): LowDiskReading | null {

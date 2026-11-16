@@ -21,10 +21,13 @@ import java.util.List;
  *       video drive is healthy.</li>
  *   <li>{@code deletes} -- sourced from {@code DeleteQueue}; both lists are empty while no delete is
  *       pending.</li>
+ *   <li>{@code kept} -- sourced from {@code StatusWebSocket}; {@code frames} is 0 while it keeps no
+ *       frame for the next window.</li>
  * </ul>
  */
 public record StatusSnapshot(
-        GsiStatus gsi, ObsStatus obs, FsmStatus fsm, StorageStatus storage, DeleteStatus deletes) {
+        GsiStatus gsi, ObsStatus obs, FsmStatus fsm, StorageStatus storage, DeleteStatus deletes,
+        KeptStatus kept) {
 
     /** GSI feed liveness. {@code lastFrameAgoMs} is null before any frame has been received. */
     public record GsiStatus(boolean connected, Long lastFrameAgoMs) {}
@@ -62,4 +65,13 @@ public record StatusSnapshot(
      * tray and opened again, say) still shows those rows as being deleted.
      */
     public record DeleteStatus(List<Long> matchIds, List<Long> clipIds) {}
+
+    /**
+     * How many one-off frames no window has taken yet, which the core keeps in memory for the next
+     * one that connects (see {@code StatusWebSocket#broadcastOrKeep}): a queued delete's failure,
+     * say, while the window was closed to the tray. Carried here so the shell's unattended update
+     * install, which restarts the core, waits until a window has taken them rather than losing them
+     * (see {@code app/electron/status-reading.ts}; the renderer doesn't read it).
+     */
+    public record KeptStatus(int frames) {}
 }
