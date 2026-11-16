@@ -1965,6 +1965,32 @@ class CrashRecoveryRunnerTest {
         assertThat(copy).exists();
     }
 
+    @org.junit.jupiter.params.ParameterizedTest(name = "source row read first: {0}")
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void aLeftBehindSourceStaysBesideTheCopyOfARowTheReleaseKeeps(boolean sourceRowFirst) throws Exception {
+        // As above, but a clip is still being cut from the copy's row, so the release can't take that
+        // row out and it keeps its video. Its copy is then evidence after all, whichever row the
+        // release reads first: the source stays a row too, so no boot deletes it as a source left
+        // behind beside the copy.
+        Files.delete(floorsFile());
+        Path archive = chooseArchive("hdd");
+        long monthAgo = System.currentTimeMillis() - 30L * 24 * 60 * 60_000L;
+        Path source = writeModifiedAt(videoDir.resolve("2024-05-01 18-30-12.mkv"), LONG_AGO_MS);
+        long first = adoptedBeforeTheFloors(source, monthAgo);
+        Path copy = writeModifiedAt(archive.resolve(first + "-2024-05-01 18-30-12.mkv"), LONG_AGO_MS);
+        matches.updateVideoPath(first, copy.toString(), null);
+        clips.insert(first, "manual", null, 1.0, 5.0, null, null, null, null, "pending", null, 1_000L);
+        long second = adoptedBeforeTheFloors(source, monthAgo + (sourceRowFirst ? -60_000L : 60_000L));
+
+        runner.run(null);
+        newRunner().run(null);
+
+        assertThat(matches.findById(first).orElseThrow().videoPath()).isEqualTo(copy.toString());
+        assertThat(matches.findById(second).orElseThrow().videoPath()).isEqualTo(source.toString());
+        assertThat(copy).exists();
+        assertThat(source).exists();
+    }
+
     @Test
     void theReleaseKeepsNoSourceOfACopyCutShort() throws Exception {
         // 0.1.20 re-linked a match to its archived copy cut short while the recording's drive was out,

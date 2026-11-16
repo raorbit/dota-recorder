@@ -26,6 +26,7 @@ import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -438,10 +439,13 @@ public class CrashRecoveryRunner implements ApplicationRunner {
      *       {@code <matchId>-}, and a complete copy of it, see {@link #isCompleteCopy}), adopted when
      *       the archiver failed to delete it: retention reclaims it, as before the floors. When the
      *       copy was cut short the file is the only good one, so its row is released like any other,
-     *       and the orphan scan then puts the copy's row back on the file. Only a copy whose own row
-     *       this release doesn't look at counts: the archiver's copy of a user's file adopted before
-     *       the floors and the source it couldn't delete, adopted again, would otherwise keep each
-     *       other;</li>
+     *       and the orphan scan then puts the copy's row back on the file. A copy whose row this
+     *       release looks at counts only once that row is known to stay with its video, by these
+     *       rules or because the transaction can't release it (a clip is still being cut from it,
+     *       say): the archiver's copy of a user's file adopted before the floors and the source it
+     *       couldn't delete, adopted again, would otherwise keep each other, and a source released
+     *       beside a copy whose row stays would be deleted by the orphan scan as one left
+     *       behind;</li>
      *   <li>a row whose file its folder's floor admits (modified since): released, it would only be
      *       adopted again;</li>
      *   <li>a row with a clip still to be cut from its video.</li>
@@ -470,15 +474,20 @@ public class CrashRecoveryRunner implements ApplicationRunner {
                 adoptedIds.add(row.id());
             }
             Map<String, List<ArchivedCopy>> copies = archivedCopies().videos();
-            List<MatchSummary> candidates = new ArrayList<>();
+            // The adopted rows that keep their video. A row the transaction can't release stays too,
+            // so the rows whose file one of them holds a whole copy of are decided after it.
+            Set<Long> staying = new HashSet<>();
+            List<Candidate> undecided = new ArrayList<>();
             int kept = 0;
             for (MatchSummary row : adopted) {
                 Path file = safePath(row.videoPath());
+                Set<Long> adoptedCopyOwners = new HashSet<>();
                 if (file == null || file.getFileName() == null
-                        || keepsAdoptedRow(row, file, copies, adoptedIds, floors)) {
+                        || keepsAdoptedRow(row, file, copies, adoptedIds, floors, adoptedCopyOwners)) {
                     kept++;
+                    staying.add(row.id());
                 } else {
-                    candidates.add(row);
+                    undecided.add(new Candidate(row, adoptedCopyOwners));
                 }
             }
             List<MatchSummary> deleted = new ArrayList<>();
@@ -486,13 +495,20 @@ public class CrashRecoveryRunner implements ApplicationRunner {
             try (Connection conn = dataSource.getConnection()) {
                 conn.setAutoCommit(false);
                 try {
-                    for (MatchSummary row : candidates) {
-                        if (matches.deleteAdopted(conn, row.id(), row.videoPath())) {
+                    while (!undecided.isEmpty()) {
+                        Candidate next = nextToDecide(undecided, staying);
+                        undecided.remove(next);
+                        MatchSummary row = next.row();
+                        if (!Collections.disjoint(next.adoptedCopyOwners(), staying)) {
+                            kept++; // a row that stays holds a whole copy of its file
+                            staying.add(row.id());
+                        } else if (matches.deleteAdopted(conn, row.id(), row.videoPath())) {
                             deleted.add(row);
                         } else if (matches.dropAdoptedVideo(conn, row.id(), row.videoPath())) {
                             videoDropped.add(row);
                         } else {
                             kept++; // starred or moved since it was read, or a clip is being cut from it
+                            staying.add(row.id());
                         }
                     }
                     conn.commit();
@@ -529,15 +545,46 @@ public class CrashRecoveryRunner implements ApplicationRunner {
     }
 
     /**
-     * Whether a row adopted before the floors keeps its video (see the release's rules). A copy owned
-     * by one of {@code adopted}, the rows the release looks at, is no evidence.
+     * A row the release may take out, and the rows of those it looks at whose archived copy is a
+     * complete copy of its file: it stays if one of them does.
+     */
+    private record Candidate(MatchSummary row, Set<Long> adoptedCopyOwners) {}
+
+    /**
+     * The undecided row the release decides next: one whose file a row that stays holds a whole copy
+     * of, else one whose copies' rows are all decided. Rows holding whole copies of each other's
+     * files, which are then all archived copies and none a source left behind, go in the order read.
+     */
+    private static Candidate nextToDecide(List<Candidate> undecided, Set<Long> staying) {
+        Set<Long> pending = new HashSet<>();
+        for (Candidate candidate : undecided) {
+            pending.add(candidate.row().id());
+        }
+        Candidate ready = null;
+        for (Candidate candidate : undecided) {
+            if (!Collections.disjoint(candidate.adoptedCopyOwners(), staying)) {
+                return candidate;
+            }
+            if (ready == null && Collections.disjoint(candidate.adoptedCopyOwners(), pending)) {
+                ready = candidate;
+            }
+        }
+        return ready != null ? ready : undecided.get(0);
+    }
+
+    /**
+     * Whether a row adopted before the floors keeps its video on its own (see the release's rules).
+     * A copy owned by one of {@code adopted}, the rows the release looks at, is no evidence here: it
+     * counts only once its row is known to stay. When the row isn't kept, the rows of {@code adopted}
+     * whose copy is a complete copy of its file are added to {@code adoptedCopyOwners}.
      */
     private static boolean keepsAdoptedRow(
             MatchSummary row,
             Path file,
             Map<String, List<ArchivedCopy>> copies,
             Set<Long> adopted,
-            OrphanAdoptionFloors.Snapshot floors) {
+            OrphanAdoptionFloors.Snapshot floors,
+            Set<Long> adoptedCopyOwners) {
         String name = file.getFileName().toString();
         String own = leftoverRemainder(name, row.id() + "-");
         if (APP_ONLY_BASENAME.matcher(own == null ? name : own).matches()) {
@@ -545,11 +592,13 @@ public class CrashRecoveryRunner implements ApplicationRunner {
         }
         for (String original : own == null ? List.of(name) : List.of(name, own)) {
             for (ArchivedCopy copy : copies.getOrDefault(original, List.of())) {
-                if (!adopted.contains(copy.rowId())
-                        && !normalize(copy.path()).equals(normalize(file))
+                if (!normalize(copy.path()).equals(normalize(file))
                         && sameSize(file, copy.path())
                         && isCompleteCopy(copy.path(), file)) {
-                    return true;
+                    if (!adopted.contains(copy.rowId())) {
+                        return true;
+                    }
+                    adoptedCopyOwners.add(copy.rowId());
                 }
             }
         }
