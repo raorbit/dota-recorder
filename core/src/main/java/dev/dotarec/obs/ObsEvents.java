@@ -65,6 +65,19 @@ public class ObsEvents {
      */
     private volatile CountDownLatch confirmLatch;
 
+    /**
+     * Counted down on the OUTPUT_STOPPED that answers a StopRecord this app sent; null when no such
+     * stop is outstanding. OBS answers StopRecord at once and closes the file about half a second
+     * later, and until it has it refuses a StartRecord, so {@link #awaitOutputIdle(long, long)} is how
+     * a back-to-back recording waits out that window. Outlives {@link #reset()}, which a start runs
+     * before it gets as far as waiting. {@code volatile}: armed on the FSM or bridge thread, counted
+     * down on the socket thread.
+     */
+    private volatile CountDownLatch stopLatch;
+
+    /** {@code System.nanoTime()} at the latest OUTPUT_STOPPED; null until one has arrived. */
+    private volatile Long stoppedAtNanos;
+
     public ObsEvents(ObsHealth health, @Lazy CaptureBlackFrameGuard blackFrameGuard) {
         this.health = health;
         this.blackFrameGuard = blackFrameGuard;
@@ -112,6 +125,12 @@ public class ObsEvents {
                     lastStoppedOutputPath.set(outputPath);
                 }
                 health.setRecording(false);
+                // Stamp the instant before releasing the waiter, so it can measure its settle from it.
+                stoppedAtNanos = System.nanoTime();
+                CountDownLatch stopped = stopLatch;
+                if (stopped != null) {
+                    stopped.countDown();
+                }
                 // Deliberately does NOT clear captureBlack: during a black match the user is in
                 // fullscreen Dota and only sees the app AFTER the recording ends, so a warning
                 // that dies with the recording is never seen by the person it exists for. It
@@ -169,6 +188,56 @@ public class ObsEvents {
     }
 
     /**
+     * Arms the wait for the OUTPUT_STOPPED of a StopRecord. Call IMMEDIATELY before sending it, so an
+     * event that beats the response is still counted.
+     */
+    public void expectStopped() {
+        stopLatch = new CountDownLatch(1);
+    }
+
+    /**
+     * Drops an armed wait whose OUTPUT_STOPPED is not coming: the StopRecord failed, the event already
+     * landed before the wait was armed, or the connection it belonged to is gone. The settle after a
+     * STOPPED that did arrive still applies.
+     */
+    public void cancelExpectedStop() {
+        stopLatch = null;
+    }
+
+    /**
+     * Blocks until OBS can take a StartRecord: up to {@code timeoutMs} for the OUTPUT_STOPPED of an
+     * outstanding stop, then until {@code settleMs} have passed since the latest OUTPUT_STOPPED.
+     * Returns at once when no stop is outstanding and none just landed.
+     *
+     * <p>The settle exists because the event alone is not enough. Live, a StartRecord that reached OBS
+     * in the same instant as the STOPPED event was accepted and then never started, which cost a 15s
+     * confirmation timeout and an OBS restart; starts sent a few tens of milliseconds after the event
+     * all went through.
+     *
+     * @return false when the stop was not confirmed in time or the wait was interrupted
+     */
+    public boolean awaitOutputIdle(long timeoutMs, long settleMs) {
+        CountDownLatch latch = stopLatch;
+        try {
+            if (latch != null && !latch.await(timeoutMs, TimeUnit.MILLISECONDS)) {
+                return false;
+            }
+            Long stoppedAt = stoppedAtNanos;
+            if (stoppedAt != null) {
+                long remaining =
+                        TimeUnit.MILLISECONDS.toNanos(settleMs) - (System.nanoTime() - stoppedAt);
+                if (remaining > 0) {
+                    TimeUnit.NANOSECONDS.sleep(remaining);
+                }
+            }
+            return true;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+    }
+
+    /**
      * Output path seen on a STOPPED event since the latest OUTPUT_STARTED, or {@code null}. This is
      * a fallback only -- the primary path comes from the synchronous StopRecord response -- and is
      * also what a finalize attaches when OBS ended the output on its own and StopRecord fails.
@@ -186,7 +255,10 @@ public class ObsEvents {
         return startedOutputPath.get();
     }
 
-    /** Clears the per-recording state so a fresh recording cannot read a stale start instant/path. */
+    /**
+     * Clears the per-recording state so a fresh recording cannot read a stale start instant/path.
+     * Leaves the stop wait alone: a start runs this before it waits for the previous stop.
+     */
     public void reset() {
         recordConfirmedAt.set(null);
         lastStoppedOutputPath.set(null);

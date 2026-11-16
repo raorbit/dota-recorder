@@ -198,4 +198,76 @@ class ObsEventsTest {
         // hanging the full timeout on a recording that will never be confirmed.
         assertThat(events.awaitRecordConfirmed(60_000)).isNull();
     }
+
+    @Test
+    void awaitOutputIdle_withNoStopOutstanding_returnsWithoutBlocking() {
+        // A first recording, or one that follows a long-finished stop, must not pay any wait (a long
+        // timeout here would hang the test if it did).
+        assertThat(events.awaitOutputIdle(60_000, 60_000)).isTrue();
+    }
+
+    @Test
+    void awaitOutputIdle_holdsUntilStoppedArrives_thenSettles() throws Exception {
+        events.expectStopped();
+        long stoppedAfterMs = 150;
+        long settleMs = 100;
+        Thread obs =
+                new Thread(
+                        () -> {
+                            try {
+                                Thread.sleep(stoppedAfterMs);
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                            }
+                            events.onRecordStateChanged(ObsEvents.OUTPUT_STOPPED, "C:\\videos\\match.mkv");
+                        });
+
+        long begin = System.nanoTime();
+        obs.start();
+        boolean idle = events.awaitOutputIdle(5_000, settleMs);
+        long elapsedMs = (System.nanoTime() - begin) / 1_000_000;
+        obs.join();
+
+        assertThat(idle).isTrue();
+        // Lower bound only: the wait cannot end before the event plus the settle.
+        assertThat(elapsedMs).isGreaterThanOrEqualTo(stoppedAfterMs + settleMs - 5);
+    }
+
+    @Test
+    void awaitOutputIdle_returnsFalse_whenStoppedNeverArrives() {
+        events.expectStopped();
+
+        assertThat(events.awaitOutputIdle(50, 0)).isFalse();
+    }
+
+    @Test
+    void cancelExpectedStop_dropsTheWait() {
+        events.expectStopped();
+        events.cancelExpectedStop();
+
+        assertThat(events.awaitOutputIdle(60_000, 0)).isTrue();
+    }
+
+    @Test
+    void reset_keepsAnArmedStopWait() {
+        // startRecording() resets the per-recording state before it waits for the previous stop; if
+        // reset dropped the wait, a back-to-back start would never hold off.
+        events.expectStopped();
+        events.reset();
+
+        assertThat(events.awaitOutputIdle(50, 0)).isFalse();
+    }
+
+    @Test
+    void awaitOutputIdle_settlesAfterAStopNobodyAskedFor() {
+        // OBS ended the output on its own a moment ago: nothing is outstanding, but a start sent
+        // right now would still land on top of the stop.
+        events.onRecordStateChanged(ObsEvents.OUTPUT_STOPPED, "C:\\videos\\match.mkv");
+
+        long begin = System.nanoTime();
+        assertThat(events.awaitOutputIdle(60_000, 100)).isTrue();
+        long elapsedMs = (System.nanoTime() - begin) / 1_000_000;
+
+        assertThat(elapsedMs).isGreaterThanOrEqualTo(90);
+    }
 }
