@@ -522,6 +522,45 @@ describe('startLibrary storage-events wiring', () => {
     teardown();
   });
 
+  it('does not mark a queued row again once the core said its delete failed', async () => {
+    // As above, but the core could not do 8's queued delete, nor clip 5's: their delete.failed frames
+    // came while 7's and clip 6's answers were still out.
+    const held = heldDelete();
+    const core = {
+      matches: [{ id: 7 }, { id: 8 }],
+      clips: [5, 6].map((id) => ({ id, parentMatchId: 8 })),
+    };
+    serveLibrary(core, (url) =>
+      url.endsWith('/matches/7') || url.endsWith('/clips/6') ? held.answer : QUEUED,
+    );
+    const teardown = startLibrary();
+    await flush();
+    const ws = FakeWebSocket.instances[0];
+
+    const recordings = useLibraryStore.getState().deleteMatches([7, 8]);
+    const clips = useLibraryStore.getState().deleteClips([5, 6]);
+    await flush();
+    ws.emitMessage({
+      type: 'delete.failed',
+      payload: { kind: 'match', id: 8, message: 'database is locked' },
+    });
+    ws.emitMessage({
+      type: 'delete.failed',
+      payload: { kind: 'clip', id: 5, message: 'database is locked' },
+    });
+    held.release();
+    await recordings;
+    await clips;
+
+    // Not "Deleting…" next to a banner that says the delete failed.
+    expect(queuedMatches()).toEqual([]);
+    expect(queuedClips()).toEqual([]);
+    expect(useLibraryStore.getState().deleteError).toBe(
+      'The clip was not deleted: database is locked',
+    );
+    teardown();
+  });
+
   it('keeps a clip delete and a recording delete with the same id apart', async () => {
     // Recording 7 and clip 7 (of recording 1) both exist: each delete marks, and is done, on its own.
     const held = heldDelete();
