@@ -1176,11 +1176,14 @@ public class CrashRecoveryRunner implements ApplicationRunner {
             if (originalBytes.size() != size) {
                 return Likeness.DIFFERENT;
             }
+            // One pair of buffers for the whole comparison: a read end to end can run to gigabytes.
+            int stretch = (int) Math.min(endToEnd ? CHUNK_BYTES : SAMPLE_BYTES, size);
+            ByteBuffer copyBuffer = ByteBuffer.allocate(stretch);
+            ByteBuffer originalBuffer = ByteBuffer.allocate(stretch);
             Likeness likeness = Likeness.SAME;
             if (endToEnd) {
                 for (long at = 0; at < size && likeness != Likeness.DIFFERENT; at += CHUNK_BYTES) {
-                    likeness = compareStretch(
-                            likeness, read(copyBytes, at, CHUNK_BYTES), read(originalBytes, at, CHUNK_BYTES));
+                    likeness = compareStretch(likeness, copyBytes, originalBytes, at, copyBuffer, originalBuffer);
                 }
                 return likeness;
             }
@@ -1188,7 +1191,7 @@ public class CrashRecoveryRunner implements ApplicationRunner {
                 0L, Math.max(0L, size / 2 - SAMPLE_BYTES / 2), Math.max(0L, size - SAMPLE_BYTES)
             };
             for (long at : offsets) {
-                likeness = compareStretch(likeness, sample(copyBytes, at), sample(originalBytes, at));
+                likeness = compareStretch(likeness, copyBytes, originalBytes, at, copyBuffer, originalBuffer);
                 if (likeness == Likeness.DIFFERENT) {
                     break;
                 }
@@ -1199,20 +1202,53 @@ public class CrashRecoveryRunner implements ApplicationRunner {
         }
     }
 
-    /** {@code soFar}, less alike by what one stretch of a copy's and its original's bytes show. */
-    private static Likeness compareStretch(Likeness soFar, byte[] copy, byte[] original) {
-        if (copy.length != original.length) {
+    /**
+     * {@code soFar}, less alike by what the stretch of {@code copy} and {@code original} from {@code
+     * at} shows, read into the two buffers.
+     */
+    private static Likeness compareStretch(
+            Likeness soFar,
+            FileChannel copy,
+            FileChannel original,
+            long at,
+            ByteBuffer copyBuffer,
+            ByteBuffer originalBuffer)
+            throws IOException {
+        int length = readInto(copy, at, copyBuffer);
+        if (readInto(original, at, originalBuffer) != length) {
             return Likeness.DIFFERENT; // one of them changed size while it was read
         }
-        for (int i = 0; i < copy.length; i++) {
-            if (copy[i] != original[i]) {
-                if (copy[i] != 0) {
-                    return Likeness.DIFFERENT;
-                }
-                soFar = Likeness.COPY_LACKS_DATA;
+        byte[] copyBytes = copyBuffer.array();
+        byte[] originalBytes = originalBuffer.array();
+        int from = 0;
+        while (from < length) {
+            int offset = Arrays.mismatch(copyBytes, from, length, originalBytes, from, length);
+            if (offset < 0) {
+                break;
+            }
+            int i = from + offset;
+            if (copyBytes[i] != 0) {
+                return Likeness.DIFFERENT;
+            }
+            soFar = Likeness.COPY_LACKS_DATA;
+            // Where the copy reads as zeros it can only lack data, never differ: skip the whole run.
+            from = i + 1;
+            while (from < length && copyBytes[from] == 0) {
+                from++;
             }
         }
         return soFar;
+    }
+
+    /** Reads {@code file} from {@code at} into {@code buffer}, up to its capacity: less only at its end. */
+    private static int readInto(FileChannel file, long at, ByteBuffer buffer) throws IOException {
+        buffer.clear();
+        while (buffer.hasRemaining()) {
+            if (file.read(buffer, at + buffer.position()) <= 0) {
+                break; // the file ended
+            }
+        }
+        return buffer.position();
     }
 
     /** Whether the last 64 KiB of {@code file} hold anything but zeros; false when it can't be read. */
