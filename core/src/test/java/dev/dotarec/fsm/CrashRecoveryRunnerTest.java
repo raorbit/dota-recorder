@@ -1304,6 +1304,27 @@ class CrashRecoveryRunnerTest {
     }
 
     @Test
+    void aCopyCutBetweenTheSamplesOfARecordingThatEndsInZerosGoesBackOnTheOriginal() throws Exception {
+        // A recording an OS crash cut short at 180 KiB, so its last 64 KiB read as zeros, and its copy
+        // an older archiver cut short at 170 KiB: past the middle sample, inside the zeros of the end
+        // one. All three samples agree, and only a read end to end shows the copy lacks what the
+        // original holds from 170 to 180 KiB. Taken as whole, the copy would get the original deleted.
+        Path archive = configureArchive("hdd");
+        seedAdoptionFloor(videoDir, System.currentTimeMillis());
+        byte[] crashed = cutShortAt(recordingOf(256 * 1024), 180 * 1024);
+        long id = archivedRow(archive, "2026-10-04 20-00-00.mp4", cutShortAt(crashed, 170 * 1024));
+        Path copy = archive.resolve(id + "-2026-10-04 20-00-00.mp4");
+        Path original = writeModifiedAt(videoDir.resolve("2026-10-04 20-00-00.mp4"), crashed, LONG_AGO_MS);
+
+        runner.run(null);
+        newRunner().run(null);
+
+        assertThat(original).exists();
+        assertThat(matches.findById(id).orElseThrow().videoPath()).isEqualTo(original.toString());
+        assertThat(copy).doesNotExist();
+    }
+
+    @Test
     void reconciliationWaitsForTheStorageMaintenanceLock() throws Exception {
         // The archiver/sweeper @Scheduled clocks start at context refresh while this runner executes
         // after it, so a locked maintenance pass can overlap recovery. Mid-move, the archiver's fresh
