@@ -492,8 +492,9 @@ const readerCases = [
   [`Exec powershell.exe`, ['powershell.exe']],
   [`; nsExec::Exec 'taskkill /F'`, []],
   [`DetailPrint "Exec cmd"`, []],
-  // A comment can start after an instruction's first word too.
+  // A comment can start after an instruction's first word too, with a ; or a #.
   [`ExecShell "open" ;"netsh.exe"`, []],
+  [`ExecShell "open" #"netsh.exe"`, []],
   // cmd's escapes, redirections, groups and own commands (a quoted "ver" isn't one), where cmd ends
   // a name, and LogicLib's one-liners, whose statement can follow its ${|} with no space.
   [
@@ -578,6 +579,19 @@ const problemCases = [
     ['1 bare netsh', '1 bare ver', '1 bare netsh'],
   ],
   [String.raw`/* was: cmd */ ExecWait '"$SYSDIR\cmd.exe" /d /c netsh a'`, ['1 bare netsh']],
+  // A /* in a # comment opens no comment of its own.
+  [
+    ['# was /* here', `ExecShellWait "runas" "cmd.exe" '/c netsh a' SW_HIDE`].join('\n'),
+    ['2 bare cmd.exe', '2 no /d cmd.exe', '2 bare netsh'],
+  ],
+  // cmd /k (or /K) runs its command as /c does.
+  [
+    [
+      String.raw`ExecWait '"$SYSDIR\cmd.exe" /d /k netsh a'`,
+      String.raw`ExecWait '"$SYSDIR\cmd.exe" /S /D /K ""$SYSDIR\netsh.exe" b"'`,
+    ].join('\n'),
+    ['1 bare netsh'],
+  ],
   // One of cmd's own names with a . or \ after it, which cmd looks up as a file first.
   [
     String.raw`ExecWait '"$SYSDIR\cmd.exe" /d /c ver.exe & echo. done & echo\tools\fw.exe & cd..'`,
@@ -636,6 +650,15 @@ const problemCases = [
     ['1 bare cmd.exe', '1 no /d cmd.exe', '1 bare netsh'],
   ],
   ['${IfNotThen} ${Silent} ${|}nsExec::Exec "taskkill /F /IM x.exe"${|}', ['1 bare taskkill']],
+  // A one-liner's name in any case.
+  [
+    [
+      '${ifThen} $0 == 1 ${|} Exec "cmd /c netsh a" ${|}',
+      '${ifnotthen} $0 == 1 ${|} Exec "netsh b" ${|}',
+      '${ifCmd} MessageBox MB_YESNO "Stop?" IDYES ${||}Exec "taskkill x"${|}',
+    ].join('\n'),
+    ['1 bare cmd', '1 no /d cmd', '1 bare netsh', '2 bare netsh', '3 bare taskkill'],
+  ],
   // Labels in front of an instruction, of a one-liner and of a one-liner's statement.
   [
     [
