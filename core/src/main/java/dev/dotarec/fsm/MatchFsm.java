@@ -886,7 +886,7 @@ public class MatchFsm {
                     log.warn("Thumbnail capture failed for {}: {}", s.getSurrogateId(), e.toString());
                 }
 
-                videoPath = stopRecordingWithRetry(s.getVideoPath());
+                videoPath = stopRecordingWithRetry(s);
             } catch (RuntimeException e) {
                 // Defensive: stopRecordingWithRetry already swallows expected stop failures, but a
                 // seam implementation bug must still fall through to persistence.
@@ -920,7 +920,7 @@ public class MatchFsm {
                     persistFinalized(s, videoPath, thumbPath, fileSizeBytes, durationS, durationClampS, now);
 
             if (videoPath == null) {
-                retainOrphanedStop(matchRowId, thumbPath, durationS, now);
+                retainOrphanedStop(s, matchRowId, thumbPath, durationS, now);
             }
 
             publishRecorded(matchRowId, s, durationS);
@@ -1095,11 +1095,12 @@ public class MatchFsm {
     }
 
     /**
-     * Stops the output and returns its file. {@code startedPath} (the path OBS reported at the start,
-     * or null) names the file when OBS ended the output itself without reporting one: an OBS that
-     * crashed sends no STOPPED.
+     * Stops the output of {@code s} and returns its file. The path OBS reported at the start (the
+     * session's video path, or null) names the file when OBS ended the output itself without
+     * reporting one: an OBS that crashed sends no STOPPED.
      */
-    private String stopRecordingWithRetry(String startedPath) {
+    private String stopRecordingWithRetry(RecordingSession s) {
+        String startedPath = s.getVideoPath();
         RuntimeException firstFailure = null;
         try {
             String path = obs.stopRecording();
@@ -1110,25 +1111,27 @@ public class MatchFsm {
             log.warn("StopRecord failed: {}", e.toString());
         }
 
-        if (!obs.isRecording()) {
+        if (outputEnded(s)) {
             // OBS ended the output before our stop reached it (an encode error after a GPU reset,
-            // or the user stopping it in the OBS window). The file it closed is still this
-            // recording's, so attach the path it reported on stopping rather than detach the
-            // video from its markers.
+            // or the user stopping it in the OBS window), or the OBS that held it crashed. The file
+            // it closed is still this recording's, so attach the path it reported on stopping
+            // rather than detach the video from its markers.
+            String ended = obs.isRecording()
+                    ? "the OBS that held the output has exited"
+                    : "OBS no longer reports recording";
             String stoppedPath = obs.lastStoppedOutputPath();
             if (stoppedPath == null || stoppedPath.isBlank()) {
                 if (startedPath != null && !startedPath.isBlank()) {
-                    log.warn("OBS no longer reports recording after failed StopRecord and reported"
-                            + " no stop path; keeping the file it reported at the start: {}",
-                            startedPath);
+                    log.warn("StopRecord failed and {}, with no stop path; keeping the file it"
+                            + " reported at the start: {}", ended, startedPath);
                     return startedPath;
                 }
-                log.warn("OBS no longer reports recording after failed StopRecord and reported no"
-                        + " output path; persisting without video path");
+                log.warn("StopRecord failed and {}, with no output path; persisting without video"
+                        + " path", ended);
                 return null;
             }
-            log.warn("OBS no longer reports recording after failed StopRecord; keeping the file it"
-                    + " stopped on its own: {}", stoppedPath);
+            log.warn("StopRecord failed and {}; keeping the file it stopped: {}", ended,
+                    stoppedPath);
             return stoppedPath;
         }
 
@@ -1154,6 +1157,22 @@ public class MatchFsm {
     }
 
     /**
+     * Whether the output of {@code s} is over, so a failed stop has nothing left to retry: OBS
+     * reports nothing recording, or the OBS that held the output, when it was named, has exited. A
+     * crashed OBS sends no STOPPED, so the recording flag outlives it until the connection scheduler
+     * next looks, or a relaunch's connection re-syncs it. A finalize in that window took the flag
+     * for a live OBS that missed the stop, and saved the row without the file it knew. Where the
+     * OBS couldn't be named, the flag alone answers: only a live OBS needs the retry.
+     */
+    private boolean outputEnded(RecordingSession s) {
+        if (!obs.isRecording()) {
+            return true;
+        }
+        ObsProcess recorder = s.getObsProcess();
+        return recorder != null && !obs.isObsRunning(recorder);
+    }
+
+    /**
      * Retains ownership of a stop-failed output after finalize persisted its video-less row: the
      * double StopRecord failed and OBS still reports the output active, so the file OBS keeps
      * writing is OURS but unattached. Without this the reset to IDLE discards that knowledge --
@@ -1161,8 +1180,9 @@ public class MatchFsm {
      * zero notification. The retained state fuels the bounded {@link #retryOrphanedStop()} ticks,
      * which can still cut the output and attach its file to the persisted row.
      */
-    private void retainOrphanedStop(long matchRowId, String thumbPath, int durationS, long now) {
-        if (!obs.isRecording()) {
+    private void retainOrphanedStop(
+            RecordingSession s, long matchRowId, String thumbPath, int durationS, long now) {
+        if (outputEnded(s)) {
             // The stop "failed" but the output ended anyway (or OBS is gone): nothing left to own.
             return;
         }

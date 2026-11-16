@@ -128,6 +128,16 @@ class MatchFsmHealingTest {
     }
 
     /**
+     * The named OBS {@link #OBS_RUN} crashed mid-recording and no relaunch has connected yet: the
+     * socket is down, no STOPPED came, and the recording flag still says recording until the
+     * connection scheduler next looks.
+     */
+    private void obsRunCrashedWithNoRelaunchConnectedYet() {
+        obs.connected = false;
+        obs.exited.add(OBS_RUN);
+    }
+
+    /**
      * OBS ended the output itself while the websocket was down (a full disk, a stop in the OBS
      * window), and the core then reconnected to that same OBS: no STOPPED was heard, and the
      * reconnect reset the events, so no stop path is known either.
@@ -518,6 +528,58 @@ class MatchFsmHealingTest {
         fsm.superviseRecording();
 
         assertThat(fsm.getState()).isEqualTo(MatchState.IDLE);
+    }
+
+    @Test
+    void aFinalizeJustAfterTheObsCrashed_keepsTheFileItReportedAtTheStart() {
+        // POST_GAME (or the watchdog) lands in the seconds between the crash and the connection
+        // scheduler clearing the recording flag. That flag is no live OBS that missed the stop: the
+        // one that held the output is gone, so the row keeps the file, and no stop retry is kept
+        // for an output nothing writes any more.
+        obs.process = OBS_RUN;
+        obs.startedPath = "C:\\videos\\crashed.mkv";
+        fsm.onFrame(playing());
+        advanceSeconds(300);
+        obsRunCrashedWithNoRelaunchConnectedYet();
+
+        fsm.onFrame(frame().state(POST_GAME).matchId(MATCH).mono(nanos.get()).build());
+
+        assertThat(fsm.getState()).isEqualTo(MatchState.IDLE);
+        assertThat(matches.findAll()).singleElement()
+                .satisfies(r -> assertThat(r.videoPath()).isEqualTo("C:\\videos\\crashed.mkv"));
+        assertThat(fsm.hasOrphanedStopRetry()).isFalse();
+    }
+
+    @Test
+    void aFinalizeJustAfterTheObsCrashed_withNoPathKnown_keepsNoStopRetry() {
+        obs.process = OBS_RUN;
+        fsm.onFrame(playing());
+        advanceSeconds(300);
+        obsRunCrashedWithNoRelaunchConnectedYet();
+
+        fsm.forceFinalize();
+
+        assertThat(matches.findAll()).singleElement()
+                .satisfies(r -> assertThat(r.videoPath()).isNull());
+        assertThat(fsm.hasOrphanedStopRetry()).as("the boot orphan scan adopts the file").isFalse();
+        assertThat(fsm.hasPendingOrphanedStop()).isFalse();
+    }
+
+    @Test
+    void aFailedStopToANamedObsThatStillRuns_isRetried() {
+        // A live OBS that missed the stop still gets the retry: only an OBS that has exited ends
+        // the output without one.
+        obs.process = OBS_RUN;
+        obs.startedPath = "C:\\videos\\started.mkv";
+        fsm.onFrame(playing());
+        advanceSeconds(300);
+        obs.stopFailuresRemaining = 1;
+
+        fsm.onFrame(frame().state(POST_GAME).matchId(MATCH).mono(nanos.get()).build());
+
+        assertThat(obs.stopCalls).isEqualTo(2);
+        assertThat(matches.findAll()).singleElement()
+                .satisfies(r -> assertThat(r.videoPath()).isEqualTo("C:\\videos\\match.mkv"));
     }
 
     @Test
