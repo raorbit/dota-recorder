@@ -40,9 +40,11 @@ import org.springframework.stereotype.Component;
  * archive drives ({@code storageLocations}). On each pass:
  *
  * <ol>
- *   <li>Ask the {@link RetentionSweeper} to enforce the global budget first — the budget is the SUM
- *       of all caps, so if total stored exceeds it the globally-oldest non-starred VOD is deleted
- *       (eviction is by age, NOT per-drive). After this, everything that remains fits in the
+ *   <li>Remove the copies a pass ended mid-copy left on an archive drive ({@link #sweepPartials}),
+ *       while each row still has the file its copy was made from.</li>
+ *   <li>Ask the {@link RetentionSweeper} to enforce the global budget before any move — the budget
+ *       is the SUM of all caps, so if total stored exceeds it the globally-oldest non-starred VOD is
+ *       deleted (eviction is by age, NOT per-drive). After this, everything that remains fits in the
  *       allocations.</li>
  *   <li>While the active drive is over its own cap, move its OLDEST VOD to the first archive drive
  *       with headroom — headroom being {@code min(cap room, real free disk space)}, so a cap larger
@@ -152,20 +154,26 @@ public class RecordingArchiver {
         // self-deadlock.
         maintenanceLock.lock();
         try {
-            // Step 1: enforce the global sum-of-caps budget first (deletes globally-oldest if over), so
-            // what remains is guaranteed to fit in the allocations.
+            List<Location> locations = locations();
+            // Index 0 is the active drive, the rest are the archive drives.
+            List<Location> archives =
+                    locations.size() <= 1 ? List.of() : locations.subList(1, locations.size());
+            // Before the budget sweep: a copy goes only while its row still has the file it was made
+            // from (see sweepPartials), and the oldest unstarred VOD, the first one moved, is also the
+            // first one the sweep evicts.
+            sweepPartials(archives);
+
+            // Then enforce the global sum-of-caps budget (deletes globally-oldest if over), so what
+            // remains is guaranteed to fit in the allocations.
             sweeper.sweep(protectedId);
 
-            List<Location> locations = locations();
-            // Index 0 is the active drive; without archive drives there is nowhere to relocate to.
-            if (locations.size() <= 1) {
+            // Without archive drives there is nowhere to relocate to.
+            if (archives.isEmpty()) {
                 return new ArchiveResult(List.of());
             }
             Location active = locations.get(0);
-            List<Location> archives = locations.subList(1, locations.size());
             List<MatchSummary> matchRows = matches.findAll();
             List<ClipRow> clipRows = clips.findAll();
-            sweepPartials(archives, matchRows, clipRows);
 
             // Account current per-location usage from the DB. Match VODs AND clips are first-class
             // movable stored files — gather both into one uniform list.
@@ -472,9 +480,12 @@ public class RecordingArchiver {
      * points at the file itself. Anything else is left alone. Only this archiver writes these, always
      * under the maintenance lock this pass holds, so none is in flight, and the file each one copies
      * is still in place and still the row's, so only a redundant copy goes.
+     *
+     * <p>It runs ahead of the budget sweep in the same pass. A pass that was ended mid-copy was most
+     * likely copying the oldest unstarred VOD, which is also the one the sweep evicts first, and once
+     * the sweep has deleted it and nulled its row, nothing names the copy any more.
      */
-    private void sweepPartials(
-            List<Location> archives, List<MatchSummary> matchRows, List<ClipRow> clipRows) {
+    private void sweepPartials(List<Location> archives) {
         List<Path> pending = new ArrayList<>();
         for (Location loc : archives) {
             Path dir = loc.dir();
@@ -485,7 +496,7 @@ public class RecordingArchiver {
         if (pending.isEmpty()) {
             return;
         }
-        PartialCopies copies = new PartialCopies(matchRows, clipRows);
+        PartialCopies copies = new PartialCopies(matches.findAll(), clips.findAll());
         for (Path dir : pending) {
             partialsSwept.add(dir);
             deletePartials(dir, copies, false);
