@@ -901,8 +901,8 @@ describe('startLibrary storage-events wiring', () => {
   });
 
   it('counts a row the core no longer has as deleted, not as a failure', async () => {
-    // 7 left the list earlier (its own delete) but stayed in the table's multi-selection, so a bulk
-    // delete of 7, 8 and 9 still asks for it: the core answers 404, which is what was asked for.
+    // 7 went already (a sweep took it before this window's list caught up), so a bulk delete of 7
+    // and 9 still asks for it: the core answers 404, which is what was asked for.
     serveLibrary(
       { matches: [{ id: 8 }, { id: 9 }], clips: [{ id: 6, parentMatchId: 8 }] },
       (url) =>

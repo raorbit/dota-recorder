@@ -26,6 +26,7 @@ import { clipLabel } from '../lib/clip-format';
 import { deleteMenuLabel, deleteBlockedLabel, clipDeleteMenuLabel } from '../lib/delete-labels';
 import { deletingRows } from '../lib/library-delete';
 import { menuTargetIds } from '../lib/row-menu';
+import { keepListed, withoutSelected } from '../lib/row-selection';
 import './match-table.css';
 
 function matchesResultFilter(match: MatchSummary, filter: ResultFilter): boolean {
@@ -340,8 +341,13 @@ function ClipTable(): React.JSX.Element {
   };
 
   const visible = useMemo(() => clips.filter((c) => clipMatchesSearch(c, search)), [clips, search]);
-  // The clips still listed, for the row menu: the multi-selection can outlive a clip's row.
+  // The clips still listed, for the row menu and the selection.
   const listedClipIds = useMemo(() => new Set(clips.map((c) => c.id)), [clips]);
+  // A clip that left the list (deleted here, from the player's strip, or by a sweep) leaves the
+  // selection too, before a clip cut next can take its id (see keepListed).
+  useEffect(() => {
+    setSelectedIds((prev) => keepListed(prev, (id) => listedClipIds.has(id)));
+  }, [listedClipIds]);
 
   // Row selection, mirroring the match table's onRowSelect: shift = range from the anchor over the
   // CURRENT visible order; Ctrl/Cmd = toggle one; plain = single-select AND open in the player.
@@ -484,6 +490,7 @@ function ClipTable(): React.JSX.Element {
                     // deleteClip reports a failure in the banner and reloads, then rethrows; swallow
                     // that here so it can't surface as an unhandled rejection.
                     void deleteClip(rowMenu.clip.id).catch(() => {});
+                    setSelectedIds((prev) => withoutSelected(prev, rowMenu.clip.id));
                   } else {
                     // deleteClips skips any failed delete and reports them in the banner; its
                     // reconcile reload settles a straggler.
@@ -763,6 +770,11 @@ export function MatchTable(): React.JSX.Element {
 
   // Look up a match by id for the bulk menu actions (reveal / copy id over the whole selection).
   const matchById = useMemo(() => new Map(matches.map((m) => [m.id, m])), [matches]);
+  // A recording that left the list (deleted here, or by a sweep) leaves the selection too, before a
+  // match recorded next can take its id (see keepListed).
+  useEffect(() => {
+    setSelectedIds((prev) => keepListed(prev, (id) => matchById.has(id)));
+  }, [matchById]);
 
   // Clips live in their own table, not the matches list — render the dedicated
   // clip view for that bucket. (Hooks above still run; the branch is on render only.)
@@ -1036,6 +1048,7 @@ export function MatchTable(): React.JSX.Element {
                     // deleteMatch reports a failure in the banner and reloads, then rethrows; swallow
                     // that here so it can't surface as an unhandled rejection.
                     void deleteMatch(rowMenu.match.id).catch(() => {});
+                    setSelectedIds((prev) => withoutSelected(prev, rowMenu.match.id));
                   } else {
                     // deleteMatches skips any failed delete and reports them in the banner; its
                     // reconcile reload settles a straggler.
