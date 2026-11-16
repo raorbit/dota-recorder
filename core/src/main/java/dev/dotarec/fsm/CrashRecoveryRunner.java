@@ -472,15 +472,27 @@ public class CrashRecoveryRunner implements ApplicationRunner {
         }
         boolean firstRelease = !adoptionFloors.released();
         try {
+            // A later boot takes up again the rows the one-time release kept only for a clip still to
+            // be cut from them; a row created since is another one under a reused id.
+            OrphanAdoptionFloors.Release done = firstRelease ? null : adoptionFloors.release().orElse(null);
+            Set<Long> retry = done == null ? Set.of() : new HashSet<>(done.retry());
             List<Path> roots = new ArrayList<>(archiveDirs());
             roots.add(0, videoDir());
             List<MatchSummary> adopted = new ArrayList<>();
+            // The rows the one-time release looks at, which its marker accounts for.
+            Set<Long> once = new HashSet<>();
             for (MatchSummary row : matches.findAdoptedBefore(Long.MAX_VALUE)) {
-                if ((firstRelease && row.createdAt() < cutoffMs) || adoptedPastTheFloors(row, floors, roots)) {
+                boolean onceRow = firstRelease
+                        ? row.createdAt() < cutoffMs
+                        : retry.contains(row.id()) && row.createdAt() < done.releasedAtMs();
+                if (onceRow) {
+                    once.add(row.id());
+                }
+                if (onceRow || adoptedPastTheFloors(row, floors, roots)) {
                     adopted.add(row);
                 }
             }
-            if (!firstRelease && adopted.isEmpty()) {
+            if (!firstRelease && adopted.isEmpty() && retry.isEmpty()) {
                 return;
             }
             Set<Long> adoptedIds = new HashSet<>();
@@ -506,6 +518,9 @@ public class CrashRecoveryRunner implements ApplicationRunner {
             }
             List<MatchSummary> deleted = new ArrayList<>();
             List<MatchSummary> videoDropped = new ArrayList<>();
+            // The rows kept only until a clip is cut from them, or from the row holding their copy:
+            // once it is, a later boot decides them again.
+            Set<Long> waiting = new HashSet<>();
             try (Connection conn = dataSource.getConnection()) {
                 conn.setAutoCommit(false);
                 try {
@@ -516,6 +531,9 @@ public class CrashRecoveryRunner implements ApplicationRunner {
                         if (!Collections.disjoint(next.adoptedCopyOwners(), staying)) {
                             kept++; // a row that stays holds a whole copy of its file
                             staying.add(row.id());
+                            if (!Collections.disjoint(next.adoptedCopyOwners(), waiting)) {
+                                waiting.add(row.id());
+                            }
                         } else if (matches.deleteAdopted(conn, row.id(), row.videoPath())) {
                             deleted.add(row);
                         } else if (matches.dropAdoptedVideo(conn, row.id(), row.videoPath())) {
@@ -523,6 +541,9 @@ public class CrashRecoveryRunner implements ApplicationRunner {
                         } else {
                             kept++; // starred or moved since it was read, or a clip is being cut from it
                             staying.add(row.id());
+                            if (matches.hasClipBeingCut(conn, row.id())) {
+                                waiting.add(row.id());
+                            }
                         }
                     }
                     conn.commit();
@@ -546,11 +567,27 @@ public class CrashRecoveryRunner implements ApplicationRunner {
             int released = deleted.size() + videoDropped.size();
             log.info("Released {} match row(s) adopted without the adoption floors and kept {}; their files"
                     + " stay where they are", released, kept);
-            if (!firstRelease) {
+            waiting.retainAll(once);
+            if (!firstRelease && retry.equals(waiting)) {
                 return;
             }
+            int releasedOnce = 0;
+            for (MatchSummary row : deleted) {
+                releasedOnce += once.contains(row.id()) ? 1 : 0;
+            }
+            for (MatchSummary row : videoDropped) {
+                releasedOnce += once.contains(row.id()) ? 1 : 0;
+            }
+            if (!waiting.isEmpty()) {
+                log.info("Kept {} match row(s) adopted before the adoption floors until the clips being cut"
+                        + " from them are done; a later boot looks at them again", waiting.size());
+            }
             try {
-                adoptionFloors.markReleased(System.currentTimeMillis(), released);
+                if (firstRelease) {
+                    adoptionFloors.markReleased(System.currentTimeMillis(), releasedOnce, waiting);
+                } else {
+                    adoptionFloors.markReleased(done.releasedAtMs(), done.rows() + releasedOnce, waiting);
+                }
             } catch (Exception e) {
                 log.warn("Could not record that the rows adopted before the adoption floors are released;"
                         + " the next boot looks again: {}", e.toString());

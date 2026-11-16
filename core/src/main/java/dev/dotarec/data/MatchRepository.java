@@ -233,6 +233,17 @@ public class MatchRepository {
         }
     }
 
+    /** Whether a clip is still to be cut from match {@code id}'s video, on {@code conn}. */
+    public boolean hasClipBeingCut(Connection conn, long id) throws SQLException {
+        String sql = "SELECT 1 FROM clips WHERE parent_match_id = ? AND status IN ('pending', 'generating')";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, id);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next();
+            }
+        }
+    }
+
     // ---- retention helpers -------------------------------------------------
 
     /**
