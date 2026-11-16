@@ -476,14 +476,19 @@ public class RecordingArchiver {
      * drive even, and other tools give their in-flight files the same {@code .partial} suffix, so a
      * file goes only when it is exactly the copy this archiver writes for one of the rows: {@code
      * <id>-<name>.partial} (or {@code clip-<id>-<name>.partial}) where that row's video is still
-     * {@code <name>} and still on disk, or the same in {@code thumbs} for its thumbnail, and no row
-     * points at the file itself. Anything else is left alone. Only this archiver writes these, always
-     * under the maintenance lock this pass holds, so none is in flight, and the file each one copies
-     * is still in place and still the row's, so only a redundant copy goes.
+     * {@code <name>} and still on disk, or is that copy finished on another archive drive ({@code
+     * <id>-<name>} in an archive dir, see {@link PartialCopies}) and still on disk, or the same in
+     * {@code thumbs} for its thumbnail, and no row points at the file itself. Anything else is left
+     * alone. Only this archiver writes these, always under the maintenance lock this pass holds,
+     * so none is in flight, and the file each one copies is still in place and still the row's, so
+     * only a redundant copy goes.
      *
      * <p>It runs ahead of the budget sweep in the same pass. A pass that was ended mid-copy was most
-     * likely copying the oldest unstarred VOD, which is also the one the sweep evicts first, and once
-     * the sweep has deleted it and nulled its row, nothing names the copy any more.
+     * likely copying the oldest unstarred VOD, which is also the one the sweep evicts first, and
+     * once the sweep has deleted it and nulled its row, nothing names the copy any more. A copy
+     * whose row lost its file, or went, before this dir's first sweep in a run (the drive was
+     * unplugged in the meantime) stays for good: with the row's file gone, nothing shows the copy
+     * is redundant, and with the row gone, nothing shows it is this archiver's at all.
      */
     private void sweepPartials(List<Location> archives) {
         List<Path> pending = new ArrayList<>();
@@ -496,7 +501,7 @@ public class RecordingArchiver {
         if (pending.isEmpty()) {
             return;
         }
-        PartialCopies copies = new PartialCopies(matches.findAll(), clips.findAll());
+        PartialCopies copies = new PartialCopies(matches.findAll(), clips.findAll(), archives);
         for (Path dir : pending) {
             partialsSwept.add(dir);
             deletePartials(dir, copies, false);
@@ -635,13 +640,29 @@ public class RecordingArchiver {
      * The copies this archiver can have left in progress for the current rows, by file name: each
      * row's video as {@code <prefix><name>.partial} in an archive dir, and its thumbnail as the same
      * in {@code thumbs}, each mapped to the file it copies; plus every path a row points at.
+     *
+     * <p>A row this archiver has since moved to an archive dir points at {@code <prefix><name>}
+     * there, and so names one more: the copy of the same file it began on another archive drive and
+     * never finished, moving it here instead (that drive was unplugged when a later pass looked for
+     * room, say). That copy is {@code <prefix><name>.partial}, the row's own file name with the
+     * suffix, mapped to the row's file, the finished copy. Only a file in an archive dir counts:
+     * one in the video folder whose name happens to start with its row's prefix (match 2026's
+     * {@code 2026-11-14 20-01-02.mp4}, say) was never named by this archiver, nor is that name with
+     * the suffix.
      */
     private static final class PartialCopies {
         private final Map<String, Path> videos = new HashMap<>();
         private final Map<String, Path> thumbs = new HashMap<>();
         private final Set<String> referenced = new HashSet<>();
+        private final Set<String> archiveDirs = new HashSet<>();
+        private final Set<String> archiveThumbDirs = new HashSet<>();
 
-        PartialCopies(List<MatchSummary> matchRows, List<ClipRow> clipRows) {
+        PartialCopies(
+                List<MatchSummary> matchRows, List<ClipRow> clipRows, List<Location> archives) {
+            for (Location loc : archives) {
+                archiveDirs.add(StorageRoots.normalize(loc.dir()));
+                archiveThumbDirs.add(StorageRoots.normalize(loc.dir().resolve("thumbs")));
+            }
             for (MatchSummary m : matchRows) {
                 add(Movable.fileNamePrefix(false, m.id()), m.videoPath(), m.thumbPath());
             }
@@ -651,11 +672,12 @@ public class RecordingArchiver {
         }
 
         private void add(String prefix, String videoPath, String thumbPath) {
-            put(videos, prefix, videoPath);
-            put(thumbs, prefix, thumbPath);
+            put(videos, archiveDirs, prefix, videoPath);
+            put(thumbs, archiveThumbDirs, prefix, thumbPath);
         }
 
-        private void put(Map<String, Path> copies, String prefix, String stored) {
+        private void put(
+                Map<String, Path> copies, Set<String> archivedIn, String prefix, String stored) {
             if (stored == null || stored.isBlank()) {
                 return;
             }
@@ -666,8 +688,15 @@ public class RecordingArchiver {
             } catch (RuntimeException e) {
                 return; // an unparseable path names no file this archiver could have copied
             }
-            if (file.getFileName() != null) {
-                copies.put(prefix + file.getFileName() + PARTIAL_SUFFIX, file);
+            Path name = file.getFileName();
+            if (name == null) {
+                return;
+            }
+            copies.put(prefix + name + PARTIAL_SUFFIX, file);
+            if (name.toString().startsWith(prefix)
+                    && file.getParent() != null
+                    && archivedIn.contains(StorageRoots.normalize(file.getParent()))) {
+                copies.put(name + PARTIAL_SUFFIX, file);
             }
         }
 

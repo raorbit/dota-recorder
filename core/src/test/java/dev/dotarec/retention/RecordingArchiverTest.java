@@ -570,6 +570,46 @@ class RecordingArchiverTest {
     }
 
     @Test
+    void interruptedCopyOfAVodArchivedElsewhere_isRemovedOnceItsDriveIsBack() throws Exception {
+        // A pass ended mid-copy onto hdd1 left <id>-<name>.partial there. With hdd1 unplugged at
+        // the next boot, a pass moved the VOD to hdd2 instead, so its row points at <id>-<name> on
+        // hdd2 by the time hdd1 is back and first swept. The copy is named for the row's own file,
+        // which is whole on hdd2, so it goes.
+        Path first = configureArchive("hdd1", 10);
+        Path second = configureArchive("hdd2", 10);
+        String name = "2026-11-14 20-01-02";
+        long match = seed(videoDir, name + ".mp4", name + ".jpg", 1024, 1_000L, false);
+        Path archived = archiveByHand(match, name + ".mp4", name + ".jpg", second);
+        Path archivedThumb = second.resolve("thumbs").resolve(match + "-" + name + ".jpg");
+        Path copy = Files.writeString(first.resolve(match + "-" + name + ".mp4.partial"), "half");
+        Path firstThumbs = Files.createDirectories(first.resolve("thumbs"));
+        Path thumbCopy =
+                Files.writeString(firstThumbs.resolve(match + "-" + name + ".jpg.partial"), "half");
+        // Such a copy of an archived VOD that is gone may be all that is left of it, so it stays.
+        long lost = seed(videoDir, "lost.mp4", "lost.jpg", 1024, 2_000L, false);
+        Files.delete(archiveByHand(lost, "lost.mp4", "lost.jpg", second));
+        Path lostCopy = Files.writeString(first.resolve(lost + "-lost.mp4.partial"), "half");
+        // A row in the video folder whose own name starts with its id: the archiver's copy of it
+        // would be <id>-<id>-..., so <id>-....partial is not one.
+        long early = seed(videoDir, "early.mp4", "early.jpg", 1024, 3_000L, false);
+        Path earlyVideo = videoDir.resolve(early + "-early.mp4");
+        Files.move(videoDir.resolve("early.mp4"), earlyVideo);
+        Path earlyThumb = videoDir.resolve("thumbs").resolve("early.jpg");
+        matches.updateVideoPath(early, earlyVideo.toString(), earlyThumb.toString());
+        Path notOurs = Files.writeString(first.resolve(early + "-early.mp4.partial"), "theirs");
+
+        archiver.archive(null);
+
+        assertThat(copy).doesNotExist();
+        assertThat(thumbCopy).doesNotExist();
+        assertThat(archived).exists();
+        assertThat(archivedThumb).exists();
+        assertThat(lostCopy).exists();
+        assertThat(notOurs).exists();
+        assertThat(earlyVideo).exists();
+    }
+
+    @Test
     void partialsNotLeftForARowWhoseFileIsStillThere_areLeftAlone() throws Exception {
         // An archive dir can be the user's own folder, a whole drive even, and other tools give their
         // in-flight files the same suffix. Only the exact copy this archiver writes for a row whose own
@@ -739,6 +779,18 @@ class RecordingArchiverTest {
                 "win", 7, 22, null, null, 1800,
                 playedAt, videoPath.toString(), thumbPath.toString(), sizeBytes, starred, playedAt,
                 null));
+    }
+
+    /**
+     * Moves a seeded match's video and thumbnail from the video folder into {@code archive} under
+     * the archiver's names and repoints its row there, as a finished move would. Returns the video.
+     */
+    private Path archiveByHand(long id, String video, String thumb, Path archive) throws Exception {
+        Path movedVideo = Files.move(videoDir.resolve(video), archive.resolve(id + "-" + video));
+        Path movedThumb = Files.move(videoDir.resolve("thumbs").resolve(thumb),
+                Files.createDirectories(archive.resolve("thumbs")).resolve(id + "-" + thumb));
+        matches.updateVideoPath(id, movedVideo.toString(), movedThumb.toString());
+        return movedVideo;
     }
 
     /** Seeds a ready clip of {@code parentMatchId} with on-disk video + thumb files; returns its id. */
