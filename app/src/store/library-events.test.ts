@@ -473,6 +473,90 @@ describe('startLibrary storage-events wiring', () => {
     teardown();
   });
 
+  it('keeps a reload that read the list before a delete frame from bringing the row back', async () => {
+    // Another frame's reload read the list while the core still had recording 7, then clip 5, and is
+    // still out when the delete's frame comes.
+    const core = { matches: [{ id: 7 }, { id: 8 }], clips: [{ id: 5, parentMatchId: 8 }] };
+    serveLibrary(core, () => QUEUED);
+    const teardown = startLibrary();
+    await flush();
+    await useLibraryStore.getState().deleteMatch(7);
+    await useLibraryStore.getState().deleteClip(5);
+    const ws = FakeWebSocket.instances[0];
+    // From here each GET reads the core's list when it is sent, and is answered once released.
+    const serve = fetchMock.getMockImplementation() as (
+      url: unknown,
+      init?: { method?: string },
+    ) => Promise<unknown>;
+    let held: Promise<void> = Promise.resolve();
+    fetchMock.mockImplementation(async (url: unknown, init?: { method?: string }) => {
+      const answer = serve(url, init);
+      await held;
+      return answer;
+    });
+    // Sends a reload that reads the core as it is now, does `done` to the core and sends its frame,
+    // then lets the reload land.
+    const staleReloadThen = async (done: () => void, frame: unknown): Promise<void> => {
+      let release!: () => void;
+      held = new Promise<void>((resolve) => (release = resolve));
+      ws.emitMessage({ type: 'match.enriched', payload: { id: 8 } });
+      await vi.advanceTimersByTimeAsync(200); // its reload goes out
+      done();
+      ws.emitMessage(frame);
+      release();
+      await flush();
+    };
+
+    await staleReloadThen(() => (core.matches = [{ id: 8 }]), {
+      type: 'match.deleted',
+      payload: { id: 7, outcome: 'deleted' },
+    });
+    // The reload read 7, but was dropped: 7 doesn't come back as an ordinary row.
+    expect(matchIds()).toEqual([8]);
+    expect(clipIds()).toEqual([5]);
+
+    await staleReloadThen(() => (core.clips = []), {
+      type: 'clip.deleted',
+      payload: { clipId: 5, parentMatchId: 8 },
+    });
+    expect(clipIds()).toEqual([]);
+    expect(matchIds()).toEqual([8]);
+    teardown();
+  });
+
+  it('keeps the first load when a delete frame comes before it lands', async () => {
+    // Dropping the first load would leave the library empty until the frame's reload landed.
+    const core = { matches: [{ id: 7 }, { id: 8 }], clips: [] };
+    serveLibrary(core, () => QUEUED);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const serve = fetchMock.getMockImplementation() as (url: unknown) => Promise<unknown>;
+    fetchMock.mockImplementation(async (url: unknown) => {
+      const answer = serve(url);
+      await held;
+      return answer;
+    });
+    const teardown = startLibrary();
+    await flush();
+    expect(useLibraryStore.getState().loadState).toBe('loading');
+
+    core.matches = [{ id: 8 }];
+    FakeWebSocket.instances[0].emitMessage({
+      type: 'match.deleted',
+      payload: { id: 7, outcome: 'deleted' },
+    });
+    release();
+    await flush();
+
+    // The first load shows what it read (7 too, for now), and the frame's reload then drops 7.
+    expect(useLibraryStore.getState().loadState).toBe('ready');
+    expect(matchIds()).toEqual([7, 8]);
+    await vi.advanceTimersByTimeAsync(200);
+    await flush();
+    expect(matchIds()).toEqual([8]);
+    teardown();
+  });
+
   it('marks the rows of a bulk delete the core queued, and drops the ones it did', async () => {
     serveLibrary({ matches: [{ id: 7 }, { id: 8 }, { id: 9 }], clips: [] }, (url) =>
       url.endsWith('/matches/7') ? QUEUED : deleted(),
