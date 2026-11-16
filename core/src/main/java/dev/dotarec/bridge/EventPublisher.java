@@ -40,13 +40,33 @@ public class EventPublisher {
      * bad event never disrupts the caller (e.g. the FSM mid-transition).
      */
     public void publish(String type, Object payload) {
+        String frame = serialize(type, payload);
+        if (frame != null) {
+            socket.broadcast(frame);
+        }
+    }
+
+    /**
+     * {@link #publish}es a one-off event a window must see even if none is open now: one that reaches
+     * no window is sent to the next one that connects (see {@link StatusWebSocket#broadcastOrKeep}).
+     */
+    public void publishOrKeep(String type, Object payload) {
+        String frame = serialize(type, payload);
+        if (frame != null) {
+            socket.broadcastOrKeep(frame);
+        }
+    }
+
+    /** The {@code { type, payload }} frame, or null (logged) when it can't be serialized. */
+    private String serialize(String type, Object payload) {
         Map<String, Object> envelope = new HashMap<>(2);
         envelope.put("type", type);
         envelope.put("payload", payload);
         try {
-            socket.broadcast(mapper.writeValueAsString(envelope));
+            return mapper.writeValueAsString(envelope);
         } catch (JsonProcessingException e) {
             log.warn("Failed to serialize event of type '{}'", type, e);
+            return null;
         }
     }
 

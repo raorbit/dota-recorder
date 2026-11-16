@@ -132,4 +132,80 @@ class StatusWebSocketTest {
         assertThat(sent).hasSize(2);
         assertThat(sent.get(1)).contains("\"heartbeat\"");
     }
+
+    @Test
+    void aFrameNoSessionTook_goesToTheNextSessionThatConnects_rightAfterItsStatus() throws Exception {
+        // A queued delete failed while the window was closed to the tray: the window opened next must
+        // still hear of it, once.
+        StatusWebSocket socket = socket();
+        socket.broadcastOrKeep(FAILED);
+        socket.broadcast(HEARTBEAT); // an ordinary broadcast nobody took is just gone
+
+        List<String> first = new ArrayList<>();
+        socket.afterConnectionEstablished(recording(first));
+        List<String> second = new ArrayList<>();
+        socket.afterConnectionEstablished(recording(second));
+
+        assertThat(first).hasSize(2);
+        assertThat(first.get(0)).contains("\"status\"");
+        assertThat(first.get(1)).isEqualTo(FAILED);
+        assertThat(second).hasSize(1);
+        assertThat(second.get(0)).contains("\"status\"");
+    }
+
+    @Test
+    void aFrameASessionTook_isNotKept() throws Exception {
+        StatusWebSocket socket = socket();
+        List<String> open = new ArrayList<>();
+        socket.afterConnectionEstablished(recording(open));
+
+        socket.broadcastOrKeep(FAILED);
+        List<String> later = new ArrayList<>();
+        socket.afterConnectionEstablished(recording(later));
+
+        assertThat(open).hasSize(2);
+        assertThat(open.get(1)).isEqualTo(FAILED);
+        assertThat(later).hasSize(1);
+    }
+
+    @Test
+    void keepsOnlyTheLatestFrames_whileNoSessionTakesThem() throws Exception {
+        StatusWebSocket socket = socket();
+        for (int i = 0; i <= StatusWebSocket.MAX_KEPT; i++) {
+            socket.broadcastOrKeep("{\"n\":" + i + "}");
+        }
+
+        List<String> sent = new ArrayList<>();
+        socket.afterConnectionEstablished(recording(sent));
+
+        // The oldest, 0, was dropped; 1 to MAX_KEPT follow the status frame in order.
+        assertThat(sent).hasSize(1 + StatusWebSocket.MAX_KEPT);
+        assertThat(sent.get(1)).isEqualTo("{\"n\":1}");
+        assertThat(sent.get(StatusWebSocket.MAX_KEPT))
+                .isEqualTo("{\"n\":" + StatusWebSocket.MAX_KEPT + "}");
+    }
+
+    private static final String FAILED =
+            "{\"type\":\"delete.failed\",\"payload\":{\"kind\":\"match\",\"id\":7,\"message\":\"locked\"}}";
+    private static final String HEARTBEAT = "{\"type\":\"heartbeat\"}";
+
+    private static StatusWebSocket socket() {
+        StatusService statusService = mock(StatusService.class);
+        when(statusService.snapshot()).thenReturn(snapshot());
+        return new StatusWebSocket(statusService, new ObjectMapper());
+    }
+
+    /** An open session that records every frame it is sent into {@code sent}, in order. */
+    private static WebSocketSession recording(List<String> sent) throws Exception {
+        WebSocketSession session = mock(WebSocketSession.class);
+        when(session.isOpen()).thenReturn(true);
+        doAnswer(
+                        inv -> {
+                            sent.add(((TextMessage) inv.getArgument(0)).getPayload());
+                            return null;
+                        })
+                .when(session)
+                .sendMessage(any());
+        return session;
+    }
 }

@@ -225,7 +225,8 @@ class DeleteQueueTest {
             queue.drain(WORKER);
         }
 
-        verify(events).publish("delete.failed",
+        // Kept for the next window when none is open to take it now.
+        verify(events).publishOrKeep("delete.failed",
                 Map.of("kind", "clip", "id", 5L, "message", "database is locked"));
         verify(events, never()).publish(eq("clip.deleted"), any());
         verify(events, times(2)).publishStatus();

@@ -602,7 +602,8 @@ export function startLibrary(): () => void {
   });
 
   // A delete the core queued and then could not do: no request is left to say so, so its frame does,
-  // in the same delete-failure banner.
+  // in the same delete-failure banner. The core keeps one no window got for the next to connect, so a
+  // window opened after the failure (one closed to the tray meanwhile) hears of it too.
   const offDeleteFailed = socket.onDeleteFailed((failure) => {
     useLibraryStore.getState().queuedDeleteFailed(failure);
   });

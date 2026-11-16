@@ -48,7 +48,8 @@ import org.springframework.stereotype.Component;
  * included. A second delete of a pending one runs nothing and is answered as queued: the first finishes
  * it. A delete's own frame ({@code match.deleted}, {@code clip.deleted}) goes out once it is done,
  * wherever it ran. A queued one that fails says so in a {@code delete.failed} frame, since no request is
- * left to carry the reason.
+ * left to carry the reason. With no window open (closed to the tray, say), the next one to connect
+ * gets that frame.
  *
  * <p>The queue lives only in memory. A delete still queued when the core exits (the app quits, or the
  * core crashes and is restarted) is lost, and its row is listed again as an ordinary one.
@@ -348,7 +349,10 @@ public class DeleteQueue {
         }
     }
 
-    /** {@code delete.failed}: what a queued delete was, and why it failed. */
+    /**
+     * {@code delete.failed}: what a queued delete was, and why it failed. Kept for the next window when
+     * none is open, as the row would otherwise come back with nothing to say why.
+     */
     private void publishFailure(Key key, RuntimeException failure) {
         if (events == null) {
             return;
@@ -358,6 +362,6 @@ public class DeleteQueue {
         payload.put("id", key.id());
         String message = failure.getMessage();
         payload.put("message", message == null || message.isBlank() ? failure.toString() : message);
-        events.publish("delete.failed", payload);
+        events.publishOrKeep("delete.failed", payload);
     }
 }
