@@ -66,14 +66,18 @@ public class ObsEvents {
     private volatile CountDownLatch confirmLatch;
 
     /**
-     * Counted down on the OUTPUT_STOPPED that answers a StopRecord this app sent; null when no such
-     * stop is outstanding. OBS answers StopRecord at once and closes the file about half a second
-     * later, and until it has it refuses a StartRecord, so {@link #awaitOutputIdle(long, long)} is how
-     * a back-to-back recording waits out that window. Outlives {@link #reset()}, which a start runs
-     * before it gets as far as waiting. {@code volatile}: armed on the FSM or bridge thread, counted
-     * down on the socket thread.
+     * Counted down on the OUTPUT_STOPPED that answers a StopRecord this app sent. Null until a stop
+     * arms it and again after {@link #cancelExpectedStop()}; once its event has arrived it stays in
+     * place, spent, so a later wait on it returns at once. OBS answers StopRecord at once and closes
+     * the file about half a second later, and until it has it refuses a StartRecord, so
+     * {@link #awaitOutputIdle(long, long)} is how a back-to-back recording waits out that window.
+     * Outlives {@link #reset()}, which a start runs before it gets as far as waiting. {@code volatile}:
+     * armed on the FSM or bridge thread, counted down on the socket thread.
      */
     private volatile CountDownLatch stopLatch;
+
+    /** {@code System.nanoTime()} when {@link #stopLatch} was last armed. */
+    private volatile long stopExpectedAtNanos;
 
     /** {@code System.nanoTime()} at the latest OUTPUT_STOPPED; null until one has arrived. */
     private volatile Long stoppedAtNanos;
@@ -192,7 +196,27 @@ public class ObsEvents {
      * event that beats the response is still counted.
      */
     public void expectStopped() {
+        stopExpectedAtNanos = System.nanoTime();
         stopLatch = new CountDownLatch(1);
+    }
+
+    /**
+     * Milliseconds since the stop wait was last armed, or 0 when none is armed. Only meaningful right
+     * after {@link #awaitOutputIdle(long, long)} answered {@link OutputIdle#STILL_STOPPING}; it is how
+     * the caller tells a slow stop from one whose event is never coming.
+     */
+    public long stopExpectedForMs() {
+        return stopLatch == null ? 0 : (System.nanoTime() - stopExpectedAtNanos) / 1_000_000L;
+    }
+
+    /** What {@link #awaitOutputIdle(long, long)} found. */
+    public enum OutputIdle {
+        /** Nothing is stopping and the settle has passed: a StartRecord can go out. */
+        READY,
+        /** The stop this app sent has not been confirmed yet; the wait is still armed. */
+        STILL_STOPPING,
+        /** The waiting thread was interrupted; its interrupt flag is set again. */
+        INTERRUPTED
     }
 
     /**
@@ -213,14 +237,12 @@ public class ObsEvents {
      * in the same instant as the STOPPED event was accepted and then never started, which cost a 15s
      * confirmation timeout and an OBS restart; starts sent a few tens of milliseconds after the event
      * all went through.
-     *
-     * @return false when the stop was not confirmed in time or the wait was interrupted
      */
-    public boolean awaitOutputIdle(long timeoutMs, long settleMs) {
+    public OutputIdle awaitOutputIdle(long timeoutMs, long settleMs) {
         CountDownLatch latch = stopLatch;
         try {
             if (latch != null && !latch.await(timeoutMs, TimeUnit.MILLISECONDS)) {
-                return false;
+                return OutputIdle.STILL_STOPPING;
             }
             Long stoppedAt = stoppedAtNanos;
             if (stoppedAt != null) {
@@ -230,10 +252,10 @@ public class ObsEvents {
                     TimeUnit.NANOSECONDS.sleep(remaining);
                 }
             }
-            return true;
+            return OutputIdle.READY;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            return false;
+            return OutputIdle.INTERRUPTED;
         }
     }
 
