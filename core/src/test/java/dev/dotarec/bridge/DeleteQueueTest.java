@@ -34,6 +34,8 @@ class DeleteQueueTest {
     private static final Duration WAIT = Duration.ofMillis(150);
     /** How long a test waits for the worker to get through what it was given. */
     private static final Duration WORKER = Duration.ofSeconds(5);
+    /** When the row each delete is for was created, unless a test says otherwise. */
+    private static final long CREATED_AT = 1_000L;
 
     private final StorageMaintenanceLock lock = new StorageMaintenanceLock();
     private final EventPublisher events = mock(EventPublisher.class);
@@ -52,7 +54,7 @@ class DeleteQueueTest {
         List<Thread> ranOn = new CopyOnWriteArrayList<>();
         List<Boolean> lockFreeWhileRunning = new CopyOnWriteArrayList<>();
 
-        Optional<String> outcome = queue.run(Kind.MATCH, 7, () -> {
+        Optional<String> outcome = queue.run(Kind.MATCH, 7, CREATED_AT, () -> {
             ranOn.add(Thread.currentThread());
             lockFreeWhileRunning.add(HeldLock.isFree(lock));
             log.add("ran 7");
@@ -75,7 +77,8 @@ class DeleteQueueTest {
         // the time it took instead of hanging the test.
         try (HeldLock pass = HeldLock.hold(lock).releaseAfter(Duration.ofSeconds(3))) {
             long start = System.nanoTime();
-            Optional<String> outcome = queue.run(Kind.MATCH, 7, delete("7"), announce("7"));
+            Optional<String> outcome =
+                    queue.run(Kind.MATCH, 7, CREATED_AT, delete("7"), announce("7"));
             long waitedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
 
             assertThat(outcome).as("queued, not run").isEmpty();
@@ -99,11 +102,11 @@ class DeleteQueueTest {
     @Test
     void queuesADeleteAtOnce_whileAnotherOneIsPending() throws Exception {
         try (HeldLock pass = HeldLock.hold(lock)) {
-            assertThat(queue.run(Kind.MATCH, 7, delete("7"), announce("7"))).isEmpty();
+            assertThat(queue.run(Kind.MATCH, 7, CREATED_AT, delete("7"), announce("7"))).isEmpty();
 
             // 7 waits for the lock already, so 8 could only wait behind it: no second wait.
             long start = System.nanoTime();
-            assertThat(queue.run(Kind.MATCH, 8, delete("8"), announce("8"))).isEmpty();
+            assertThat(queue.run(Kind.MATCH, 8, CREATED_AT, delete("8"), announce("8"))).isEmpty();
             long waitedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
 
             assertThat(waitedMs).isLessThan(WAIT.toMillis());
@@ -124,7 +127,8 @@ class DeleteQueueTest {
         try (HeldLock pass = HeldLock.hold(lock)) {
             Thread clipRequest = runOnItsOwnThread(slow, Kind.CLIP, 5, "clip 5", clipOutcome);
             awaitPending(slow, Kind.CLIP, 5);
-            assertThat(slow.run(Kind.MATCH, 9, delete("match 9"), announce("match 9"))).isEmpty();
+            assertThat(slow.run(
+                    Kind.MATCH, 9, CREATED_AT, delete("match 9"), announce("match 9"))).isEmpty();
             clipRequest.join(WORKER.toMillis());
             assertThat(clipOutcome.get()).as("5 waited out its time, so it was queued").isEmpty();
 
@@ -144,7 +148,8 @@ class DeleteQueueTest {
         try (HeldLock pass = HeldLock.hold(lock)) {
             Thread clipRequest = runOnItsOwnThread(slow, Kind.CLIP, 5, "clip 5", clipOutcome);
             awaitPending(slow, Kind.CLIP, 5);
-            assertThat(slow.run(Kind.MATCH, 9, delete("match 9"), announce("match 9"))).isEmpty();
+            assertThat(slow.run(
+                    Kind.MATCH, 9, CREATED_AT, delete("match 9"), announce("match 9"))).isEmpty();
 
             pass.release();
             clipRequest.join(WORKER.toMillis());
@@ -159,8 +164,9 @@ class DeleteQueueTest {
     @Test
     void answersASecondDeleteOfAPendingOne_withoutRunningItAgain() throws Exception {
         try (HeldLock pass = HeldLock.hold(lock)) {
-            assertThat(queue.run(Kind.MATCH, 7, delete("7"), announce("7"))).isEmpty();
-            assertThat(queue.run(Kind.MATCH, 7, delete("7 again"), announce("7 again"))).isEmpty();
+            assertThat(queue.run(Kind.MATCH, 7, CREATED_AT, delete("7"), announce("7"))).isEmpty();
+            assertThat(queue.run(
+                    Kind.MATCH, 7, CREATED_AT, delete("7 again"), announce("7 again"))).isEmpty();
 
             assertThat(queue.pendingIds(Kind.MATCH)).containsExactly(7L);
             pass.release();
@@ -171,12 +177,33 @@ class DeleteQueueTest {
     }
 
     @Test
+    void runsADeleteOfANewerRowThatTookAPendingOnesId_asADeleteOfItsOwn() throws Exception {
+        // Recording 7 is removed while its delete waits (boot recovery releasing it, say), and SQLite
+        // gives its id to the next recording stored. A delete of that one isn't the first one asked for
+        // again: both run, oldest first, and the status lists the id once.
+        try (HeldLock pass = HeldLock.hold(lock)) {
+            assertThat(queue.run(Kind.MATCH, 7, CREATED_AT, delete("7"), announce("7"))).isEmpty();
+            assertThat(queue.run(
+                    Kind.MATCH, 7, CREATED_AT + 1, delete("newer 7"), announce("newer 7"))).isEmpty();
+
+            assertThat(queue.pendingIds(Kind.MATCH)).containsExactly(7L);
+            pass.release();
+            queue.drain(WORKER);
+        }
+        assertThat(log).containsExactly(
+                "ran 7", "announced 7 deleted", "ran newer 7", "announced newer 7 deleted");
+        assertThat(queue.pendingIds(Kind.MATCH)).isEmpty();
+    }
+
+    @Test
     void keepsARecordingAndAClipWithTheSameIdApart() throws Exception {
         // Matches and clips are separate tables, so their ids overlap: recording 7 and clip 7 are two
         // different deletes, and neither may stand in for the other.
         try (HeldLock pass = HeldLock.hold(lock)) {
-            assertThat(queue.run(Kind.MATCH, 7, delete("match 7"), announce("match 7"))).isEmpty();
-            assertThat(queue.run(Kind.CLIP, 7, delete("clip 7"), announce("clip 7"))).isEmpty();
+            assertThat(queue.run(
+                    Kind.MATCH, 7, CREATED_AT, delete("match 7"), announce("match 7"))).isEmpty();
+            assertThat(queue.run(
+                    Kind.CLIP, 7, CREATED_AT, delete("clip 7"), announce("clip 7"))).isEmpty();
 
             assertThat(queue.pendingIds(Kind.MATCH)).containsExactly(7L);
             assertThat(queue.pendingIds(Kind.CLIP)).containsExactly(7L);
@@ -192,10 +219,10 @@ class DeleteQueueTest {
         // The frame tells every view the delete is done, so a status built after it must not still list
         // it: the row would be marked as being deleted again.
         List<List<Long>> pendingWhenAnnounced = new CopyOnWriteArrayList<>();
-        queue.run(Kind.MATCH, 7, () -> "deleted",
+        queue.run(Kind.MATCH, 7, CREATED_AT, () -> "deleted",
                 done -> pendingWhenAnnounced.add(queue.pendingIds(Kind.MATCH)));
         try (HeldLock pass = HeldLock.hold(lock)) {
-            queue.run(Kind.MATCH, 8, () -> "deleted",
+            queue.run(Kind.MATCH, 8, CREATED_AT, () -> "deleted",
                     done -> pendingWhenAnnounced.add(queue.pendingIds(Kind.MATCH)));
             pass.release();
             queue.drain(WORKER);
@@ -206,7 +233,7 @@ class DeleteQueueTest {
 
     @Test
     void aDeleteThatFailsOnTheCallingThread_throws_andIsNoLongerPending() {
-        assertThatThrownBy(() -> queue.run(Kind.MATCH, 7, () -> {
+        assertThatThrownBy(() -> queue.run(Kind.MATCH, 7, CREATED_AT, () -> {
             throw new IllegalStateException("database is locked");
         }, done -> log.add("announced 7"))).hasMessage("database is locked");
 
@@ -218,7 +245,7 @@ class DeleteQueueTest {
     @Test
     void aQueuedDeleteThatFails_saysSoInADeleteFailedFrame() throws Exception {
         try (HeldLock pass = HeldLock.hold(lock)) {
-            queue.run(Kind.CLIP, 5, () -> {
+            queue.run(Kind.CLIP, 5, CREATED_AT, () -> {
                 throw new IllegalStateException("database is locked");
             }, done -> log.add("announced 5"));
             pass.release();
@@ -238,7 +265,7 @@ class DeleteQueueTest {
     @Test
     void aDeleteStillQueuedWhenTheCoreShutsDown_isDropped() throws Exception {
         try (HeldLock pass = HeldLock.hold(lock)) {
-            queue.run(Kind.MATCH, 7, delete("7"), announce("7"));
+            queue.run(Kind.MATCH, 7, CREATED_AT, delete("7"), announce("7"));
             queue.shutdown();
             awaitNoPending();
         }
@@ -268,7 +295,8 @@ class DeleteQueueTest {
     /** Asks {@code on} for a delete on a request thread of its own, which sets {@code outcome}. */
     private Thread runOnItsOwnThread(DeleteQueue on, Kind kind, long id, String what,
                                      AtomicReference<Optional<String>> outcome) {
-        Thread request = new Thread(() -> outcome.set(on.run(kind, id, delete(what), announce(what))),
+        Thread request = new Thread(
+                () -> outcome.set(on.run(kind, id, CREATED_AT, delete(what), announce(what))),
                 "delete-request");
         request.setDaemon(true);
         request.start();

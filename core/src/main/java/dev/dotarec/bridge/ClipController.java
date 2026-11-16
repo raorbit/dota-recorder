@@ -173,6 +173,13 @@ public class ClipController {
      * row's CURRENT paths are RE-READ (by id) immediately before unlinking, so the files removed are
      * always the row's present locations even if the archiver just repointed them.
      *
+     * <p>The re-read must find the very clip the probe found, by when it was created as well as its
+     * id. SQLite gives a new row the highest id in use plus one (the schema has no AUTOINCREMENT), and
+     * a clip's row is added without the lock (a manual cut, a finalized match's auto clips), so if a
+     * storage pass drops the clip asked for while this delete waits (the sweeper drops one whose file
+     * went missing), the next clip asked for can take its id. Finding another clip there, the delete
+     * leaves it and its files alone and is done, as for a clip already gone.
+     *
      * <p>The archiver holds that lock through a whole pass of cross-drive copies, so the delete goes
      * through {@link DeleteQueue}, as a recording delete does: it waits here for the lock at most half a
      * minute, and is then queued to run once the lock frees, answered at once with 202
@@ -186,7 +193,9 @@ public class ClipController {
         ClipRow probe = clips.findById(clipId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "No clip " + clipId));
         long parentMatchId = probe.parentMatchId();
-        return deletes.run(DeleteQueue.Kind.CLIP, clipId, () -> deleteUnderLock(clipId),
+        long createdAt = probe.createdAt();
+        return deletes.run(DeleteQueue.Kind.CLIP, clipId, createdAt,
+                        () -> deleteUnderLock(clipId, createdAt, parentMatchId),
                         done -> announceDeleted(clipId, parentMatchId))
                 .map(done -> ResponseEntity.noContent().<MatchController.DeleteOutcome>build())
                 .orElseGet(() -> ResponseEntity.status(HttpStatus.ACCEPTED)
@@ -197,16 +206,21 @@ public class ClipController {
      * The delete itself, run with the maintenance lock held. Always true: the queue hands what a delete
      * returns on to its announcement, and a clip delete has nothing more to tell it.
      */
-    private boolean deleteUnderLock(long clipId) {
+    private boolean deleteUnderLock(long clipId, long createdAt, long parentMatchId) {
         // Re-read the CURRENT row inside the lock: the archiver may have repointed video_path/
         // thumb_path to an archive drive since the probe, so unlink the present locations, not the
-        // pre-move ones (which would be a no-op leaving the moved file stranded). A row deleted by a
-        // concurrent pass, or while this delete was queued, leaves nothing to unlink; the row delete
-        // below is then a no-op.
-        clips.findById(clipId).ifPresent(c -> {
-            deleteFileQuietly(c.videoPath());
-            deleteFileQuietly(c.thumbPath());
-        });
+        // pre-move ones (which would be a no-op leaving the moved file stranded).
+        ClipRow c = clips.findById(clipId)
+                .filter(row -> row.createdAt() == createdAt && row.parentMatchId() == parentMatchId)
+                .orElse(null);
+        if (c == null) {
+            // Gone already, dropped by a concurrent pass or while this delete was queued. A clip that
+            // has its id now is a newer one (see delete), not the one asked for, so it stays as it is.
+            return true;
+        }
+        deleteFileQuietly(c.videoPath());
+        deleteFileQuietly(c.thumbPath());
+        // Every other delete of a row holds the lock too, so the id still names this clip here.
         clips.delete(clipId);
         return true;
     }
