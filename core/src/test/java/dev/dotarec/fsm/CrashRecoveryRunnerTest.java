@@ -1145,6 +1145,30 @@ class CrashRecoveryRunnerTest {
     }
 
     @Test
+    void aWholeCopyKeepsItsRowBesideAnOriginalCutShort() throws Exception {
+        // The archived copy's original name and size in the video folder, but cut short (the user
+        // copied the recording back and the copy didn't finish, say), beside the whole copy the row
+        // is on. The row stays on the copy: moved onto the file, it would make the next boot delete
+        // the whole copy as move residue. Both files stay.
+        Path archive = configureArchive("hdd");
+        seedAdoptionFloor(videoDir, System.currentTimeMillis());
+        byte[] recording = recordingOf(256 * 1024);
+        long id = archivedRow(archive, "2026-10-01 20-00-00.mp4", recording);
+        Path copy = archive.resolve(id + "-2026-10-01 20-00-00.mp4");
+        Path cutShort = writeModifiedAt(
+                videoDir.resolve("2026-10-01 20-00-00.mp4"), cutShortAt(recording, 100 * 1024), LONG_AGO_MS);
+
+        runner.run(null);
+        newRunner().run(null);
+
+        assertThat(matches.findAll())
+                .singleElement()
+                .satisfies(row -> assertThat(row.videoPath()).isEqualTo(copy.toString()));
+        assertThat(copy).exists();
+        assertThat(cutShort).exists();
+    }
+
+    @Test
     void reconciliationWaitsForTheStorageMaintenanceLock() throws Exception {
         // The archiver/sweeper @Scheduled clocks start at context refresh while this runner executes
         // after it, so a locked maintenance pass can overlap recovery. Mid-move, the archiver's fresh
