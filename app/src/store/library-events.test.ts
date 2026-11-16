@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { startLibrary, useLibraryStore } from './library';
+import { StatusSocket } from '../api/client';
 
 // Integration coverage for the storage-events wiring in startLibrary: a retention.swept frame drives a
 // library refetch, a low-disk error frame lands in the banner state, and a socket reconnect reconciles
@@ -863,6 +864,32 @@ describe('startLibrary storage-events wiring', () => {
     expect(matchIds()).toEqual([7, 8]);
     expect(queuedMatches()).toEqual([]);
     teardown();
+  });
+
+  it("tells the core the library's socket shows delete failures, and the player's doesn't", () => {
+    // The core keeps a delete.failed frame until a socket that says so takes it: the player's own
+    // socket, open alone while the library's backs off, must not spend it.
+    vi.stubGlobal('window', { dotarec: { bridgeToken: 't0k' } });
+    const teardown = startLibrary();
+    const library = FakeWebSocket.instances[0];
+    expect(new URL(library.url).searchParams.get('deleteFailures')).toBe('1');
+    expect(new URL(library.url).searchParams.get('token')).toBe('t0k');
+
+    // It says so again on every reconnect.
+    library.close();
+    vi.advanceTimersByTime(500);
+    const reconnected = FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
+    expect(reconnected).not.toBe(library);
+    expect(new URL(reconnected.url).searchParams.get('deleteFailures')).toBe('1');
+    teardown();
+
+    const player = new StatusSocket();
+    player.onClipEvent(7, () => {});
+    player.connect();
+    const playerUrl = new URL(FakeWebSocket.instances[FakeWebSocket.instances.length - 1].url);
+    expect(playerUrl.searchParams.get('token')).toBe('t0k');
+    expect(playerUrl.searchParams.has('deleteFailures')).toBe(false);
+    player.close();
   });
 
   it('marks nothing from an older core whose status has no deletes', async () => {
