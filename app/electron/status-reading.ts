@@ -1,6 +1,7 @@
 // One parsed GET /status body, as the main process reads it every few seconds. The OBS demand poll
 // (wanted/busy) and the background notifier (recording/fsmState/lowDisk) share one fetch and this
-// one parser. Pure, so the tolerance rules below are unit-tested.
+// one parser, and the unattended update install reads it too. Pure, so the tolerance rules below are
+// unit-tested.
 import type { ObsDemandReading } from './obs-demand';
 
 /** The core's latest low-disk observation (StatusSnapshot.storage.lowDisk). */
@@ -21,6 +22,11 @@ export interface StatusReading {
   readonly fsmState: string;
   /** The latest low-disk observation, or null while the drive is healthy (or on an older core). */
   readonly lowDisk: LowDiskReading | null;
+  /**
+   * The core still has a recording or clip delete to do (deletes.matchIds / deletes.clipIds): one
+   * queued behind its maintenance lock, which it keeps only in memory. False on an older core.
+   */
+  readonly deletesPending: boolean;
 }
 
 /**
@@ -37,12 +43,30 @@ export function parseStatusBody(body: unknown): StatusReading | null {
     recording: obs.recording === true,
     fsmState: body.fsm.state,
     lowDisk: parseLowDisk(body.storage),
+    deletesPending: parseDeletesPending(body.deletes),
   };
 }
 
 /** The OBS demand view: busy while a match is arming/recording/stopping or OBS has an output. */
 export function toObsDemandReading(reading: StatusReading): ObsDemandReading {
   return { wanted: reading.wanted, busy: reading.recording || reading.fsmState !== 'IDLE' };
+}
+
+/**
+ * Whether the core is quiet enough for an unattended update install, which stops it: nothing is
+ * arming, recording or stopping, OBS is not wanted, and no delete is still to do (stopping the core
+ * would drop it, and its row would come back as an ordinary one).
+ */
+export function idleForInstall(reading: StatusReading): boolean {
+  return (
+    reading.fsmState === 'IDLE' && !reading.recording && !reading.wanted && !reading.deletesPending
+  );
+}
+
+function parseDeletesPending(deletes: unknown): boolean {
+  if (!isRecord(deletes)) return false;
+  const listsAny = (ids: unknown): boolean => Array.isArray(ids) && ids.length > 0;
+  return listsAny(deletes.matchIds) || listsAny(deletes.clipIds);
 }
 
 function parseLowDisk(storage: unknown): LowDiskReading | null {

@@ -27,7 +27,13 @@ function harness() {
   return { notifier, notify, pollFor, advance };
 }
 
-const idle: StatusReading = { wanted: false, recording: false, fsmState: 'IDLE', lowDisk: null };
+const idle: StatusReading = {
+  wanted: false,
+  recording: false,
+  fsmState: 'IDLE',
+  lowDisk: null,
+  deletesPending: false,
+};
 const orphaned: StatusReading = { ...idle, recording: true };
 const liveMatch: StatusReading = { ...idle, wanted: true, recording: true, fsmState: 'RECORDING' };
 const lowDisk = (observedAtMs: number): StatusReading => ({
