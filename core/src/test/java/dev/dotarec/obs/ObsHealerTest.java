@@ -18,6 +18,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.CleanupMode;
 import org.junit.jupiter.api.io.TempDir;
 import org.slf4j.LoggerFactory;
 
@@ -219,7 +220,8 @@ class ObsHealerTest {
     }
 
     @Test
-    void findObsProcess_namesTheOneRunningObs_byItsPidAndStart(@TempDir Path dir) throws Exception {
+    void findObsProcess_namesTheOneRunningObs_byItsPidAndStart(
+            @TempDir(cleanup = CleanupMode.NEVER) Path dir) throws Exception {
         Path exe = standInObs(dir);
         Process obs = run(exe);
         try {
@@ -235,11 +237,13 @@ class ObsHealerTest {
             assertThat(healer.findObsProcess()).isNull();
         } finally {
             end(obs);
+            remove(exe);
         }
     }
 
     @Test
-    void findObsProcess_withTwoRunningThisAppsObs_namesNeither(@TempDir Path dir) throws Exception {
+    void findObsProcess_withTwoRunningThisAppsObs_namesNeither(
+            @TempDir(cleanup = CleanupMode.NEVER) Path dir) throws Exception {
         // The core can't tell which of the two its connection reached.
         Path exe = standInObs(dir);
         Process first = run(exe);
@@ -249,6 +253,7 @@ class ObsHealerTest {
         } finally {
             end(first);
             end(second);
+            remove(exe);
         }
     }
 
@@ -293,6 +298,24 @@ class ObsHealerTest {
     private static void end(Process p) throws InterruptedException {
         p.destroyForcibly();
         p.waitFor(10, TimeUnit.SECONDS);
+    }
+
+    /**
+     * Deletes the stand-in OBS and its folder, best effort. Windows can hold an exe a moment past
+     * its process's end (an antivirus scan of a new exe in the temp folder, say), which would fail
+     * the test in JUnit's own cleanup of the folder; so the tests that run it leave that cleanup off
+     * and try here for a few seconds, leaving the copy for the temp folder's own cleanup if it stays.
+     */
+    private static void remove(Path exe) throws InterruptedException {
+        for (int attempt = 0; attempt < 50; attempt++) {
+            try {
+                Files.deleteIfExists(exe);
+                Files.deleteIfExists(exe.getParent());
+                return;
+            } catch (java.io.IOException e) {
+                Thread.sleep(100);
+            }
+        }
     }
 
     @Test
