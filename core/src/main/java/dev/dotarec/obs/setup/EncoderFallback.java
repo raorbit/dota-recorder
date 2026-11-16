@@ -15,7 +15,9 @@ public interface EncoderFallback {
      * Switches an auto-picked hardware encoder to x264 in the OBS profile, for the rest of this
      * process. A running OBS keeps the profile it loaded, so x264 records from the next OBS launched:
      * the caller's restart, or Electron's relaunch of an OBS that crashed. Nothing is switched while
-     * OBS can't record into its video folder at all, which it refuses before it opens any encoder.
+     * the video folder is missing or its drive has under 50 MB free, which OBS refuses before it
+     * opens any encoder. A folder that exists but can't be written to is not detected: OBS fails
+     * that start only after the encoder opened, so it can still bring the switch.
      *
      * @return true when the profile now names x264 where it named a hardware encoder
      */
