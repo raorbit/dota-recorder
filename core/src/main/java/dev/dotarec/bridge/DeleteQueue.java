@@ -36,6 +36,12 @@ import org.springframework.stereotype.Component;
  * line behind another one (anything else pending) is queued without waiting, so at most one request
  * waits on the lock at a time.
  *
+ * <p>Deletes run in the order they came, wherever they run: a recording deleted after its clips must
+ * find them gone, or it is left a stub (see {@code MatchController}). While a request waits for the
+ * lock, the worker leaves the lock alone, so a delete queued meanwhile can't take it first. One whose
+ * wait runs out is then queued behind those later ones, but the worker always runs the oldest delete
+ * it has.
+ *
  * <p>Every delete the core has accepted and not finished is pending here, keyed by what it deletes (a
  * recording and a clip with the same number are two different deletes). The status payload lists them,
  * so every window shows those rows as being deleted, one opened after the delete was asked for
@@ -74,16 +80,29 @@ public class DeleteQueue {
 
     private record Key(Kind kind, long id) {}
 
+    /** A queued delete, run by the worker once the lock is held ({@code locked}), or dropped. */
+    @FunctionalInterface
+    private interface QueuedDelete {
+        void run(boolean locked);
+    }
+
     private final StorageMaintenanceLock maintenanceLock;
     /** Publishes the status and failure frames; null in tests that don't observe them. */
     private final EventPublisher events;
     private final Duration lockWait;
     /** Every delete accepted and not finished, in the order they came. Guarded by itself. */
     private final Set<Key> pending = new LinkedHashSet<>();
+    /** The queued deletes the worker hasn't taken yet. Guarded by {@link #pending}. */
+    private final Map<Key, QueuedDelete> queued = new HashMap<>();
     /**
-     * Runs the queued deletes. One thread, so they run one at a time in the order they came. It exits
-     * once nothing has been queued for a minute, and is a daemon, so a delete still waiting for the
-     * lock never holds up the core's exit.
+     * A request is waiting for the lock to run its delete itself, so the worker must not take the lock
+     * first. Guarded by {@link #pending}, which is notified when it ends.
+     */
+    private boolean waitingOnRequest;
+    /**
+     * Runs the queued deletes. One thread, so they run one at a time, each time the oldest one queued
+     * (see {@link #runNext()}). It exits once nothing has been queued for a minute, and is a daemon,
+     * so a delete still waiting for the lock never holds up the core's exit.
      */
     private final ThreadPoolExecutor worker;
 
@@ -128,11 +147,19 @@ public class DeleteQueue {
             // Anything else pending holds the lock or waits for it, so this one would only wait behind
             // it: queue it at once rather than keep a second request waiting on the same lock.
             alone = pending.size() == 1;
+            if (alone) {
+                waitingOnRequest = true;
+            }
         }
-        if (!alone || !acquireWithin(lockWait)) {
-            queue(key, delete, announce);
+        if (!alone) {
+            queue(key, delete, announce, false);
             return Optional.empty();
         }
+        if (!acquireWithin(lockWait)) {
+            queue(key, delete, announce, true);
+            return Optional.empty();
+        }
+        endRequestWait();
         T result;
         try {
             try {
@@ -169,11 +196,25 @@ public class DeleteQueue {
         worker.submit(() -> { }).get(timeout.toMillis(), TimeUnit.MILLISECONDS);
     }
 
-    private <T> void queue(Key key, Supplier<T> delete, Consumer<T> announce) {
+    /**
+     * Hands the delete to the worker. {@code endsRequestWait} when it is the one a request waited for
+     * the lock for: it is the worker's to run first, and the worker may take the lock from here on.
+     */
+    private <T> void queue(Key key, Supplier<T> delete, Consumer<T> announce, boolean endsRequestWait) {
+        synchronized (pending) {
+            // Before the wait ends, so the worker, once let go, finds this one queued.
+            queued.put(key, locked -> runQueued(key, delete, announce, locked));
+            if (endsRequestWait) {
+                endRequestWait();
+            }
+        }
         try {
-            worker.execute(() -> runQueued(key, delete, announce));
+            worker.execute(this::runNext);
         } catch (RejectedExecutionException e) {
             // Only once the core is shutting down: nothing will run it, so it isn't pending.
+            synchronized (pending) {
+                queued.remove(key);
+            }
             release(key);
             throw e;
         }
@@ -182,13 +223,36 @@ public class DeleteQueue {
         publishStatus();
     }
 
-    /** A queued delete, on the worker: waits for the lock as long as a pass holds it, then runs. */
-    private <T> void runQueued(Key key, Supplier<T> delete, Consumer<T> announce) {
+    /**
+     * One run of the worker: once no request waits for the lock and the worker has the lock, it runs
+     * the oldest delete queued. Each queued delete hands the worker one run, so there is always one to
+     * take. Interrupted ({@link #shutdown()}), it drops that delete instead.
+     */
+    private void runNext() {
+        boolean locked = awaitRequestWait() && awaitLock();
+        QueuedDelete next = null;
+        synchronized (pending) {
+            for (Key key : pending) {
+                next = queued.remove(key);
+                if (next != null) {
+                    break;
+                }
+            }
+        }
+        if (next != null) {
+            next.run(locked);
+        } else if (locked) {
+            maintenanceLock.unlock();
+        }
+    }
+
+    /** A queued delete, on the worker: runs it if the worker got the lock, then announces what it did. */
+    private <T> void runQueued(Key key, Supplier<T> delete, Consumer<T> announce, boolean locked) {
         T result = null;
         boolean ran = false;
         RuntimeException failure = null;
         try {
-            if (awaitLock()) {
+            if (locked) {
                 try {
                     result = delete.get();
                     ran = true;
@@ -221,6 +285,32 @@ public class DeleteQueue {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return false;
+        }
+    }
+
+    /** The request that waited for the lock has it, or has queued its delete: the worker may go on. */
+    private void endRequestWait() {
+        synchronized (pending) {
+            waitingOnRequest = false;
+            pending.notifyAll();
+        }
+    }
+
+    /**
+     * Waits while a request waits for the lock to run its own delete, which came before any the worker
+     * has. False when the worker is interrupted.
+     */
+    private boolean awaitRequestWait() {
+        synchronized (pending) {
+            try {
+                while (waitingOnRequest) {
+                    pending.wait();
+                }
+                return true;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
         }
     }
 
