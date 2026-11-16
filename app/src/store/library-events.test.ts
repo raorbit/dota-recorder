@@ -843,6 +843,28 @@ describe('startLibrary storage-events wiring', () => {
     teardown();
   });
 
+  it('says why a queued delete failed while no window was open, in the window opened next', async () => {
+    // The core keeps the frame for the next window and sends it right after the first status, so it
+    // can come while the first load is still out.
+    serveLibrary({ matches: [{ id: 7 }, { id: 8 }], clips: [] }, () => QUEUED);
+    const teardown = startLibrary();
+    expect(useLibraryStore.getState().loadState).toBe('loading');
+
+    FakeWebSocket.instances[0].emitMessage({
+      type: 'delete.failed',
+      payload: { kind: 'match', id: 7, message: 'database is locked' },
+    });
+    await flush();
+
+    expect(useLibraryStore.getState().deleteError).toBe(
+      'The recording was not deleted: database is locked',
+    );
+    expect(useLibraryStore.getState().loadState).toBe('ready');
+    expect(matchIds()).toEqual([7, 8]);
+    expect(queuedMatches()).toEqual([]);
+    teardown();
+  });
+
   it('marks nothing from an older core whose status has no deletes', async () => {
     const teardown = startLibrary();
     await flush();
