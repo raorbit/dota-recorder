@@ -68,8 +68,12 @@ public class ObsConfigWriter implements EncoderFallback {
 
     /** Per-process cache of the auto-detected encoder so the (bounded) GPU probe runs at most once per
      * launch; a new process re-probes so a swapped GPU re-adapts. Null until first resolved, and x264
-     * once {@link #fallBackToX264} found that OBS can't open the probed one. */
+     * once {@link #fallBackToX264} found that OBS can't open the probed one, until an encoder change
+     * in Settings drops that ({@link #dropAutoEncoderFallback}). */
     private volatile String resolvedAutoEncoder;
+
+    /** The probed encoder {@link #fallBackToX264} replaced with x264, or null while auto runs it. */
+    private volatile String autoEncoderFallbackFrom;
     private final ObjectMapper mapper =
             new ObjectMapper().enable(SerializationFeature.INDENT_OUTPUT);
 
@@ -188,7 +192,10 @@ public class ObsConfigWriter implements EncoderFallback {
      *
      * <p>Only "auto" is switched. An encoder picked in Settings is the user's: it is kept, and the
      * failure logged. Settings are not touched, so the UI keeps showing Auto, and the next launch
-     * probes the GPU again (a driver update may have fixed the encoder by then).
+     * probes the GPU again (a driver update may have fixed the encoder by then). The switch holds
+     * that long, which can be days of a tray session, so the Settings UI says Auto fell back
+     * ({@link #autoEncoderFallbackFrom}), and an encoder changed there drops it
+     * ({@link #dropAutoEncoderFallback}).
      *
      * @return true when the profile now names x264 where it named a hardware encoder; false when
      *     there was nothing to switch, the video folder is missing or its drive nearly full, or the
@@ -227,12 +234,37 @@ public class ObsConfigWriter implements EncoderFallback {
             log.warn("Could not switch the OBS profile from {} to x264: {}", probed, e.toString());
             return false;
         }
+        autoEncoderFallbackFrom = probed;
         log.warn(
                 "Switching the OBS encoder from the auto-picked {} to x264 until the app restarts:"
                         + " OBS fails to start recording with it (an encoder it offers but can't"
                         + " open, e.g. on an outdated GPU driver)",
                 probed);
         return true;
+    }
+
+    /**
+     * The hardware encoder auto picked and {@link #fallBackToX264} replaced with x264 because OBS
+     * couldn't start recording with it, or null while auto runs the encoder it picked. Shown in the
+     * Settings UI, where the switch is otherwise invisible: the encoder still reads Auto.
+     */
+    public String autoEncoderFallbackFrom() {
+        return autoEncoderFallbackFrom;
+    }
+
+    /**
+     * Drops the switch {@link #fallBackToX264} made, for an encoder the user changed in Settings:
+     * their pick applies as picked, and going back to Auto tries the encoder it probed again, as a
+     * restart of the app would. The caller re-writes the profile.
+     */
+    public synchronized void dropAutoEncoderFallback() {
+        String probed = autoEncoderFallbackFrom;
+        if (probed == null) {
+            return;
+        }
+        resolvedAutoEncoder = probed;
+        autoEncoderFallbackFrom = null;
+        log.info("The encoder was changed in Settings; auto picks {} again instead of x264", probed);
     }
 
     /**

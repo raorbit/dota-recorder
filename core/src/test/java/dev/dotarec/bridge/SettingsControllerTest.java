@@ -4,7 +4,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -23,6 +26,7 @@ import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.mockito.InOrder;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.server.ResponseStatusException;
 
@@ -101,7 +105,59 @@ class SettingsControllerTest {
                         "storageLocations",
                         "autoClipOnRampage",
                         "clipPaddingSeconds",
-                        "recordDemoMatches");
+                        "recordDemoMatches",
+                        "autoEncoderFallbackFrom");
+    }
+
+    @Test
+    void getSettings_saysWhichEncoderAutoFellBackFrom() {
+        // OBS couldn't start recording with the hardware encoder auto picked, so auto records with
+        // x264 until the app restarts. The encoder still reads auto, so the view names the switch.
+        when(obsConfigWriter.autoEncoderFallbackFrom()).thenReturn("qsv");
+
+        SettingsView view = controller.getSettings();
+
+        assertThat(view.encoder()).isBlank();
+        assertThat(view.autoEncoderFallbackFrom()).isEqualTo("qsv");
+    }
+
+    @Test
+    void getSettings_namesNoFallback_forAnEncoderPickedInSettings() {
+        store.update(s -> {
+            s.encoder = "nvenc";
+            return s;
+        });
+        when(obsConfigWriter.autoEncoderFallbackFrom()).thenReturn("qsv");
+
+        assertThat(controller.getSettings().autoEncoderFallbackFrom()).isNull();
+    }
+
+    @Test
+    void putSettings_withADifferentEncoder_dropsAutosFallback_beforeTheProfileIsRewritten() {
+        controller.putSettings(
+                new SettingsPatch(
+                        null, "nvenc", null, null, null, null, null, null, null, null, null, null,
+                        null, null));
+
+        InOrder order = inOrder(obsConfigWriter);
+        order.verify(obsConfigWriter).dropAutoEncoderFallback();
+        order.verify(obsConfigWriter).applyProfile();
+    }
+
+    @Test
+    void putSettings_withTheSameEncoder_keepsAutosFallback() {
+        // The renderer re-sends the encoder on every save: "" for auto, which the store may hold as
+        // null. An unrelated save must not undo the switch.
+        controller.putSettings(
+                new SettingsPatch(
+                        "1280x720", "", null, null, null, null, null, null, null, null, null, null,
+                        null, null));
+        controller.putSettings(
+                new SettingsPatch(
+                        null, null, null, null, null, null, null, 60, null, null, null, null, null,
+                        null));
+
+        verify(obsConfigWriter, never()).dropAutoEncoderFallback();
     }
 
     @Test

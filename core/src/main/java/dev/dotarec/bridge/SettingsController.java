@@ -71,7 +71,18 @@ public class SettingsController {
 
     @GetMapping("/settings")
     public SettingsView getSettings() {
-        return SettingsView.of(store.get());
+        return view(store.get());
+    }
+
+    /** The read view of {@code s}, with what auto runs this session when the encoder is auto. */
+    private SettingsView view(Settings s) {
+        return SettingsView.of(
+                s, encoderOf(s.encoder).isEmpty() ? obsConfigWriter.autoEncoderFallbackFrom() : null);
+    }
+
+    /** An encoder setting with every blank spelling of auto as {@code ""}. */
+    private static String encoderOf(String encoder) {
+        return encoder == null || encoder.isBlank() ? "" : encoder;
     }
 
     @PutMapping("/settings")
@@ -182,6 +193,7 @@ public class SettingsController {
         // Atomic read-copy-mutate: only the user-facing fields are overlaid (non-null), so the
         // app-managed OBS fields (host/port/password) carry forward untouched rather than being
         // reset to defaults.
+        boolean[] encoderChanged = {false};
         store.update(
                 current -> {
                     // The storage-overlap rule re-runs INSIDE the store's synchronized update, against
@@ -202,6 +214,9 @@ public class SettingsController {
                         current.resolution = patch.resolution();
                     }
                     if (patch.encoder() != null) {
+                        // The renderer re-sends the encoder on every save, so only a different one
+                        // counts as a change.
+                        encoderChanged[0] = !encoderOf(patch.encoder()).equals(encoderOf(current.encoder));
                         current.encoder = patch.encoder();
                     }
                     if (patch.fps() != null) {
@@ -273,6 +288,13 @@ public class SettingsController {
         } catch (Exception e) {
             log.debug("On-demand audio reconcile after settings PUT failed (OBS down?): {}", e.toString());
         }
+        // An encoder the user picks applies as picked: auto's fallback to x264 for the rest of the
+        // process (ObsConfigWriter.fallBackToX264) goes with the change, so back on Auto the probed
+        // hardware encoder is tried again, as a restart of the app would. Before the re-write below,
+        // so the profile names it.
+        if (encoderChanged[0]) {
+            obsConfigWriter.dropAutoEncoderFallback();
+        }
         // Re-write basic.ini from the saved settings so the recording profile (fps/quality/format/
         // encoder/resolution) is fresh for the NEXT OBS launch instead of stale until the next reboot.
         // Unlike the audio reconcile above, this is a local disk write that must NOT be swallowed: a
@@ -289,7 +311,7 @@ public class SettingsController {
                     HttpStatus.INTERNAL_SERVER_ERROR,
                     "settings saved but the OBS recording profile could not be updated");
         }
-        return SettingsView.of(store.get());
+        return view(store.get());
     }
 
     /**
@@ -513,6 +535,11 @@ public class SettingsController {
     /**
      * Read view of settings. The app-managed OBS connection (host/port/password) is intentionally
      * omitted. Null fields are still serialized so the UI sees a stable shape.
+     *
+     * <p>{@code autoEncoderFallbackFrom} is not a setting: with the encoder on auto, it names the
+     * hardware encoder auto picked and replaced with x264 for the rest of this process, because OBS
+     * couldn't start recording with it ({@link ObsConfigWriter#fallBackToX264}); null otherwise.
+     * The encoder still reads auto, so the UI says so beside it.
      */
     @JsonInclude(JsonInclude.Include.ALWAYS)
     public record SettingsView(
@@ -528,9 +555,10 @@ public class SettingsController {
             List<StorageLocation> storageLocations,
             boolean autoClipOnRampage,
             int clipPaddingSeconds,
-            boolean recordDemoMatches) {
+            boolean recordDemoMatches,
+            String autoEncoderFallbackFrom) {
 
-        static SettingsView of(Settings s) {
+        static SettingsView of(Settings s, String autoEncoderFallbackFrom) {
             return new SettingsView(
                     s.resolution,
                     s.encoder,
@@ -544,7 +572,8 @@ public class SettingsController {
                     s.storageLocations,
                     s.autoClipOnRampage,
                     s.clipPaddingSeconds,
-                    s.recordDemoMatches);
+                    s.recordDemoMatches,
+                    autoEncoderFallbackFrom);
         }
     }
 

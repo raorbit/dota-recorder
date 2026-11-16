@@ -761,8 +761,9 @@ public class MatchFsm {
      * of OBS in a row fails this way (a run counts once, see {@link #UNCONFIRMED_STARTS_BEFORE_X264}),
      * an auto-picked hardware encoder is switched to x264 in the profile first, and the restart
      * relaunches OBS on it (or a later failure's restart does, if the restarter refuses this one for
-     * now). The switch is one-way for the rest of the process, and the restart is the rate-limited
-     * one every failure asks for, so this can't loop. Asking starts the count from zero, and the run
+     * now). The switch is one-way for the rest of the process (only the user changing the encoder in
+     * Settings, where it shows, drops it), and the restart is the rate-limited one every failure asks
+     * for, so this can't loop. Asking starts the count from zero, and the run
      * that asked stays counted, so a streak that goes on asks again every second new run of OBS,
      * however often each run fails.
      *
