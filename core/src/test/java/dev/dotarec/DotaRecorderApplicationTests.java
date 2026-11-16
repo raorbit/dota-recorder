@@ -3,6 +3,7 @@ package dev.dotarec;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.dotarec.bridge.MatchController;
+import dev.dotarec.bridge.StatusService;
 import dev.dotarec.config.SchedulingConfig;
 import dev.dotarec.data.MigrationRunner;
 import dev.dotarec.obs.ObsController;
@@ -71,6 +72,9 @@ class DotaRecorderApplicationTests {
         assertThat(ctx.getBean(MatchController.class)).isNotNull();
         assertThat(ctx.getBean(ObsController.class)).isNotNull();
         assertThat(ctx.getBean(MigrationRunner.class)).isNotNull();
+        // The status snapshot reads the socket's kept frames through a @Lazy reference (the socket
+        // primes its sessions from that same service), so building one proves it resolves.
+        assertThat(ctx.getBean(StatusService.class).snapshot().kept().frames()).isZero();
         // Scheduling must be OFF here (app.scheduling.enabled=false), so the background jobs can't
         // race the boot. Guards against the property/config being dropped and the flake returning.
         assertThat(ctx.getBeansOfType(SchedulingConfig.class))

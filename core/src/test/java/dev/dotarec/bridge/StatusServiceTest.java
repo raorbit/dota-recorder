@@ -23,23 +23,27 @@ import org.junit.jupiter.api.Test;
  * REST view and the pushed view carry the latest low-disk observation, and serializes with a
  * stable shape (an explicit {@code null} while the drive is healthy) for the renderer and the
  * shell's parsers. And the {@code deletes} component: the deletes {@link DeleteQueue} has pending,
- * so a window opened while one waits still shows its row as being deleted.
+ * so a window opened while one waits still shows its row as being deleted. And the {@code kept}
+ * component: the frames {@link StatusWebSocket} keeps for the next window, which the shell's update
+ * install waits on.
  */
 class StatusServiceTest {
 
     private final LowDiskState lowDiskState = new LowDiskState();
     private final StorageMaintenanceLock maintenanceLock = new StorageMaintenanceLock();
     private final DeleteQueue deletes = new DeleteQueue(maintenanceLock, null, Duration.ofMillis(50));
-    private final StatusService service = newService(lowDiskState, deletes);
+    private final StatusWebSocket socket = mock(StatusWebSocket.class);
+    private final StatusService service = newService(lowDiskState, deletes, socket);
 
-    private static StatusService newService(LowDiskState lowDiskState, DeleteQueue deletes) {
+    private static StatusService newService(
+            LowDiskState lowDiskState, DeleteQueue deletes, StatusWebSocket socket) {
         GsiHeartbeat gsi = mock(GsiHeartbeat.class);
         when(gsi.isAlive()).thenReturn(false);
         when(gsi.lastFrameAgoMillis()).thenReturn(Long.MAX_VALUE);
         MatchFsm fsm = mock(MatchFsm.class);
         when(fsm.getState()).thenReturn(MatchState.IDLE);
         return new StatusService(gsi, mock(ObsHealth.class), fsm, mock(ObsDemand.class), lowDiskState,
-                deletes);
+                deletes, socket);
     }
 
     @AfterEach
@@ -99,7 +103,7 @@ class StatusServiceTest {
     void deletesListOneStillWaitingForTheLockOnItsRequest() throws Exception {
         // Not queued yet, but the core has it all the same, so a window opened now shows it too.
         DeleteQueue waiting = new DeleteQueue(maintenanceLock, null, Duration.ofSeconds(30));
-        StatusService status = newService(lowDiskState, waiting);
+        StatusService status = newService(lowDiskState, waiting, socket);
         try (HeldLock pass = HeldLock.hold(maintenanceLock)) {
             Thread request = new Thread(
                     () -> waiting.run(DeleteQueue.Kind.MATCH, 7, () -> "deleted", done -> { }));
@@ -112,6 +116,19 @@ class StatusServiceTest {
             waiting.shutdown();
         }
         assertThat(status.snapshot().deletes()).isEqualTo(noDeletes());
+    }
+
+    @Test
+    void keptCountsTheFramesNoWindowHasTakenYet() throws Exception {
+        assertThat(service.snapshot().kept()).isEqualTo(new StatusSnapshot.KeptStatus(0));
+        assertThat(new ObjectMapper().writeValueAsString(service.snapshot()))
+                .contains("\"kept\":{\"frames\":0}");
+
+        // A queued delete failed while the window was closed to the tray, and another after it.
+        when(socket.keptFrames()).thenReturn(2);
+        assertThat(service.snapshot().kept()).isEqualTo(new StatusSnapshot.KeptStatus(2));
+        assertThat(new ObjectMapper().writeValueAsString(service.snapshot()))
+                .contains("\"kept\":{\"frames\":2}");
     }
 
     // ── helpers ─────────────────────────────────────────────────────────────

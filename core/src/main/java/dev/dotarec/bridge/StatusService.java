@@ -24,23 +24,28 @@ public class StatusService {
     private final ObsDemand obsDemand;
     private final LowDiskState lowDiskState;
     private final DeleteQueue deletes;
+    private final StatusWebSocket socket;
 
     // @Lazy breaks the construction cycle StatusService -> MatchFsm -> EventPublisher ->
     // StatusService. MatchFsm is only dereferenced at runtime in snapshot(), so a lazy proxy is
-    // safe and keeps the core domain bean free of presentation-layer wiring concerns.
+    // safe and keeps the core domain bean free of presentation-layer wiring concerns. The socket is
+    // lazy for the same reason (StatusWebSocket primes each new session from this service), and is
+    // likewise only read in snapshot().
     public StatusService(
             GsiHeartbeat gsiHeartbeat,
             ObsHealth obsHealth,
             @Lazy MatchFsm matchFsm,
             ObsDemand obsDemand,
             LowDiskState lowDiskState,
-            DeleteQueue deletes) {
+            DeleteQueue deletes,
+            @Lazy StatusWebSocket socket) {
         this.gsiHeartbeat = gsiHeartbeat;
         this.obsHealth = obsHealth;
         this.matchFsm = matchFsm;
         this.obsDemand = obsDemand;
         this.lowDiskState = lowDiskState;
         this.deletes = deletes;
+        this.socket = socket;
     }
 
     /** Builds a point-in-time snapshot of recorder status. */
@@ -68,7 +73,8 @@ public class StatusService {
                 new StatusSnapshot.DeleteStatus(
                         deletes.pendingIds(DeleteQueue.Kind.MATCH),
                         deletes.pendingIds(DeleteQueue.Kind.CLIP));
+        StatusSnapshot.KeptStatus kept = new StatusSnapshot.KeptStatus(socket.keptFrames());
 
-        return new StatusSnapshot(gsi, obs, fsm, storage, pendingDeletes);
+        return new StatusSnapshot(gsi, obs, fsm, storage, pendingDeletes, kept);
     }
 }

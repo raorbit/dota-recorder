@@ -33,6 +33,7 @@ const idle: StatusReading = {
   fsmState: 'IDLE',
   lowDisk: null,
   deletesPending: false,
+  framesKept: false,
 };
 const orphaned: StatusReading = { ...idle, recording: true };
 const liveMatch: StatusReading = { ...idle, wanted: true, recording: true, fsmState: 'RECORDING' };

@@ -763,9 +763,9 @@ async function pollStatus(): Promise<StatusReading | null> {
 /**
  * The unattended-install gate for a downloaded update: idle means nothing is arming, recording or
  * stopping, OBS is not wanted (Dota closed, no GSI frames for 30 s, no preview open), the core has no
- * delete still to do, the window is closed to the tray, and no shutdown is underway (see
- * idleForInstall). Fail-safe to false: an unreachable core, or any doubt, keeps the update waiting for
- * a quieter moment or for the user's own click.
+ * delete still to do and no delete failure kept for a window, the window is closed to the tray, and
+ * no shutdown is underway (see idleForInstall). Fail-safe to false: an unreachable core, or any
+ * doubt, keeps the update waiting for a quieter moment or for the user's own click.
  */
 async function isIdleForInstall(): Promise<boolean> {
   if (shuttingDown || isQuitting || mainWindow !== null) return false;
