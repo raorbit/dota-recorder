@@ -78,7 +78,9 @@ check(
 // before the system's. Anything the user ran could leave a cmd.exe or a netsh.exe there for the
 // installer to start instead, and the firewall step starts both elevated. So everything the hooks
 // in build-resources start, and everything a cmd line they start runs, has to be named by its full
-// path. This ports the Go remake's guard (build/windows/installer_windows_test.go); this reader
+// path, with no .. in it, and one started elevated ("runas") from the system's folders, not the
+// install folder or $PLUGINSDIR, which the user can write to. This ports the Go remake's guard
+// (build/windows/installer_windows_test.go); this reader
 // also reads the switches cmd is given before its /c, NSIS's comments, LogicLib's one-liners, and
 // cmd's quotes, escapes, redirections, groups and own commands.
 //
@@ -118,15 +120,25 @@ check(
 const buildResources = path.join(repoRoot, 'build-resources');
 
 // The folders a program may be named from: the system's, and the ones the installer fills itself.
-// $EXEDIR, the folder the installer was started from, is the one to keep away from.
-const programRoots = ['$SYSDIR\\', '$WINDIR\\', '$INSTDIR\\', '$PLUGINSDIR\\'];
+// $EXEDIR, the folder the installer was started from, is the one to keep away from. A program
+// started elevated ("runas") has to come from the system's: a per-user install folder and
+// $PLUGINSDIR (in TEMP) are the user's to write, so anything the user runs could swap the program
+// before it runs with an administrator's rights.
+const systemRoots = ['$SYSDIR\\', '$WINDIR\\'];
+const programRoots = [...systemRoots, '$INSTDIR\\', '$PLUGINSDIR\\'];
 
-function hasFullPath(program) {
-  return programRoots.some(
+// A .. climbs out of its root: "$SYSDIR\..\x.exe" is in the folder above the system's.
+function isUnder(program, roots) {
+  if (/(^|[\\/])\.\.([\\/]|$)/.test(program)) return false;
+  return roots.some(
     (root) =>
       program.length > root.length &&
       program.slice(0, root.length).toLowerCase() === root.toLowerCase(),
   );
+}
+
+function hasFullPath(program) {
+  return isUnder(program, programRoots);
 }
 
 // Windows runs a .cmd or .bat through cmd, even with dots or spaces after the name, which it drops.
@@ -261,9 +273,15 @@ function programsStarted(line) {
     case 'nsexec::exectostack':
       return rest.length === 0 ? [] : withCmdCommands(...splitCommandLine(rest[0]));
     case 'execshell':
-    case 'execshellwait':
-      // The verb, then the file, then its parameters.
-      return rest.length < 2 || isUrl(rest[1]) ? [] : withCmdCommands(rest[1], rest[2] ?? '');
+    case 'execshellwait': {
+      // The verb, then the file, then its parameters. "runas" starts the file elevated, and so
+      // everything a cmd it starts runs.
+      if (rest.length < 2 || isUrl(rest[1])) return [];
+      const started = withCmdCommands(rest[1], rest[2] ?? '');
+      return /^runas$/i.test(rest[0])
+        ? started.map((each) => ({ ...each, elevated: true }))
+        : started;
+    }
     default:
       return [];
   }
@@ -435,7 +453,7 @@ function installerProblems(text) {
   const problems = [];
   let programs = 0;
   for (const { number, words } of scriptInstructions(text)) {
-    for (const { program, switches, command, runs, piped } of programsStarted(words)) {
+    for (const { program, switches, command, runs, piped, elevated } of programsStarted(words)) {
       if (runs != null) {
         problems.push({ number, problem: 'unread', name: runs });
         continue;
@@ -446,6 +464,9 @@ function installerProblems(text) {
       }
       programs++;
       if (!hasFullPath(program)) problems.push({ number, problem: 'bare', name: program });
+      else if (elevated && !isUnder(program, systemRoots)) {
+        problems.push({ number, problem: 'elevated', name: program });
+      }
       if (isBatchFile(program)) problems.push({ number, problem: 'batch', name: program });
       if (switches != null && command == null) {
         problems.push({ number, problem: 'no /c', name: program });
@@ -465,6 +486,8 @@ function installerProblems(text) {
 const problemMessages = {
   bare: (program) =>
     `starts "${program}" without its full path, so Windows could start a copy left in the installer's folder or the install folder instead. Name it from ${programRoots.join(', ')}.`,
+  elevated: (program) =>
+    `starts "${program}" elevated ("runas") from a folder the user can write to (a per-user install folder, or $PLUGINSDIR in TEMP), so anything the user runs could swap it for a program of its own, which would then run with an administrator's rights. Start an elevated program from ${systemRoots.join(' or ')}.`,
   batch: (file) =>
     `starts the batch file "${file}", whose commands this check doesn't read, and which Windows runs in a cmd without /d when an exec instruction starts it. Run those commands through "$SYSDIR\\cmd.exe" /d /c instead.`,
   'no /c': () =>
@@ -543,7 +566,16 @@ for (const [script, want] of readerCases) {
   );
 }
 // A bare name has to stay bare.
-for (const bare of ['cmd', 'cmd.exe', '.\\cmd.exe', '$EXEDIR\\cmd.exe', '$CmdPath']) {
+for (const bare of [
+  'cmd',
+  'cmd.exe',
+  '.\\cmd.exe',
+  '$EXEDIR\\cmd.exe',
+  '$CmdPath',
+  '$SYSDIR\\..\\x.exe',
+  '$INSTDIR\\a\\..\\..\\x.exe',
+  '$WINDIR\\..',
+]) {
   check(!hasFullPath(bare), `the installer check takes "${bare}" for a full path.`);
 }
 // cmd reads a /d after its /c as part of the command, so only one before it counts.
@@ -636,12 +668,26 @@ const problemCases = [
       String.raw`ExecWait '"$SYSDIR\cmd.exe" /d /c ""$PLUGINSDIR\fw.cmd" & "$SYSDIR\netsh.exe" a"'`,
     ].join('\n'),
     [
+      '1 elevated $PLUGINSDIR\\fw.cmd',
       '1 batch $PLUGINSDIR\\fw.cmd',
       '2 batch $INSTDIR\\fw.BAT',
       '3 batch $PLUGINSDIR\\fw.cmd.',
       '4 nsis variable $PLUGINSDIR',
       '4 batch $PLUGINSDIR\\fw.cmd',
     ],
+  ],
+  // A program started elevated, from a folder the user can write to, in any case of the verb; the
+  // same programs started without "runas", or elevated from the system's folder, are fine.
+  [
+    [
+      String.raw`ExecShellWait "runas" "$INSTDIR\helper.exe" "" SW_HIDE`,
+      String.raw`ExecShell "RunAs" "$PLUGINSDIR\x.exe"`,
+      String.raw`ExecShell "open" "$INSTDIR\app.exe"`,
+      String.raw`ExecWait '"$INSTDIR\helper.exe" /quiet'`,
+      String.raw`ExecShellWait "runas" "$SYSDIR\netsh.exe" "a" SW_HIDE`,
+      String.raw`ExecShellWait "runas" "$SYSDIR\..\x.exe" "" SW_HIDE`,
+    ].join('\n'),
+    ['1 elevated $INSTDIR\\helper.exe', '2 elevated $PLUGINSDIR\\x.exe', '6 bare $SYSDIR\\..\\x.exe'],
   ],
   // cmd's call, start, if and for run a command this check doesn't read.
   [
