@@ -42,14 +42,16 @@ public class ObsConnectionScheduler {
 
     /**
      * How many ticks in a row the recording flag has outlived the connection with no OBS process
-     * found. Only the scheduler thread touches it.
+     * found, where the one that held the output wasn't named. Only the scheduler thread touches it.
      */
     private int obsGoneTicks = 0;
 
     /**
-     * Ticks OBS must look gone before the flag is cleared. The scan can miss a live OBS (one that runs
-     * elevated can't be read by this process), and a socket blip to a live OBS reconnects within a
-     * tick, so a single miss is never enough.
+     * Ticks OBS must look gone before the flag is cleared, where the OBS that held the output wasn't
+     * named. The scan for any OBS can miss a live one (one that runs elevated can't be read by this
+     * process), and a socket blip to a live OBS reconnects within a tick, so a single miss is never
+     * enough there. A named OBS that has exited is no miss: its pid and start are checked, not
+     * matched by command, so the flag goes on the first tick that finds it gone.
      */
     static final int OBS_GONE_TICKS_TO_CLEAR = 2;
 
@@ -136,17 +138,30 @@ public class ObsConnectionScheduler {
      * comes back to reconnect to (its relaunch budget spent) the stale flag kept OBS wanted and the
      * app busy for good: Electron never saw the need end, so it never refilled that budget, and OBS
      * stayed down until the app restarted. The flag only matters while disconnected, so only then
-     * is the process table scanned, and OBS must look gone on {@link #OBS_GONE_TICKS_TO_CLEAR} ticks
-     * in a row.
+     * is the process table looked at.
      *
      * <p>The OBS that held the output is the process the last connection reached, when that one was
-     * named, and the flag goes once it has exited even while Electron's relaunch of it runs. Kept
-     * until the relaunch's websocket came up, the flag sent a finalize in that window down the
-     * still-recording stop retry, which saved the row without the file the recording knew. Where no
-     * process was named, any process running this app's OBS keeps the flag.
+     * named, and the flag goes on the first tick that finds it exited, even while Electron's
+     * relaunch of it runs. Kept until the relaunch's websocket came up, or for a second tick, the
+     * flag sent a finalize in that window down the still-recording stop retry, which saved the row
+     * without the file the recording knew. Where no process was named, any process running this
+     * app's OBS keeps the flag, and OBS must look gone on {@link #OBS_GONE_TICKS_TO_CLEAR} ticks in
+     * a row.
      */
     private void clearRecordingIfObsExited() {
-        if (health.isConnected() || !health.isRecording() || recordingObsRuns()) {
+        if (health.isConnected() || !health.isRecording()) {
+            obsGoneTicks = 0;
+            return;
+        }
+        ObsProcess held = obsController.connectedObsProcess();
+        if (held != null) {
+            obsGoneTicks = 0;
+            if (!obsController.isObsRunning(held)) {
+                clearRecording();
+            }
+            return;
+        }
+        if (obsProcessRunning.getAsBoolean()) {
             obsGoneTicks = 0;
             return;
         }
@@ -154,14 +169,12 @@ public class ObsConnectionScheduler {
             return;
         }
         obsGoneTicks = 0;
+        clearRecording();
+    }
+
+    private void clearRecording() {
         health.setRecording(false);
         log.warn("OBS exited while recording; it is recording nothing now, so the recording flag"
                 + " is cleared");
-    }
-
-    /** Whether the OBS that held the output still runs; see {@link #clearRecordingIfObsExited()}. */
-    private boolean recordingObsRuns() {
-        ObsProcess held = obsController.connectedObsProcess();
-        return held != null ? obsController.isObsRunning(held) : obsProcessRunning.getAsBoolean();
     }
 }

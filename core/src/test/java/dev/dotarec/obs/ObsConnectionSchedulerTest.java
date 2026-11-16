@@ -45,7 +45,7 @@ class ObsConnectionSchedulerTest {
         obsProcessRunning = false;
 
         scheduler.tryConnectAndConfigure();
-        assertThat(health.isRecording()).isTrue(); // one miss is never enough
+        assertThat(health.isRecording()).isTrue(); // with no OBS named, one miss is never enough
         scheduler.tryConnectAndConfigure();
 
         assertThat(health.isRecording()).isFalse();
@@ -111,17 +111,17 @@ class ObsConnectionSchedulerTest {
     }
 
     @Test
-    void anObsThatCrashedMidRecording_noLongerCountsAsRecording_whileItsRelaunchRuns() {
+    void aNamedObsThatCrashedMidRecording_noLongerCountsAsRecording_onTheFirstTick_whileItsRelaunchRuns() {
         // Electron relaunched the crashed OBS at once, but the relaunch's websocket isn't up yet.
         // The relaunch running says nothing about the crashed one's output: with its flag kept, a
-        // finalize now takes the still-recording stop retry and saves the row without its file.
+        // finalize now takes the still-recording stop retry and saves the row without its file. A
+        // named OBS found gone is no scan's miss, so one tick clears it: a second one left a 5-10s
+        // window for that finalize.
         health.setRecording(true);
         when(obs.connectedObsProcess()).thenReturn(OBS_RUN);
         when(obs.isObsRunning(OBS_RUN)).thenReturn(false);
         obsProcessRunning = true; // the relaunched OBS
 
-        scheduler.tryConnectAndConfigure();
-        assertThat(health.isRecording()).isTrue(); // one miss is never enough
         scheduler.tryConnectAndConfigure();
 
         assertThat(health.isRecording()).isFalse();
