@@ -549,6 +549,27 @@ class RecordingArchiverTest {
     }
 
     @Test
+    void interruptedCopyOfTheVodTheSweepEvicts_isRemovedInTheSamePass() throws Exception {
+        // A pass ended mid-copy was most likely moving the oldest unstarred VOD, the same one the
+        // budget sweep evicts first. Its copy has to go before the sweep deletes that VOD and nulls its
+        // row: after that nothing names the copy, and it would stay on the archive drive for good.
+        Path archive = configureArchive("hdd", 1); // sum-of-caps budget = 1 (active) + 1 = 2 GiB
+        settings.get().retentionCapGb = 1;
+        Path thumbs = Files.createDirectories(archive.resolve("thumbs"));
+        long oldest = seed(videoDir, "a.mp4", "a.jpg", GIB, 1_000L, false);
+        seed(videoDir, "b.mp4", "b.jpg", GIB, 2_000L, false);
+        seed(videoDir, "c.mp4", "c.jpg", GIB, 3_000L, false);
+        Path copy = Files.writeString(archive.resolve(oldest + "-a.mp4.partial"), "half");
+        Path thumbCopy = Files.writeString(thumbs.resolve(oldest + "-a.jpg.partial"), "half");
+
+        archiver.archive(null);
+
+        assertThat(matches.findById(oldest).orElseThrow().videoPath()).as("evicted").isNull();
+        assertThat(copy).doesNotExist();
+        assertThat(thumbCopy).doesNotExist();
+    }
+
+    @Test
     void partialsNotLeftForARowWhoseFileIsStillThere_areLeftAlone() throws Exception {
         // An archive dir can be the user's own folder, a whole drive even, and other tools give their
         // in-flight files the same suffix. Only the exact copy this archiver writes for a row whose own
