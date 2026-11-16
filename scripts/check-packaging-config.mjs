@@ -315,8 +315,8 @@ function cmdCommands(line) {
   return commands;
 }
 
-// cmd's own commands. Windows doesn't look these up, so they need no path, but call, start, if
-// and for run another command, which this check doesn't read.
+// cmd's own commands. cmd runs these itself rather than looking them up, so they need no path,
+// but call, start, if and for run another command, which this check doesn't read.
 const cmdOwnCommands = new Set(
   [
     'assoc break cd chdir cls color copy date del dir dpath echo endlocal erase exit ftype goto',
@@ -330,7 +330,10 @@ const cmdCommandRunners = new Set(['call', 'start', 'if', 'for']);
 
 // What one command of a cmd line starts. cmd skips an @, and the separators , ; and =, before a
 // command, and a redirection can come first too. It takes a name for one of its own commands even
-// with one of . ( / \ : + [ ] < > straight after it (echo.exe runs echo), but not in quotes.
+// with one of ( / : + [ ] < > straight after it (echo( prints a blank line), but not in quotes.
+// With a . or \ after the name it first looks for a file of that whole name in the folder it works
+// in, and runs that if there is one: ver.exe, echo\x.exe, even echo. when that folder holds files
+// named echo and echo..exe. So this check reads such a word as a program.
 function cmdCommandStarts(command) {
   let rest = command;
   for (;;) {
@@ -340,7 +343,7 @@ function cmdCommandStarts(command) {
     rest = rest.slice(redirection[0].length);
   }
   if (rest === '') return [];
-  const own = /^[a-z]+(?=$|[\s.(;,=+[\]:\\/<>])/i.exec(rest)?.[0].toLowerCase();
+  const own = /^[a-z]+(?=$|[\s(;,=+[\]:/<>])/i.exec(rest)?.[0].toLowerCase();
   if (cmdCommandRunners.has(own)) return [{ runs: own }];
   if (cmdOwnCommands.has(own)) return [];
   return withCmdCommands(...splitCmdCommand(rest));
@@ -483,6 +486,11 @@ const problemCases = [
     String.raw`ExecWait '"$SYSDIR\cmd.exe" /d /c ("$SYSDIR\netsh.exe" a & 2>"%TEMP%\fw log.txt" "$SYSDIR\netsh.exe" b & ver) 2>nul & exit /b 0 || ver >nul & @echo done'`,
     [],
   ],
+  // The characters after one of cmd's own names that still leave it cmd's own command.
+  [
+    String.raw`ExecWait '"$SYSDIR\cmd.exe" /d /c echo( & echo:a & echo+a & echo[a & echo]a & echo/a & echo;a & echo,a & echo=a & ver>nul & ver<nul'`,
+    [],
+  ],
   // A URL isn't looked up on disk, though a path on a drive is still a path. A comment isn't run,
   // nor is the line after a comment that ends in a backslash.
   [`ExecShell "open" "https://example.com/welcome"`, []],
@@ -510,6 +518,11 @@ const problemCases = [
     ['1 bare netsh', '1 bare ver', '1 bare netsh'],
   ],
   [String.raw`/* was: cmd */ ExecWait '"$SYSDIR\cmd.exe" /d /c netsh a'`, ['1 bare netsh']],
+  // One of cmd's own names with a . or \ after it, which cmd looks up as a file first.
+  [
+    String.raw`ExecWait '"$SYSDIR\cmd.exe" /d /c ver.exe & echo. done & echo\tools\fw.exe & cd..'`,
+    ['1 bare ver.exe', '1 bare echo.', '1 bare echo\\tools\\fw.exe', '1 bare cd..'],
+  ],
   // cmd's call, start, if and for run a command this check doesn't read.
   [
     String.raw`ExecWait '"$SYSDIR\cmd.exe" /d /c call x.cmd & start "" y & if exist z "$SYSDIR\netsh.exe" a & for %i in (a) do w'`,
