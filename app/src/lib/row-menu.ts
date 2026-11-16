@@ -3,10 +3,10 @@
 
 /**
  * The rows the menu opened on `clickedId` acts on: the whole multi-selection when the clicked row is
- * part of it, otherwise just that row. Only rows still listed count: the selection can still hold the
- * id of a row that has left the list since it was picked (deleted on its own from its menu, or from
- * the player's strip), and counting it would show "3 SELECTED" for two rows and send a delete for a
- * row that is gone. The clicked row always counts, since the menu was opened on it.
+ * part of it, otherwise just that row. Only rows still listed count. The tables already drop a row
+ * from the selection once it leaves the list (see row-selection.ts), so this is a second guard: a
+ * selected id that isn't listed would show "3 SELECTED" for two rows and send a delete for a row
+ * that is gone. The clicked row always counts, since the menu was opened on it.
  */
 export function menuTargetIds(
   selection: ReadonlySet<number>,
