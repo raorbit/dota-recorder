@@ -21,7 +21,11 @@ describe('menuTargetIds', () => {
     expect(menuTargetIds(new Set([7, 8, 9]), 8, listed(8, 9))).toEqual([8, 9]);
   });
 
-  it('always keeps the clicked row', () => {
-    expect(menuTargetIds(new Set([7, 8]), 8, listed(7))).toEqual([7, 8]);
+  it('acts on nothing once the clicked row is no longer listed', () => {
+    // The menu stayed open on clip 50 while its queued delete finished. The clip cut next takes id
+    // 50, so the menu must not act on that id any more.
+    expect(menuTargetIds(new Set([50]), 50, listed(49))).toEqual([]);
+    expect(menuTargetIds(new Set(), 50, listed(49))).toEqual([]);
+    expect(menuTargetIds(new Set([7, 8]), 8, listed(7))).toEqual([]);
   });
 });
