@@ -7,7 +7,9 @@ package dev.dotarec.obs;
  * Once a second run of OBS fails this way, or the OBS that took the request crashed while it
  * started the output, the FSM switches an auto-picked hardware encoder to x264 (see
  * {@link dev.dotarec.obs.setup.EncoderFallback}). A video folder that is missing or full fails the
- * same way, before OBS opens any encoder; the fallback leaves the encoder alone then.
+ * same way, before OBS opens any encoder; the fallback leaves the encoder alone then. One that
+ * exists but can't be written to fails the same way after the encoder opened; the fallback can't
+ * tell that apart, so it still counts toward x264.
  */
 public class ObsStartNotConfirmedException extends ObsException {
 

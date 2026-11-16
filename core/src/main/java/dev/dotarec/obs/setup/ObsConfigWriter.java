@@ -177,20 +177,22 @@ public class ObsConfigWriter implements EncoderFallback {
      * to load x264. The profile names the one token as both the recording and the streaming encoder
      * (the default Stream quality records with the latter), so both switch.
      *
-     * <p>Nothing is switched while OBS can't record into the profile's video folder at all: the
-     * folder is missing (an unplugged drive), or its drive has under {@link #OBS_MIN_FREE_BYTES}
-     * free. OBS turns a start down for either before it opens any encoder, on every run, so it looks
-     * just like an encoder that can't open; switching then would only CPU-encode every match for the
-     * rest of the process once the folder is back. That is logged instead, and the next call checks
-     * again.
+     * <p>Nothing is switched while the profile's video folder is missing (an unplugged drive), or
+     * its drive has under {@link #OBS_MIN_FREE_BYTES} free. OBS turns a start down for either before
+     * it opens any encoder, on every run, so it looks just like an encoder that can't open; switching
+     * then would only CPU-encode every match for the rest of the process once the folder is back.
+     * That is logged instead, and the next call checks again. A folder that exists but OBS can't
+     * write into (read-only media, changed permissions, Controlled Folder Access) is not detected:
+     * OBS opens the encoder before it fails to create the file, so those starts still count toward
+     * the switch.
      *
      * <p>Only "auto" is switched. An encoder picked in Settings is the user's: it is kept, and the
      * failure logged. Settings are not touched, so the UI keeps showing Auto, and the next launch
      * probes the GPU again (a driver update may have fixed the encoder by then).
      *
      * @return true when the profile now names x264 where it named a hardware encoder; false when
-     *     there was nothing to switch, OBS can't record into the video folder, or the profile could
-     *     not be written (the probed encoder is then kept, so the next call tries again)
+     *     there was nothing to switch, the video folder is missing or its drive nearly full, or the
+     *     profile could not be written (the probed encoder is then kept, so the next call tries again)
      */
     @Override
     public synchronized boolean fallBackToX264() {
@@ -245,8 +247,10 @@ public class ObsConfigWriter implements EncoderFallback {
      * things first: that the folder exists ({@code OutputPathValid}, which asks
      * {@code QDir(path).exists()}), and that its drive has at least {@link #OBS_MIN_FREE_BYTES}
      * free to this user ({@code LowDiskSpace}, which reads what {@link FileStore#getUsableSpace()}
-     * reads). Either failing shows an error dialog in OBS and starts nothing. A check that can't be
-     * made here blames nothing, so a broken encoder is still switched.
+     * reads). Either failing shows an error dialog in OBS and starts nothing. A folder that exists
+     * but can't be written to passes both, and nothing here tries a write: OBS fails that start only
+     * after it opened the encoders. A check that can't be made here blames nothing, so a broken
+     * encoder is still switched.
      */
     private String folderRefusal(String folder) {
         Path dir;

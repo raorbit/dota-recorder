@@ -169,7 +169,9 @@ public class MatchFsm {
      * open or a lost renderer; a fresh OBS failing the same way points at the encoder. So a run
      * counts once however often it fails: while the restarter refuses (it spaces restarts out), the
      * same OBS fails again, which says nothing new. A video folder OBS can't record into fails every
-     * run too, before any encoder opens; the fallback checks for that itself.
+     * run too. The fallback itself leaves the encoder alone while the folder is missing or its drive
+     * has under 50 MB free, which OBS refuses before any encoder opens; a folder that exists but
+     * can't be written to isn't told apart, and still counts toward x264.
      */
     static final int UNCONFIRMED_STARTS_BEFORE_X264 = 2;
 
