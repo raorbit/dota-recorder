@@ -20,6 +20,7 @@ import static org.mockito.Mockito.when;
 import dev.dotarec.config.SettingsStore;
 import dev.dotarec.config.SettingsStore.AudioSource;
 import dev.dotarec.config.TimeSource;
+import dev.dotarec.obs.ObsEvents.OutputIdle;
 import io.obswebsocket.community.client.OBSCommunicator;
 import io.obswebsocket.community.client.OBSRemoteController;
 import io.obswebsocket.community.client.message.response.general.GetVersionResponse;
@@ -93,8 +94,8 @@ class ObsControllerTest {
     @Test
     void startRecording_whenCorrectiveStopTimesOut_keepsRecordingFlagForRetry() {
         ObsHealth health = new ObsHealth();
-        ObsController controller =
-                new ObsController(null, health, new ObsEvents(health, mock(CaptureBlackFrameGuard.class)), sceneConfigurer());
+        ObsEvents events = new ObsEvents(health, mock(CaptureBlackFrameGuard.class));
+        ObsController controller = new ObsController(null, health, events, sceneConfigurer());
 
         OBSRemoteController obs = mock(OBSRemoteController.class);
         // A timed-out StopRecord returns null from the library -- it does NOT throw.
@@ -113,6 +114,64 @@ class ObsControllerTest {
                 .isTrue();
         // And we must not have issued a StartRecord OBS would reject while still recording.
         verify(obs, never()).startRecord(anyLong());
+        assertThat(events.awaitOutputIdle(200, 0))
+                .as("a corrective stop OBS never answered leaves no stop wait armed")
+                .isEqualTo(OutputIdle.READY);
+    }
+
+    @Test
+    void startRecording_whenCorrectiveStopThrows_leavesNoStopWaitBehind() {
+        ObsHealth health = new ObsHealth();
+        ObsEvents events = new ObsEvents(health, mock(CaptureBlackFrameGuard.class));
+        ObsController controller = new ObsController(null, health, events, sceneConfigurer());
+
+        OBSRemoteController obs = mock(OBSRemoteController.class);
+        when(obs.stopRecord(anyLong())).thenThrow(new RuntimeException("socket closed"));
+        ReflectionTestUtils.setField(controller, "controller", obs);
+        health.setConnected(true);
+        health.setRecording(true);
+
+        assertThatThrownBy(controller::startRecording).isInstanceOf(ObsException.class);
+
+        verify(obs, never()).startRecord(anyLong());
+        assertThat(events.awaitOutputIdle(200, 0)).isEqualTo(OutputIdle.READY);
+    }
+
+    @Test
+    void startRecording_afterACorrectiveStop_holdsStartRecordUntilObsReportsStopped() throws Exception {
+        // The corrective stop is a stop like any other: OBS answers it and closes the file later.
+        ObsHealth health = new ObsHealth();
+        ObsEvents events = new ObsEvents(health, mock(CaptureBlackFrameGuard.class));
+        ObsController controller = new ObsController(null, health, events, sceneConfigurer());
+
+        OBSRemoteController obs = mock(OBSRemoteController.class);
+        StopRecordResponse stopOk = mock(StopRecordResponse.class);
+        when(stopOk.isSuccessful()).thenReturn(true);
+        when(obs.stopRecord(anyLong())).thenReturn(stopOk); // answered; no STOPPED event yet
+        StartRecordResponse startOk = mock(StartRecordResponse.class);
+        when(startOk.isSuccessful()).thenReturn(true);
+        when(obs.startRecord(anyLong()))
+                .thenAnswer(
+                        inv -> {
+                            events.onRecordStateChanged(ObsEvents.OUTPUT_STARTED, null);
+                            return startOk;
+                        });
+        ReflectionTestUtils.setField(controller, "controller", obs);
+        health.setConnected(true);
+        health.setRecording(true); // a dangling recording, so the start begins with a corrective stop
+
+        Thread fsm = new Thread(controller::startRecording);
+        fsm.start();
+
+        verify(obs, after(200).never()).startRecord(anyLong());
+
+        events.onRecordStateChanged(ObsEvents.OUTPUT_STOPPED, "C:\\videos\\dangling.mkv");
+        fsm.join(5_000);
+
+        assertThat(fsm.isAlive()).as("the start must go through once OBS has stopped").isFalse();
+        InOrder order = inOrder(obs);
+        order.verify(obs).stopRecord(anyLong());
+        order.verify(obs).startRecord(anyLong());
     }
 
     @Test
@@ -242,8 +301,36 @@ class ObsControllerTest {
     }
 
     @Test
-    void startRecording_whenObsNeverReportsStopped_sendsStartRecordAfterTheBound() {
-        // A lost STOPPED event must cost one bounded wait, never the ability to record.
+    void startRecording_whileObsIsStillClosingTheFile_sendsNothingAndFails() {
+        // A close slower than one attempt's wait: sending StartRecord now, and again on every frame
+        // after, is what lands one on the instant the stop completes. The attempt fails instead, the
+        // FSM stays IDLE, and the next frame waits on the same stop.
+        ObsHealth health = new ObsHealth();
+        ObsEvents events = new ObsEvents(health, mock(CaptureBlackFrameGuard.class));
+        ObsController controller = new ObsController(null, health, events, sceneConfigurer());
+
+        OBSRemoteController obs = mock(OBSRemoteController.class);
+        StopRecordResponse stopOk = mock(StopRecordResponse.class);
+        when(stopOk.isSuccessful()).thenReturn(true);
+        when(obs.stopRecord(anyLong())).thenReturn(stopOk);
+        ReflectionTestUtils.setField(controller, "controller", obs);
+        ReflectionTestUtils.setField(controller, "stopConfirmTimeoutMs", 50L);
+        health.setConnected(true);
+
+        controller.stopRecording();
+
+        assertThatThrownBy(controller::startRecording)
+                .isInstanceOf(ObsException.class)
+                .isNotInstanceOf(ObsStartNotConfirmedException.class) // that one restarts OBS
+                .hasMessageContaining("still closing");
+        assertThatThrownBy(controller::startRecording).isInstanceOf(ObsException.class);
+
+        verify(obs, never()).startRecord(anyLong());
+    }
+
+    @Test
+    void startRecording_whenTheStoppedEventIsLost_sendsStartRecordOncePastTheGiveUp() {
+        // A lost STOPPED event may delay the next recording, never prevent it.
         ObsHealth health = new ObsHealth();
         ObsEvents events = new ObsEvents(health, mock(CaptureBlackFrameGuard.class));
         ObsController controller = new ObsController(null, health, events, sceneConfigurer());
@@ -262,15 +349,63 @@ class ObsControllerTest {
                         });
         ReflectionTestUtils.setField(controller, "controller", obs);
         ReflectionTestUtils.setField(controller, "stopConfirmTimeoutMs", 50L);
+        // A second against a 50ms attempt: wide enough that a stalled CI runner cannot carry the
+        // first attempt past the give-up.
+        ReflectionTestUtils.setField(controller, "stopGiveUpMs", 1_000L);
         health.setConnected(true);
 
         controller.stopRecording();
-        controller.startRecording();
 
+        // 50ms after the stop: inside the give-up, so the first attempt holds off.
+        assertThatThrownBy(controller::startRecording).isInstanceOf(ObsException.class);
+        verify(obs, never()).startRecord(anyLong());
+
+        // Attempts keep waiting 50ms each; the first to end past the give-up sends.
+        long deadline = System.nanoTime() + 5_000_000_000L;
+        boolean started = false;
+        while (!started && System.nanoTime() < deadline) {
+            try {
+                controller.startRecording();
+                started = true;
+            } catch (ObsException stillClosing) {
+                // expected until the give-up passes
+            }
+        }
+
+        assertThat(started).as("the start goes through once the give-up has passed").isTrue();
         verify(obs).startRecord(anyLong());
-        // The wait is dropped with the give-up, so a retry of the start would not sit through it
-        // again (a long timeout here would hang the test if it did).
-        assertThat(events.awaitOutputIdle(60_000, 0)).isTrue();
+        assertThat(events.awaitOutputIdle(200, 0))
+                .as("giving up drops the wait")
+                .isEqualTo(OutputIdle.READY);
+    }
+
+    @Test
+    void startRecording_interruptedWhileWaitingForTheStop_sendsNothing() {
+        // The library sends a request before it waits for the answer, and that wait fails at once on
+        // an interrupted thread: a StartRecord sent here would leave OBS recording an untracked file.
+        ObsHealth health = new ObsHealth();
+        ObsEvents events = new ObsEvents(health, mock(CaptureBlackFrameGuard.class));
+        ObsController controller = new ObsController(null, health, events, sceneConfigurer());
+
+        OBSRemoteController obs = mock(OBSRemoteController.class);
+        StopRecordResponse stopOk = mock(StopRecordResponse.class);
+        when(stopOk.isSuccessful()).thenReturn(true);
+        when(obs.stopRecord(anyLong())).thenReturn(stopOk);
+        ReflectionTestUtils.setField(controller, "controller", obs);
+        health.setConnected(true);
+
+        controller.stopRecording();
+        Thread.currentThread().interrupt();
+        try {
+            assertThatThrownBy(controller::startRecording)
+                    .isInstanceOf(ObsException.class)
+                    .hasMessageContaining("Interrupted");
+            assertThat(Thread.currentThread().isInterrupted()).isTrue();
+        } finally {
+            Thread.interrupted(); // do not leak the flag into the next test on this thread
+        }
+
+        verify(obs, never()).startRecord(anyLong());
     }
 
     @Test
@@ -288,7 +423,71 @@ class ObsControllerTest {
 
         assertThatThrownBy(controller::stopRecording).isInstanceOf(ObsException.class);
 
-        assertThat(events.awaitOutputIdle(60_000, 0)).isTrue();
+        // Short timeout: an armed wait reads STILL_STOPPING here at once, not a hang.
+        assertThat(events.awaitOutputIdle(200, 0)).isEqualTo(OutputIdle.READY);
+    }
+
+    @Test
+    void stopRecording_whenTheRequestThrows_leavesNoStopWaitBehind() {
+        ObsHealth health = new ObsHealth();
+        ObsEvents events = new ObsEvents(health, mock(CaptureBlackFrameGuard.class));
+        ObsController controller = new ObsController(null, health, events, sceneConfigurer());
+
+        OBSRemoteController obs = mock(OBSRemoteController.class);
+        when(obs.stopRecord(anyLong())).thenThrow(new RuntimeException("socket closed"));
+        ReflectionTestUtils.setField(controller, "controller", obs);
+        health.setConnected(true);
+
+        assertThatThrownBy(controller::stopRecording).isInstanceOf(RuntimeException.class);
+
+        assertThat(events.awaitOutputIdle(200, 0)).isEqualTo(OutputIdle.READY);
+    }
+
+    @Test
+    void stopQuietly_armsTheStopWait_onlyWhenObsTookTheStop() {
+        // The cleanup after an unconfirmed start is a real StopRecord. When the healer declines to
+        // restart OBS, the next frame starts on the same connection and must wait this stop out.
+        ObsHealth health = new ObsHealth();
+        ObsEvents events = new ObsEvents(health, mock(CaptureBlackFrameGuard.class));
+        ObsController controller = new ObsController(null, health, events, sceneConfigurer());
+
+        OBSRemoteController obs = mock(OBSRemoteController.class);
+        StopRecordResponse stopOk = mock(StopRecordResponse.class);
+        when(stopOk.isSuccessful()).thenReturn(true);
+        when(obs.stopRecord(anyLong())).thenReturn(stopOk, (StopRecordResponse) null);
+        ReflectionTestUtils.setField(controller, "controller", obs);
+
+        ReflectionTestUtils.invokeMethod(controller, "stopQuietly");
+        assertThat(events.awaitOutputIdle(50, 0))
+                .as("OBS took the stop, so its STOPPED is awaited")
+                .isEqualTo(OutputIdle.STILL_STOPPING);
+
+        ReflectionTestUtils.invokeMethod(controller, "stopQuietly");
+        assertThat(events.awaitOutputIdle(200, 0))
+                .as("OBS did not answer, so there is nothing to wait for")
+                .isEqualTo(OutputIdle.READY);
+    }
+
+    @Test
+    void connect_dropsAStopWaitFromThePreviousConnection() {
+        // An OBS that was restarted mid-stop reports nothing about that stop on the new connection.
+        ObsHealth health = new ObsHealth();
+        ObsEvents events = new ObsEvents(health, mock(CaptureBlackFrameGuard.class));
+        SettingsStore settings = mock(SettingsStore.class);
+        when(settings.get()).thenReturn(new SettingsStore.Settings());
+        ObsController controller =
+                new ObsController(settings, health, events, sceneConfigurer()) {
+                    @Override
+                    OBSRemoteController buildController(SettingsStore.Settings s, CountDownLatch latch) {
+                        latch.countDown();
+                        return mock(OBSRemoteController.class);
+                    }
+                };
+        events.expectStopped();
+
+        controller.connect();
+
+        assertThat(events.awaitOutputIdle(200, 0)).isEqualTo(OutputIdle.READY);
     }
 
     @Test

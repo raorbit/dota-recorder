@@ -52,12 +52,13 @@ import org.springframework.stereotype.Service;
  * {@link #startRecording()}/{@link #stopRecording()} all hold the intrinsic lock on {@code this}, so a
  * reconnect tick (the {@code ObsConnectionScheduler} calls {@code ensureConnected()} every 5s) cannot
  * run {@code disconnectQuietly()} -- which nulls/replaces {@link #controller} -- in the middle of an
- * in-flight start/stop sequence. The start sequence can block ~15s in {@code awaitRecordConfirmed},
- * but holding {@code this} across it is safe and cannot deadlock: the websocket lifecycle callbacks
+ * in-flight start/stop sequence. The start sequence can block ~2s in {@code awaitOutputIdle} (the
+ * previous recording's OUTPUT_STOPPED) and then ~15s in {@code awaitRecordConfirmed}, but holding
+ * {@code this} across both is safe and cannot deadlock: the websocket lifecycle callbacks
  * (onReady/onDisconnect/onClose/error) and the record-state callback do NOT acquire {@code this} --
  * they only flip the {@code volatile} health flags and count down a latch -- so the socket thread can
- * still deliver OUTPUT_STARTED (releasing the awaiting FSM thread) and signal a drop while a start is
- * in flight. The worst case is a reconnect tick waiting on the lock until the start/stop returns, not
+ * still deliver OUTPUT_STOPPED and OUTPUT_STARTED (releasing the awaiting FSM thread) and signal a
+ * drop while a start is in flight. The worst case is a reconnect tick waiting on the lock until the start/stop returns, not
  * a stall of OBS's own callbacks.
  */
 @Service
@@ -119,13 +120,22 @@ public class ObsController implements ObsRecorder, MatchFsm.RecordStatusProbe {
     private static final long START_CONFIRM_TIMEOUT_MS = 15_000L;
 
     /**
-     * How long a start waits for OBS to report the previous recording's {@code OUTPUT_STOPPED} before
-     * sending StartRecord anyway. OBS answers StopRecord at once but closes the file later (~0.6s in
-     * live runs, for files from 0.4 to 2.2 GB), and rejects a StartRecord sent in between. Bounded
-     * because the wait runs under the {@code MatchFsm} monitor, and because a lost event must not stop
-     * recording for good: past it the start falls back to the old send-and-retry.
+     * How long one start attempt waits for OBS to report the previous recording's
+     * {@code OUTPUT_STOPPED}. OBS answers StopRecord at once but closes the file later (~0.6s in live
+     * runs, for files from 0.4 to 2.2 GB), and rejects a StartRecord sent in between. Kept short
+     * because the wait holds the {@code MatchFsm} monitor and this one, which the stop button, the
+     * silence watchdog and the reconnect tick all need. An attempt that runs out sends nothing and
+     * fails, so the FSM stays IDLE and the next frame waits again.
      */
-    static final long STOP_CONFIRM_TIMEOUT_MS = 5_000L;
+    static final long STOP_CONFIRM_TIMEOUT_MS = 2_000L;
+
+    /**
+     * How long after a stop the starts keep waiting for its {@code OUTPUT_STOPPED} before sending
+     * StartRecord without it. A slow close gets this long; past it the event is taken as lost, and a
+     * lost event must not stop recording for good. OBS still rejects the StartRecord if it is in fact
+     * recording, which the next attempt's corrective stop then deals with.
+     */
+    static final long STOP_GIVE_UP_MS = 15_000L;
 
     /**
      * Gap kept between {@code OUTPUT_STOPPED} and the next StartRecord; see
@@ -136,6 +146,9 @@ public class ObsController implements ObsRecorder, MatchFsm.RecordStatusProbe {
 
     /** {@link #STOP_CONFIRM_TIMEOUT_MS}, held in a field only so a test can shorten it. */
     private long stopConfirmTimeoutMs = STOP_CONFIRM_TIMEOUT_MS;
+
+    /** {@link #STOP_GIVE_UP_MS}, held in a field only so a test can shorten it. */
+    private long stopGiveUpMs = STOP_GIVE_UP_MS;
 
     private final SettingsStore settings;
     private final ObsHealth health;
@@ -656,12 +669,27 @@ public class ObsController implements ObsRecorder, MatchFsm.RecordStatusProbe {
         // A recording that follows another one straight away (a new demo session, a manual stop
         // mid-match, the corrective stop above) gets here while OBS is still closing the previous
         // file. Sending StartRecord then is rejected at best; wait for OBS to say it has stopped.
-        if (!events.awaitOutputIdle(stopConfirmTimeoutMs, STOP_SETTLE_MS)) {
-            log.warn(
-                    "OBS did not report the previous recording stopped within {}ms; sending StartRecord anyway",
-                    stopConfirmTimeoutMs);
-            // Give up on that event, so a retry of this start does not wait for it all over again.
-            events.cancelExpectedStop();
+        switch (events.awaitOutputIdle(stopConfirmTimeoutMs, STOP_SETTLE_MS)) {
+            case READY -> {
+                // Stopped and settled, or nothing was stopping.
+            }
+            case INTERRUPTED ->
+                // The library would send the request and then fail its own wait on the same
+                // interrupt, leaving OBS recording a file nobody tracks.
+                throw new ObsException("Interrupted waiting for OBS to finish the previous recording");
+            case STILL_STOPPING -> {
+                long waitedMs = events.stopExpectedForMs();
+                if (waitedMs < stopGiveUpMs) {
+                    // Send nothing: retrying StartRecord frame after frame is what lands one on
+                    // the instant the stop completes. The wait stays armed for the next attempt.
+                    throw new ObsException("OBS is still closing the previous recording");
+                }
+                log.warn(
+                        "OBS has not reported the previous recording stopped {}ms after the stop;"
+                                + " sending StartRecord anyway",
+                        waitedMs);
+                events.cancelExpectedStop();
+            }
         }
         var resp = c.startRecord(REQUEST_TIMEOUT_MS);
         if (resp == null || !resp.isSuccessful()) {
@@ -700,17 +728,23 @@ public class ObsController implements ObsRecorder, MatchFsm.RecordStatusProbe {
         if (c == null) {
             return;
         }
+        // Armed like any other stop: when the healer declines to restart OBS (it is rate-limited), the
+        // next frame starts again on this same connection and must wait out this stop too.
+        events.expectStopped();
         try {
             StopRecordResponse resp = c.stopRecord(REQUEST_TIMEOUT_MS);
             if (resp != null && resp.isSuccessful()) {
                 // Confirmed stopped: safe to clear the flag.
                 health.setRecording(false);
+            } else {
+                events.cancelExpectedStop();
             }
             // Otherwise the library returned null/unsuccessful (it returns null on TIMEOUT, it does not
             // throw). OBS may still be recording — e.g. a late OUTPUT_STARTED raced this cleanup and
             // flipped recording=true. Mirror the finalize path and do NOT clear the flag here, so the
             // next match's corrective StopRecord fires instead of issuing a StartRecord OBS would reject.
         } catch (Exception e) {
+            events.cancelExpectedStop();
             // Same reasoning: an error means we can't confirm OBS stopped, so leave the flag as-is.
             log.debug("Ignoring error stopping unconfirmed recording: {}", e.toString());
         }

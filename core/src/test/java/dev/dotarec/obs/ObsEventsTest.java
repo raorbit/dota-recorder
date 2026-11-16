@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 
+import dev.dotarec.obs.ObsEvents.OutputIdle;
 import java.time.Instant;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -203,7 +204,8 @@ class ObsEventsTest {
     void awaitOutputIdle_withNoStopOutstanding_returnsWithoutBlocking() {
         // A first recording, or one that follows a long-finished stop, must not pay any wait (a long
         // timeout here would hang the test if it did).
-        assertThat(events.awaitOutputIdle(60_000, 60_000)).isTrue();
+        assertThat(events.awaitOutputIdle(60_000, 60_000)).isEqualTo(OutputIdle.READY);
+        assertThat(events.stopExpectedForMs()).isZero();
     }
 
     @Test
@@ -224,20 +226,37 @@ class ObsEventsTest {
 
         long begin = System.nanoTime();
         obs.start();
-        boolean idle = events.awaitOutputIdle(5_000, settleMs);
+        OutputIdle idle = events.awaitOutputIdle(5_000, settleMs);
         long elapsedMs = (System.nanoTime() - begin) / 1_000_000;
         obs.join();
 
-        assertThat(idle).isTrue();
+        assertThat(idle).isEqualTo(OutputIdle.READY);
         // Lower bound only: the wait cannot end before the event plus the settle.
         assertThat(elapsedMs).isGreaterThanOrEqualTo(stoppedAfterMs + settleMs - 5);
     }
 
     @Test
-    void awaitOutputIdle_returnsFalse_whenStoppedNeverArrives() {
+    void awaitOutputIdle_reportsStillStopping_whenStoppedNeverArrives() throws Exception {
         events.expectStopped();
+        Thread.sleep(20);
 
-        assertThat(events.awaitOutputIdle(50, 0)).isFalse();
+        assertThat(events.awaitOutputIdle(50, 0)).isEqualTo(OutputIdle.STILL_STOPPING);
+        // The caller reads this to tell a slow stop from a lost event: it counts from the arming.
+        assertThat(events.stopExpectedForMs()).isGreaterThanOrEqualTo(65);
+        // Still armed: the next attempt waits on the same stop rather than sailing through.
+        assertThat(events.awaitOutputIdle(50, 0)).isEqualTo(OutputIdle.STILL_STOPPING);
+    }
+
+    @Test
+    void awaitOutputIdle_reportsAnInterrupt_andKeepsTheFlagSet() {
+        events.expectStopped();
+        Thread.currentThread().interrupt();
+        try {
+            assertThat(events.awaitOutputIdle(5_000, 0)).isEqualTo(OutputIdle.INTERRUPTED);
+            assertThat(Thread.currentThread().isInterrupted()).isTrue();
+        } finally {
+            Thread.interrupted(); // do not leak the flag into the next test on this thread
+        }
     }
 
     @Test
@@ -245,7 +264,9 @@ class ObsEventsTest {
         events.expectStopped();
         events.cancelExpectedStop();
 
-        assertThat(events.awaitOutputIdle(60_000, 0)).isTrue();
+        // Short timeout: if the cancel did nothing this reads STILL_STOPPING at once, not a hang.
+        assertThat(events.awaitOutputIdle(200, 0)).isEqualTo(OutputIdle.READY);
+        assertThat(events.stopExpectedForMs()).isZero();
     }
 
     @Test
@@ -255,19 +276,23 @@ class ObsEventsTest {
         events.expectStopped();
         events.reset();
 
-        assertThat(events.awaitOutputIdle(50, 0)).isFalse();
+        assertThat(events.awaitOutputIdle(50, 0)).isEqualTo(OutputIdle.STILL_STOPPING);
     }
 
     @Test
     void awaitOutputIdle_settlesAfterAStopNobodyAskedFor() {
         // OBS ended the output on its own a moment ago: nothing is outstanding, but a start sent
         // right now would still land on top of the stop.
+        long settleMs = 100;
+        // Clock started BEFORE the event, which is where the settle is measured from; started after
+        // it, a slow first log line inside the handler would eat into the bound.
+        long begin = System.nanoTime();
         events.onRecordStateChanged(ObsEvents.OUTPUT_STOPPED, "C:\\videos\\match.mkv");
 
-        long begin = System.nanoTime();
-        assertThat(events.awaitOutputIdle(60_000, 100)).isTrue();
+        assertThat(events.awaitOutputIdle(200, settleMs)).isEqualTo(OutputIdle.READY);
         long elapsedMs = (System.nanoTime() - begin) / 1_000_000;
 
-        assertThat(elapsedMs).isGreaterThanOrEqualTo(90);
+        // 5ms of slack for a sleep that wakes a timer tick early.
+        assertThat(elapsedMs).isGreaterThanOrEqualTo(settleMs - 5);
     }
 }
