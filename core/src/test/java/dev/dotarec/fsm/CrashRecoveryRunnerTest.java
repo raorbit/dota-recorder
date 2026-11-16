@@ -1304,6 +1304,34 @@ class CrashRecoveryRunnerTest {
     }
 
     @Test
+    void aCopyWithAHoleTheSamplesMissNeverGetsItsWholeOriginalDeleted() throws Exception {
+        // A copy an older archiver left with a stretch its drive never got (70 to 80 KiB, a power cut
+        // before the cache was written), which none of the three samples reads, beside the source it
+        // couldn't delete. Its samples and its end agree with the source, and only a read end to end
+        // shows the source is the one file that holds the whole recording: the row goes back on it,
+        // and the copy goes the next boot as move residue.
+        Path archive = configureArchive("hdd");
+        seedAdoptionFloor(videoDir, System.currentTimeMillis());
+        byte[] recording = recordingOf(256 * 1024);
+        byte[] holed = recording.clone();
+        java.util.Arrays.fill(holed, 70 * 1024, 80 * 1024, (byte) 0);
+        long id = archivedRow(archive, "2026-10-06 20-00-00.mp4", holed);
+        Path copy = archive.resolve(id + "-2026-10-06 20-00-00.mp4");
+        Path source = writeModifiedAt(videoDir.resolve("2026-10-06 20-00-00.mp4"), recording, LONG_AGO_MS);
+
+        runner.run(null);
+
+        assertThat(source).exists();
+        assertThat(matches.findById(id).orElseThrow().videoPath()).isEqualTo(source.toString());
+
+        newRunner().run(null);
+
+        assertThat(source).exists();
+        assertThat(copy).doesNotExist();
+        assertThat(matches.findAll()).hasSize(1);
+    }
+
+    @Test
     void aCopyCutBetweenTheSamplesOfARecordingThatEndsInZerosGoesBackOnTheOriginal() throws Exception {
         // A recording an OS crash cut short at 180 KiB, so its last 64 KiB read as zeros, and its copy
         // an older archiver cut short at 170 KiB: past the middle sample, inside the zeros of the end
