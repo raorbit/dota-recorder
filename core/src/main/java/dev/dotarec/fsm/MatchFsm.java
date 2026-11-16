@@ -184,10 +184,17 @@ public class MatchFsm {
 
     /**
      * The OBS process (null when it couldn't be named) and the connection count of the last run
-     * {@link #unconfirmedStarts} counted.
+     * {@link #unconfirmedStarts} counted, while {@link #unconfirmedRunCounted}.
      */
     private ObsProcess unconfirmedOnProcess;
     private long unconfirmedOnEpoch;
+
+    /**
+     * Whether {@link #unconfirmedOnProcess} and {@link #unconfirmedOnEpoch} name a counted run: from
+     * the first count until a confirmed start. Asking the fallback keeps them, so the run that asked
+     * can't count again as the first of the next streak.
+     */
+    private boolean unconfirmedRunCounted;
 
     // Single constructor: Spring auto-selects it with no @Autowired needed, and the clocks arrive as one
     // injected TimeSource bean (ClockConfig) instead of per-clock test-seam ctor overloads. Those
@@ -679,6 +686,7 @@ public class MatchFsm {
             // immune to an OS/NTP wall-clock step (the wall anchor below is for storage/display only).
             confirmedNanos = time.nanoTime();
             unconfirmedStarts = 0;
+            unconfirmedRunCounted = false;
         } catch (ObsStartNotConfirmedException e) {
             // Which OBS took the request, read before anything else: the start held the OBS
             // controller through its wait, and a reconnect takes a whole handshake, so these still
@@ -752,8 +760,9 @@ public class MatchFsm {
      * an auto-picked hardware encoder is switched to x264 in the profile first, and the restart
      * relaunches OBS on it (or a later failure's restart does, if the restarter refuses this one for
      * now). The switch is one-way for the rest of the process, and the restart is the rate-limited
-     * one every failure asks for, so this can't loop. Counting from zero again after asking means a
-     * streak that goes on asks again every second run, not on every failure.
+     * one every failure asks for, so this can't loop. Asking starts the count from zero, and the run
+     * that asked stays counted, so a streak that goes on asks again every second new run of OBS,
+     * however often each run fails.
      *
      * <p>An OBS that is gone by the end of the wait crashed while it started the output, which is
      * where it opens the encoder: some drivers crash OBS there instead of failing. That asks for x264
@@ -776,10 +785,11 @@ public class MatchFsm {
             return;
         }
         log.warn("Recording not confirmed by OBS: {}; restarting OBS", e.getMessage());
-        if (unconfirmedStarts == 0 || startedOnAnotherObs(startedOn, epoch)) {
+        if (!unconfirmedRunCounted || startedOnAnotherObs(startedOn, epoch)) {
             unconfirmedStarts++;
             unconfirmedOnProcess = startedOn;
             unconfirmedOnEpoch = epoch;
+            unconfirmedRunCounted = true;
         }
         if (unconfirmedStarts >= UNCONFIRMED_STARTS_BEFORE_X264) {
             unconfirmedStarts = 0;

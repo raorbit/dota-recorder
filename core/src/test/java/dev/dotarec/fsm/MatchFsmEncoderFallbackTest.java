@@ -150,6 +150,33 @@ class MatchFsmEncoderFallbackTest {
     }
 
     @Test
+    void afterAnAsk_theRunThatAskedCountsNoMore_soTheNextAskTakesTwoNewRuns() {
+        // Each OBS fails many times before the restarter, which spaces restarts out, lets one
+        // through. A declined ask must not let that same OBS start the next streak.
+        switches = false;
+        obs.startNotConfirmed = true;
+        fsm.onFrame(playing(MATCH)); // the first OBS: one, restarted
+        restarts = false;
+        fsm.onFrame(playing(MATCH)); // the second OBS: two, so it asks; the restart is refused
+        fsm.onFrame(playing(MATCH)); // the second OBS again
+        restarts = true;
+        fsm.onFrame(playing(MATCH)); // the second OBS again, and its restart goes through
+        assertThat(asked).containsExactly("restart", "x264", "restart", "restart", "restart");
+
+        restarts = false;
+        fsm.onFrame(playing(MATCH)); // the third OBS: one of a new streak
+        fsm.onFrame(playing(MATCH));
+        restarts = true;
+        fsm.onFrame(playing(MATCH));
+        assertThat(asked).as("the third OBS is the first of a new streak, however often it fails")
+                .containsExactly("restart", "x264", "restart", "restart", "restart",
+                        "restart", "restart", "restart");
+
+        fsm.onFrame(playing(MATCH)); // the fourth OBS: two, so it asks again
+        assertThat(asked).endsWith("restart", "restart", "x264", "restart").hasSize(10);
+    }
+
+    @Test
     void otherStartFailures_neitherCount_norStartTheCountOver() {
         obs.startNotConfirmed = true;
         fsm.onFrame(playing(MATCH));
