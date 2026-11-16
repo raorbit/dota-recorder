@@ -218,6 +218,14 @@ public class MatchController {
      * Under the lock the row's CURRENT paths are RE-READ (by id) immediately before unlinking, so the
      * files removed are always the row's present locations even if the archiver just repointed them.
      *
+     * <p>The re-read must find the very recording the probe found, by when it was created as well as
+     * its id. SQLite gives a new row the highest id in use plus one (the schema has no AUTOINCREMENT),
+     * so if another holder of the lock removes the row asked for while this delete waits (boot
+     * recovery releasing an adopted row), the next recording stored can take its id: one recovery
+     * adopts in the same pass, or one the FSM finalizes, which doesn't take the lock. Finding another
+     * recording there, the delete leaves it, its files and its clips alone and is done, as for a row
+     * already gone.
+     *
      * <p>The archiver holds that lock through a whole pass of cross-drive copies, so the delete goes
      * through {@link DeleteQueue}: it waits here for the lock at most half a minute, and is then queued
      * to run once the lock frees, with the 202 answered at once. A second delete of one still pending
@@ -229,25 +237,30 @@ public class MatchController {
     public ResponseEntity<DeleteOutcome> delete(@PathVariable long id) {
         // Existence probe outside the lock so an unknown id is a cheap 404 without serializing on
         // maintenance; the authoritative paths are re-read under the lock (deleteUnderLock).
-        matches.findById(id)
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "No match " + id));
-        return deletes.run(DeleteQueue.Kind.MATCH, id, () -> deleteUnderLock(id),
+        long createdAt = matches.findById(id)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "No match " + id))
+                .createdAt();
+        return deletes.run(DeleteQueue.Kind.MATCH, id, createdAt, () -> deleteUnderLock(id, createdAt),
                         outcome -> announceDeleted(id, outcome))
                 .map(outcome -> ResponseEntity.ok(new DeleteOutcome(outcome)))
                 .orElseGet(() -> ResponseEntity.status(HttpStatus.ACCEPTED).body(DeleteOutcome.QUEUED));
     }
 
     /** The delete itself, run with the maintenance lock held: {@code "deleted"} or {@code "stubbed"}. */
-    private String deleteUnderLock(long id) {
+    private String deleteUnderLock(long id, long createdAt) {
         // Re-read the CURRENT row inside the lock: the archiver may have repointed video_path/
         // thumb_path to an archive drive since the probe, so unlink the present locations, not the
-        // pre-move ones (which would be a no-op leaving the moved file stranded). A row deleted by a
-        // concurrent pass, or while this delete was queued, leaves nothing to unlink; the row delete
-        // below is then a no-op.
-        matches.findById(id).ifPresent(m -> {
-            deleteFileQuietly(m.videoPath());
-            deleteFileQuietly(m.thumbPath());
-        });
+        // pre-move ones (which would be a no-op leaving the moved file stranded).
+        MatchSummary m = matches.findById(id).filter(row -> row.createdAt() == createdAt).orElse(null);
+        if (m == null) {
+            // Gone already, removed by a concurrent pass or while this delete was queued, and its clips
+            // with it. A recording that has its id now is a newer one (see delete), not the one asked
+            // for, so it stays as it is.
+            return "deleted";
+        }
+        deleteFileQuietly(m.videoPath());
+        deleteFileQuietly(m.thumbPath());
+        // Every other delete of a row holds the lock too, so the id still names this recording below.
         if (clips.findByParentMatchId(id).isEmpty()) {
             matches.delete(id);
             return "deleted";

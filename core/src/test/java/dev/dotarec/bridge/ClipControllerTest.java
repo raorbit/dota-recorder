@@ -27,6 +27,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import javax.sql.DataSource;
 import org.assertj.core.api.InstanceOfAssertFactories;
 import org.junit.jupiter.api.BeforeEach;
@@ -429,6 +430,74 @@ class ClipControllerTest {
     }
 
     @Test
+    void queuedDelete_leavesAClipThatTookTheRowsIdMeanwhile_alone() throws Exception {
+        // While the delete is queued, the pass holding the lock drops the clip (the sweeper drops one
+        // whose file went missing), and the next clip made is given its id: SQLite hands out the
+        // highest id in use plus one, and a clip's row is added without the lock. That clip isn't
+        // the one asked for, so it and its files stay, and the delete is done as for one already gone.
+        long clipId = insertClip("ready", dir.resolve("missing.mp4").toString(), null, 1_000L);
+        Path newerVod = Files.write(dir.resolve("newer.mp4"), new byte[] {1, 2, 3});
+        Path newerThumb = Files.write(dir.resolve("newer.jpg"), new byte[] {4});
+        StorageMaintenanceLock lock = new StorageMaintenanceLock();
+        DeleteQueue deletes = new DeleteQueue(lock, events, Duration.ofMillis(100));
+        ClipController c = new ClipController(clips, clipService, matches, settings, deletes, events);
+        long newerId;
+        try (HeldLock pass = HeldLock.hold(lock).releaseAfter(Duration.ofSeconds(3))) {
+            assertThat(c.delete(clipId).getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+            clips.delete(clipId);
+            newerId = insertClip("ready", newerVod.toString(), newerThumb.toString(), 2_000L);
+
+            pass.release();
+            deletes.drain(Duration.ofSeconds(5));
+        } finally {
+            deletes.shutdown();
+        }
+        assertThat(newerId).as("the newer clip took the freed id").isEqualTo(clipId);
+        assertThat(clips.findById(clipId)).hasValueSatisfying(
+                clip -> assertThat(clip.videoPath()).isEqualTo(newerVod.toString()));
+        assertThat(Files.exists(newerVod)).isTrue();
+        assertThat(Files.exists(newerThumb)).isTrue();
+        verify(events).publish(eq("clip.deleted"), any());
+    }
+
+    @Test
+    void waitedDelete_leavesAClipThatTookTheRowsIdMeanwhile_alone() throws Exception {
+        // The same on the request thread: the pass swaps the row while the request waits, then ends
+        // within the wait, so the delete runs there and answers with what it did.
+        long clipId = insertClip("ready", dir.resolve("missing.mp4").toString(), null, 1_000L);
+        Path newerVod = Files.write(dir.resolve("newer.mp4"), new byte[] {1, 2, 3});
+        StorageMaintenanceLock lock = new StorageMaintenanceLock();
+        DeleteQueue deletes = new DeleteQueue(lock, events, Duration.ofSeconds(10));
+        ClipController c = new ClipController(clips, clipService, matches, settings, deletes, events);
+        AtomicLong newerId = new AtomicLong();
+        ResponseEntity<MatchController.DeleteOutcome> answer;
+        try (HeldLock pass = HeldLock.hold(lock)) {
+            Thread swap = new Thread(() -> {
+                try {
+                    awaitPending(deletes, clipId);
+                    clips.delete(clipId);
+                    newerId.set(insertClip("ready", newerVod.toString(), null, 2_000L));
+                    pass.release();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+            swap.start();
+
+            answer = c.delete(clipId);
+
+            swap.join(5_000);
+        } finally {
+            deletes.shutdown();
+        }
+        assertThat(answer.getStatusCode()).isEqualTo(HttpStatus.NO_CONTENT);
+        assertThat(newerId.get()).as("the newer clip took the freed id").isEqualTo(clipId);
+        assertThat(clips.findById(clipId)).hasValueSatisfying(
+                clip -> assertThat(clip.videoPath()).isEqualTo(newerVod.toString()));
+        assertThat(Files.exists(newerVod)).isTrue();
+    }
+
+    @Test
     void videoStream_unknownClip_is404() {
         assertThatThrownBy(() -> controller.videoStream(999_999L, new HttpHeaders()))
                 .isInstanceOfSatisfying(ResponseStatusException.class,
@@ -438,8 +507,21 @@ class ClipControllerTest {
     // ── helpers ─────────────────────────────────────────────────────────────
 
     private long insertClip(String status, String videoPath, String thumbPath) {
+        return insertClip(status, videoPath, thumbPath, System.currentTimeMillis());
+    }
+
+    private long insertClip(String status, String videoPath, String thumbPath, long createdAt) {
         return clips.insert(matchId, "manual", null, 0.0, 5.0, null,
-                videoPath, thumbPath, videoPath == null ? null : 3L, status, null,
-                System.currentTimeMillis());
+                videoPath, thumbPath, videoPath == null ? null : 3L, status, null, createdAt);
+    }
+
+    /** Polls until {@code deletes} has the delete of clip {@code clipId} pending. */
+    private static void awaitPending(DeleteQueue deletes, long clipId) throws InterruptedException {
+        long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+        while (!deletes.pendingIds(DeleteQueue.Kind.CLIP).contains(clipId)
+                && System.nanoTime() < deadline) {
+            Thread.sleep(1);
+        }
+        assertThat(deletes.pendingIds(DeleteQueue.Kind.CLIP)).contains(clipId);
     }
 }

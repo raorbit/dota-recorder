@@ -28,6 +28,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -357,6 +358,77 @@ class MatchControllerDeleteTest {
     }
 
     @Test
+    void queuedDelete_leavesARecordingThatTookTheRowsIdMeanwhile_alone() throws Exception {
+        // While the delete is queued, the pass holding the lock removes the row (boot recovery
+        // releasing an adopted one), and the next recording stored is given its id: SQLite hands out
+        // the highest id in use plus one. That recording isn't the one asked for, so it and its file
+        // stay, and the delete is done as for a row already gone.
+        StorageMaintenanceLock lock = new StorageMaintenanceLock();
+        EventPublisher events = mock(EventPublisher.class);
+        DeleteQueue deletes = new DeleteQueue(lock, events, Duration.ofMillis(100));
+        MatchController c = new MatchController(repo, markers, new PauseRepository(ds), clips,
+                settings, deletes, events);
+        long id = insert(writeFile("released.mp4", new byte[] {1}).toString(), null);
+        Path newer = writeFile("newer.mp4", new byte[] {2});
+        long newerId;
+        try (HeldLock pass = HeldLock.hold(lock).releaseAfter(Duration.ofSeconds(3))) {
+            assertThat(c.delete(id).getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+            repo.delete(id);
+            newerId = insert(newer.toString(), null, 2L);
+
+            pass.release();
+            deletes.drain(Duration.ofSeconds(5));
+        } finally {
+            deletes.shutdown();
+        }
+        assertThat(newerId).as("the newer recording took the freed id").isEqualTo(id);
+        assertThat(repo.findById(id)).hasValueSatisfying(
+                m -> assertThat(m.videoPath()).isEqualTo(newer.toString()));
+        assertThat(Files.exists(newer)).isTrue();
+        verify(events).publish("match.deleted", Map.of("id", id, "outcome", "deleted"));
+    }
+
+    @Test
+    void waitedDelete_leavesARecordingThatTookTheRowsIdMeanwhile_alone() throws Exception {
+        // The same on the request thread: the pass swaps the row while the request waits, then ends
+        // within the wait, so the delete runs there and answers with what it did.
+        StorageMaintenanceLock lock = new StorageMaintenanceLock();
+        EventPublisher events = mock(EventPublisher.class);
+        DeleteQueue deletes = new DeleteQueue(lock, events, Duration.ofSeconds(10));
+        MatchController c = new MatchController(repo, markers, new PauseRepository(ds), clips,
+                settings, deletes, events);
+        long id = insert(writeFile("released.mp4", new byte[] {1}).toString(), null);
+        Path newer = writeFile("newer.mp4", new byte[] {2});
+        AtomicLong newerId = new AtomicLong();
+        ResponseEntity<MatchController.DeleteOutcome> answer;
+        try (HeldLock pass = HeldLock.hold(lock)) {
+            Thread swap = new Thread(() -> {
+                try {
+                    awaitPending(deletes, id);
+                    repo.delete(id);
+                    newerId.set(insert(newer.toString(), null, 2L));
+                    pass.release();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+            swap.start();
+
+            answer = c.delete(id);
+
+            swap.join(5_000);
+        } finally {
+            deletes.shutdown();
+        }
+        assertThat(answer.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(answer.getBody()).isEqualTo(new MatchController.DeleteOutcome("deleted"));
+        assertThat(newerId.get()).as("the newer recording took the freed id").isEqualTo(id);
+        assertThat(repo.findById(id)).hasValueSatisfying(
+                m -> assertThat(m.videoPath()).isEqualTo(newer.toString()));
+        assertThat(Files.exists(newer)).isTrue();
+    }
+
+    @Test
     void delete_skipsFilesOutsideStorageRoots_butStillRemovesRow() throws Exception {
         // A real, readable file OUTSIDE videoDir (a tampered DB row / .. escape): the delete must NOT
         // unlink it — the containment guard skips it, matching the read-side guard — yet the row goes.
@@ -397,10 +469,24 @@ class MatchControllerDeleteTest {
     }
 
     private long insert(String videoPath, String thumbPath) {
+        return insert(videoPath, thumbPath, 1L);
+    }
+
+    private long insert(String videoPath, String thumbPath, long createdAt) {
         return repo.insert(
                 new NewMatch(
                         null, "match", "pending", "rubick",
                         null, null, null, null, null, null, null, null, null, null, null, null,
-                        null, null, videoPath, thumbPath, null, false, 1L, null));
+                        null, null, videoPath, thumbPath, null, false, createdAt, null));
+    }
+
+    /** Polls until {@code deletes} has the delete of recording {@code id} pending. */
+    private static void awaitPending(DeleteQueue deletes, long id) throws InterruptedException {
+        long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+        while (!deletes.pendingIds(DeleteQueue.Kind.MATCH).contains(id)
+                && System.nanoTime() < deadline) {
+            Thread.sleep(1);
+        }
+        assertThat(deletes.pendingIds(DeleteQueue.Kind.MATCH)).contains(id);
     }
 }

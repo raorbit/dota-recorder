@@ -42,14 +42,17 @@ import org.springframework.stereotype.Component;
  * wait runs out is then queued behind those later ones, but the worker always runs the oldest delete
  * it has.
  *
- * <p>Every delete the core has accepted and not finished is pending here, keyed by what it deletes (a
- * recording and a clip with the same number are two different deletes). The status payload lists them,
- * so every window shows those rows as being deleted, one opened after the delete was asked for
- * included. A second delete of a pending one runs nothing and is answered as queued: the first finishes
- * it. A delete's own frame ({@code match.deleted}, {@code clip.deleted}) goes out once it is done,
- * wherever it ran. A queued one that fails says so in a {@code delete.failed} frame, since no request is
- * left to carry the reason. With no window open (closed to the tray, say), the next one to connect
- * gets that frame.
+ * <p>Every delete the core has accepted and not finished is pending here, keyed by the row it
+ * deletes: its kind (a recording and a clip with the same number are two different deletes), its id,
+ * and when it was created. The schema has no AUTOINCREMENT, so SQLite gives a new row the highest id
+ * in use plus one, and a row a storage pass removes while its delete waits can hand its id to the next
+ * one: a delete of that newer row is a delete of its own, not this one again. The status payload
+ * lists the ids, so every window shows those rows as being deleted, one opened after the delete was
+ * asked for included. A second delete of a pending one runs nothing and is answered as queued: the
+ * first finishes it. A delete's own frame ({@code match.deleted}, {@code clip.deleted}) goes out once
+ * it is done, wherever it ran. A queued one that fails says so in a {@code delete.failed} frame,
+ * since no request is left to carry the reason. With no window open (closed to the tray, say), the
+ * next one to connect gets that frame.
  *
  * <p>The queue lives only in memory. A delete still queued when the core exits (the app quits, or the
  * core crashes and is restarted) is lost, and its row is listed again as an ordinary one.
@@ -79,7 +82,7 @@ public class DeleteQueue {
         }
     }
 
-    private record Key(Kind kind, long id) {}
+    private record Key(Kind kind, long id, long createdAt) {}
 
     /** A queued delete, run by the worker once the lock is held ({@code locked}), or dropped. */
     @FunctionalInterface
@@ -132,14 +135,17 @@ public class DeleteQueue {
     }
 
     /**
-     * Runs the delete of {@code kind} {@code id} now, or once the maintenance lock frees. {@code delete}
-     * runs with the lock held and returns what it did; {@code announce} then gets that, with the lock
-     * released, to publish the delete's frame. Returns what the delete did when it ran on the calling
-     * thread (an exception it threw propagates, and nothing is announced). Returns empty when it was
-     * queued instead, or when that same delete was already pending: it finishes without this call.
+     * Runs the delete of {@code kind} {@code id}, the row created at {@code createdAt}, now, or once the
+     * maintenance lock frees. {@code delete} runs with the lock held and returns what it did; {@code
+     * announce} then gets that, with the lock released, to publish the delete's frame. Returns what the
+     * delete did when it ran on the calling thread (an exception it threw propagates, and nothing is
+     * announced). Returns empty when it was queued instead, or when that same delete was already
+     * pending: it finishes without this call. {@code delete} must check the row is still the one
+     * created at {@code createdAt} before it touches it, as the id alone may name a newer row by then.
      */
-    public <T> Optional<T> run(Kind kind, long id, Supplier<T> delete, Consumer<T> announce) {
-        Key key = new Key(kind, id);
+    public <T> Optional<T> run(
+            Kind kind, long id, long createdAt, Supplier<T> delete, Consumer<T> announce) {
+        Key key = new Key(kind, id, createdAt);
         boolean alone;
         synchronized (pending) {
             if (!pending.add(key)) {
@@ -176,10 +182,13 @@ public class DeleteQueue {
         return Optional.of(result);
     }
 
-    /** The ids with a delete of {@code kind} pending, oldest first: the status payload lists them. */
+    /**
+     * The ids with a delete of {@code kind} pending, oldest first, each once (a row and the newer one
+     * that took its id can both have one): the status payload lists them.
+     */
     public List<Long> pendingIds(Kind kind) {
         synchronized (pending) {
-            return pending.stream().filter(k -> k.kind() == kind).map(Key::id).toList();
+            return pending.stream().filter(k -> k.kind() == kind).map(Key::id).distinct().toList();
         }
     }
 

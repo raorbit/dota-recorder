@@ -84,9 +84,9 @@ class StatusServiceTest {
         try (HeldLock pass = HeldLock.hold(maintenanceLock)) {
             // A pass holds the lock past the wait, so these are queued. Recording 7 and clip 7 are two
             // deletes, each listed under its own kind.
-            deletes.run(DeleteQueue.Kind.MATCH, 9, () -> "deleted", done -> { });
-            deletes.run(DeleteQueue.Kind.MATCH, 7, () -> "deleted", done -> { });
-            deletes.run(DeleteQueue.Kind.CLIP, 7, () -> true, done -> { });
+            deletes.run(DeleteQueue.Kind.MATCH, 9, 1L, () -> "deleted", done -> { });
+            deletes.run(DeleteQueue.Kind.MATCH, 7, 1L, () -> "deleted", done -> { });
+            deletes.run(DeleteQueue.Kind.CLIP, 7, 1L, () -> true, done -> { });
 
             assertThat(service.snapshot().deletes())
                     .isEqualTo(new StatusSnapshot.DeleteStatus(List.of(9L, 7L), List.of(7L)));
@@ -106,7 +106,7 @@ class StatusServiceTest {
         StatusService status = newService(lowDiskState, waiting, socket);
         try (HeldLock pass = HeldLock.hold(maintenanceLock)) {
             Thread request = new Thread(
-                    () -> waiting.run(DeleteQueue.Kind.MATCH, 7, () -> "deleted", done -> { }));
+                    () -> waiting.run(DeleteQueue.Kind.MATCH, 7, 1L, () -> "deleted", done -> { }));
             request.start();
 
             awaitDeletes(status, new StatusSnapshot.DeleteStatus(List.of(7L), List.of()));
