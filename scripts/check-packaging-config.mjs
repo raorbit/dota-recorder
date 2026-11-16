@@ -90,14 +90,15 @@ check(
 //
 // The check reads Exec, ExecWait, ExecShell, ExecShellWait and nsExec::Exec, ExecToLog and
 // ExecToStack, each on a line of its own or as the statement of a LogicLib one-liner (${IfThen},
-// ${IfNotThen} or ${IfCmd}), and every command of a cmd /c (or /k) line. For ExecShell it checks
-// the path of the file to open, not the program its type opens with, and lets a URL through, since
-// Windows doesn't look a URL up on disk. It doesn't read a program started any other way: through
-// a plugin, a !define, System::Call or a macro from outside build-resources (StdUtils' or UAC's).
-// Nor does it read what a program other than cmd runs (a PowerShell command, say). A command run
-// through cmd's call, start, if or for fails the check, since the check doesn't read it. So does a
-// batch file (.cmd or .bat), however it is started: the check doesn't read the commands in it, and
-// Windows runs one that an exec instruction starts in a cmd of its own, without /d.
+// ${IfNotThen} or ${IfCmd}), with or without labels in front, and every command of a cmd /c (or
+// /k) line. For ExecShell it checks the path of the file to open, not the program its type opens
+// with, and lets a URL through, since Windows doesn't look a URL up on disk. It doesn't read a
+// program started any other way: through a plugin, a !define, System::Call or a macro from
+// outside build-resources (StdUtils' or UAC's). Nor does it read what a program other than cmd
+// runs (a PowerShell command, say). A command run through cmd's call, start, if or for fails the
+// check, since the check doesn't read it. So does a batch file (.cmd or .bat), however it is
+// started: the check doesn't read the commands in it, and Windows runs one that an exec
+// instruction starts in a cmd of its own, without /d.
 //
 // And it reads only the scripts in build-resources, where the hooks are, not the templates
 // electron-builder makes the rest of the installer from, which aren't ours to change. Their check
@@ -235,7 +236,8 @@ function isUrl(target) {
 
 // The programs one instruction starts: the one an exec instruction names and, when that is cmd,
 // each one in the command it runs. A LogicLib one-liner starts what its statements start.
-function programsStarted(words) {
+function programsStarted(line) {
+  const words = withoutLabels(line);
   if (words.length === 0) return [];
   if (oneLiner.test(words[0])) {
     return words.slice(1).flatMap((statement) => programsStarted(nsisWords(statement)));
@@ -255,6 +257,14 @@ function programsStarted(words) {
     default:
       return [];
   }
+}
+
+// A line's words after its labels. NSIS takes each word at the start of a line that ends in a
+// colon for a label (or refuses the line, if the word starts with ! $ - + or a digit), and reads
+// the instruction after them.
+function withoutLabels(words) {
+  const first = words.findIndex((word) => !word.endsWith(':'));
+  return first < 0 ? [] : words.slice(first);
 }
 
 // The program and, when it is cmd, the switches cmd is given up to its /c (or /k), the command
@@ -559,6 +569,24 @@ const problemCases = [
     ['1 bare cmd.exe', '1 no /d cmd.exe', '1 bare netsh'],
   ],
   ['${IfNotThen} ${Silent} ${|}nsExec::Exec "taskkill /F /IM x.exe"${|}', ['1 bare taskkill']],
+  // Labels in front of an instruction, of a one-liner and of a one-liner's statement.
+  [
+    [
+      `open_fw: ExecShellWait "runas" "cmd.exe" '/c netsh a' SW_HIDE`,
+      'a:\tb: Exec "netsh b"',
+      'again: ${IfThen} $0 == 1 ${|} Exec "netsh c" ${|}',
+      '${IfThen} $0 == 1 ${|} again: Exec "netsh d" ${|}',
+      'done:',
+    ].join('\n'),
+    [
+      '1 bare cmd.exe',
+      '1 no /d cmd.exe',
+      '1 bare netsh',
+      '2 bare netsh',
+      '3 bare netsh',
+      '4 bare netsh',
+    ],
+  ],
   [
     '${IfThen} $0 == 1 ${|} ExecWait "$\\"$SYSDIR\\cmd.exe$\\" /c $\\"$SYSDIR\\netsh.exe$\\" a" ${|}',
     ['1 no /d $SYSDIR\\cmd.exe'],
