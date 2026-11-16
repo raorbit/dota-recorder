@@ -972,6 +972,25 @@ class CrashRecoveryRunnerTest {
     }
 
     @Test
+    void aRecordingThatEndsInZerosIsReLinkedOnceItsFolderShowsItsFileIsGone() throws Exception {
+        // A recording an OS crash cut short, so it ends in zeros, renamed onto an archive on the same
+        // drive just before the core died, so its row was never repointed. Its folder is there
+        // without it, so no file of its own can come back: the row is re-linked to it rather than
+        // losing its video to the sweeper, and no second row takes it.
+        Path archive = configureArchive("hdd");
+        byte[] crashed = cutShortAt(recordingOf(256 * 1024), 180 * 1024);
+        String videoPath = videoDir.resolve("2026-10-04 20-00-00.mp4").toString();
+        long id = insertMatch(videoPath, null, (long) crashed.length);
+        Path moved = writeModifiedAt(archive.resolve(id + "-2026-10-04 20-00-00.mp4"), crashed, LONG_AGO_MS);
+
+        runner.run(null);
+
+        assertThat(matches.findAll())
+                .singleElement()
+                .satisfies(row -> assertThat(row.videoPath()).isEqualTo(moved.toString()));
+    }
+
+    @Test
     void genuineMoveResidueIsDeletedThoughItPredatesTheArchivesFloor() throws Exception {
         Path archive = chooseArchive("hdd");
         seedAdoptionFloor(archive, System.currentTimeMillis());

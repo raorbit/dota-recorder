@@ -668,8 +668,9 @@ public class CrashRecoveryRunner implements ApplicationRunner {
      *   <li>if that match lost its file (the move repoint never committed, e.g. an atomic rename
      *       consumed the source before the crash), RE-LINK the row to this recovered copy instead of
      *       importing a detached duplicate — but only when the file is ATTRIBUTABLE to the row
-     *       ({@link #isAttributableToLostVideo}: original basename, when recorded, size, and a copy
-     *       not cut short), so a user-placed prefix collision never becomes the row's VOD;</li>
+     *       ({@link #isAttributableToLostVideo}: original basename, when recorded, size, and while
+     *       the row's folder is out of reach an end that isn't zeros), so a user-placed prefix
+     *       collision never becomes the row's VOD;</li>
      *   <li>if the match is already intact (its row still points at a file that exists), this is a
      *       redundant leftover/partial copy from the move — DELETE it to reclaim the space;</li>
      *   <li>if there is no id prefix, no such match (the row was deleted), or the file couldn't be
@@ -802,9 +803,13 @@ public class CrashRecoveryRunner implements ApplicationRunner {
      *       (the {@code src.getFileName()} the archiver prefixed when it staged the move);</li>
      *   <li><b>attribution</b> — when the row recorded a file size, the leftover's on-disk size must
      *       equal it (the move never rewrites bytes);</li>
-     *   <li><b>completeness</b> — it must not end in zeros ({@link #isCompleteCopy}): a copy an older
-     *       archiver had cut short is full size too, and with the row's file gone only its end can
-     *       tell.</li>
+     *   <li><b>completeness</b> — while the folder the row's file was in can't be reached (its drive
+     *       unplugged, say), it must not end in zeros ({@link #isCompleteCopy}): a copy an older
+     *       archiver had cut short is full size too, and the row waits for its own file to come back.
+     *       A recording an OS crash cut short can end in zeros as well, and with the original out of
+     *       reach the two can't be told apart. Once that folder is there without the file, the file
+     *       is gone for good (the sweeper drops the row's video for it), and this is the row's
+     *       recording either way, whole or not.</li>
      * </ul>
      *
      * <p>A row with no recorded basename to compare (e.g. {@code video_path} already NULL) can never
@@ -834,7 +839,20 @@ public class CrashRecoveryRunner implements ApplicationRunner {
                 return false;
             }
         }
-        return isCompleteCopy(file, null);
+        return isCompleteCopy(file, null) || folderReachable(rowVideo);
+    }
+
+    /**
+     * Whether the folder {@code file} is in is there: then a missing {@code file} was deleted or moved
+     * off it, not left on a drive that is unplugged. The sweeper tells the two apart the same way.
+     */
+    private static boolean folderReachable(Path file) {
+        try {
+            Path folder = file.getParent();
+            return folder != null && Files.isDirectory(folder);
+        } catch (RuntimeException e) {
+            return false;
+        }
     }
 
     /**
@@ -1215,8 +1233,8 @@ public class CrashRecoveryRunner implements ApplicationRunner {
      *   <li>if the clip row lost its file (a same-filesystem rename consumed the source before the
      *       repoint committed), RE-LINK the row to this recovered copy — but only when the file is
      *       ATTRIBUTABLE to the row ({@link #isAttributableToLostVideo}: original basename, when
-     *       recorded, size, and a copy not cut short), so a user-placed prefix collision never becomes
-     *       the clip's video;</li>
+     *       recorded, size, and while the row's folder is out of reach an end that isn't zeros), so a
+     *       user-placed prefix collision never becomes the clip's video;</li>
      *   <li>if the clip is already intact AND the file is provably its move residue (same
      *       basename/size attribution as the match path), this is a redundant copy from the
      *       interrupted move — DELETE it to reclaim the space.</li>
