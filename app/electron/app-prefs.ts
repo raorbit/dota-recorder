@@ -6,6 +6,7 @@
 import { app } from 'electron';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { HIDDEN_LAUNCH_ARG } from './login-item';
 
 export interface AppPrefs {
   // Start the app automatically when the user signs in to Windows (hidden in the tray).
@@ -18,10 +19,6 @@ export interface AppPrefs {
 }
 
 const DEFAULTS: AppPrefs = { launchAtLogin: false, autoUpdate: true };
-
-// Arg the auto-start (login) launch carries so the app knows to start hidden in the
-// tray rather than popping a window on every sign-in.
-export const HIDDEN_LAUNCH_ARG = '--hidden';
 
 function prefsPath(): string {
   return path.join(app.getPath('userData'), 'app-prefs.json');

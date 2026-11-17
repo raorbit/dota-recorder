@@ -44,10 +44,10 @@ import {
   applyLaunchAtLogin,
   getAutoUpdate,
   getLaunchAtLogin,
-  HIDDEN_LAUNCH_ARG,
   setAutoUpdate,
   setLaunchAtLogin,
 } from './app-prefs';
+import { isHiddenLaunch } from './login-item';
 import {
   BRIDGE_BASE,
   BRIDGE_TOKEN_ARG_PREFIX,
@@ -123,7 +123,7 @@ let trayHintShown = false;
 // Auto-start launches (login item) carry --hidden so the app boots straight to the tray. So does the
 // relaunch after an unattended update (the installer restarts the app; a short-lived marker file
 // says the install happened idle in the tray, so nobody asked for a window) — see bootstrap().
-let startHidden = process.argv.includes(HIDDEN_LAUNCH_ARG);
+let startHidden = isHiddenLaunch(process.argv);
 
 // Crash-supervision policy — bounded restart, re-entrancy / launch guards, OBS teardown on a core
 // crash — lives in SupervisionController so it can be unit-tested without Electron. Here we just wire
@@ -164,9 +164,16 @@ const supervisor = new JvmSupervisor({
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
-  app.on('second-instance', () => {
-    // A second launch (Start menu, taskbar) means "show me the app": bring the window back from the
-    // tray, re-creating it if it was closed.
+  app.on('second-instance', (_event, argv) => {
+    // A second launch that carries --hidden asked for the tray, and the app is already there. It
+    // happens at sign-in when Windows holds more than one login entry for the app: the first starts
+    // it, and the rest must not open a window nobody asked for.
+    if (isHiddenLaunch(argv)) {
+      logLine('a second launch asked for the tray; leaving the window as it is');
+      return;
+    }
+    // Any other second launch (Start menu, taskbar) means "show me the app": bring the window back
+    // from the tray, re-creating it if it was closed.
     showWindow();
   });
 
