@@ -6,7 +6,7 @@
 import { app } from 'electron';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { HIDDEN_LAUNCH_ARG } from './login-item';
+import { loginItemWrites } from './login-item';
 
 export interface AppPrefs {
   // Start the app automatically when the user signs in to Windows (hidden in the tray).
@@ -73,15 +73,12 @@ export function setAutoUpdate(value: boolean): boolean {
  * entry in PACKAGED builds: in dev the executable is the dev electron binary inside
  * node_modules, so registering a login item would point Windows at a broken dev launch.
  * We still persist the intent in dev (so the toggle reflects/round-trips), and the
- * installed app applies it for real on its next launch.
+ * installed app applies it for real on its next launch. Each launch also removes the
+ * entry an older version left under another name (see login-item.ts).
  */
 export function applyLaunchAtLogin(): void {
   if (!app.isPackaged) return;
-  const openAtLogin = readPrefs().launchAtLogin;
-  app.setLoginItemSettings({
-    openAtLogin,
-    // Auto-start carries --hidden so the app boots straight to the tray; a manual
-    // launch (no arg) opens the window as usual.
-    args: openAtLogin ? [HIDDEN_LAUNCH_ARG] : [],
-  });
+  for (const write of loginItemWrites(readPrefs().launchAtLogin)) {
+    app.setLoginItemSettings(write);
+  }
 }
