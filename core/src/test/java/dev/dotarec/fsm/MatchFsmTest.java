@@ -598,6 +598,48 @@ class MatchFsmTest {
     }
 
     @Test
+    void matchIdAppearingAfterAnIdlessGameWasInProgress_rollsInsteadOfBeingAdopted() {
+        // A local lobby: not a demo map, match id 0 throughout. Left without a POST_GAME, then a
+        // real match loads. Nothing but the id tells the two apart before HERO_SELECTION.
+        fsm.onFrame(frame()
+                .state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")
+                .activity("playing")
+                .hero("npc_dota_hero_lina")
+                .kills(7)
+                .build());
+        assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
+
+        fsm.onFrame(frame().matchId(222L)
+                .state("DOTA_GAMERULES_STATE_WAIT_FOR_PLAYERS_TO_LOAD").noHero().activity(null).build());
+
+        assertThat(obs.stopCalls).isEqualTo(1);
+        assertThat(fsm.getState()).isEqualTo(MatchState.IDLE);
+        assertThat(matches.findAll()).singleElement()
+                .satisfies(row -> {
+                    assertThat(row.dotaMatchId()).isNull();
+                    assertThat(row.kills()).isEqualTo(7);
+                });
+    }
+
+    @Test
+    void matchIdArrivingBeforeGameInProgress_isAdoptedByTheSameRecording() {
+        // The first frames of a draft may not carry the id yet. Until the game is in progress a
+        // late id is this match's own and must not split it.
+        fsm.onFrame(frame()
+                .state("DOTA_GAMERULES_STATE_HERO_SELECTION").noHero().activity(null).build());
+        assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
+
+        fsm.onFrame(frame().matchId(111L)
+                .state("DOTA_GAMERULES_STATE_STRATEGY_TIME").noHero().activity(null).build());
+        fsm.onFrame(frame().matchId(111L)
+                .state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
+
+        assertThat(obs.stopCalls).isZero();
+        assertThat(obs.startCalls).isEqualTo(1);
+        assertThat(fsm.currentSession().getMatchId()).isEqualTo(111L);
+    }
+
+    @Test
     void mapNamelessHeartbeatWhileRecordingDemo_doesNotRoll() {
         SettingsStore.Settings demoOn = new SettingsStore.Settings();
         demoOn.recordDemoMatches = true;
