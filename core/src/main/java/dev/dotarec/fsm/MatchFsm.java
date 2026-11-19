@@ -618,6 +618,13 @@ public class MatchFsm {
             // A genuinely different match id while recording -> the previous match ended; roll.
             return true;
         }
+        if (currentMatchId == 0L && nextMatchId != 0L && s.hasReachedGameInProgress()) {
+            // A game that reached GAME_IN_PROGRESS without a match id (a Hero Demo, a local lobby)
+            // never gains one, so an id appearing now is the NEXT match's. Its loading frames carry
+            // the id before its HERO_SELECTION does; without this roll observe() stamps that id, and
+            // that match's 0/0/0, onto this recording, and enrichment files it under the wrong match.
+            return true;
+        }
         // A demo<->non-demo flip mid-recording is a session change the other guards can be blind
         // to: a demo that follows a real match brings no new id (its id is 0), and a session
         // entered straight at GAME_IN_PROGRESS skips the arm states. Keyed on the demo flag (a
