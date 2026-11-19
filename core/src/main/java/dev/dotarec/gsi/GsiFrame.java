@@ -47,8 +47,15 @@ public record GsiFrame(
         int radiantScore,
         int direScore) {
 
-    /** The {@code map.name} Dota reports for Hero Demo mode (captured live; see the GSI fixture). */
+    /** The {@code map.name} of the default Hero Demo map (captured live; see the GSI fixture). */
     public static final String HERO_DEMO_MAP = "hero_demo_main";
+
+    /**
+     * What every Hero Demo map name starts with. The demo addon ships a map per season
+     * ({@code hero_demo_main}, {@code hero_demo_frostivus}, {@code hero_demo_winter},
+     * {@code hero_demo_spring}, {@code hero_demo_desert}), so one exact name misses the others.
+     */
+    public static final String HERO_DEMO_MAP_PREFIX = "hero_demo";
 
     /**
      * True when this frame comes from Hero Demo mode. Keyed off {@code map.name} rather than
@@ -56,6 +63,6 @@ public record GsiFrame(
      * {@code mapName} is null on heartbeat/menu frames (no map block), which is safely non-demo.
      */
     public boolean isHeroDemo() {
-        return HERO_DEMO_MAP.equals(mapName);
+        return mapName != null && mapName.startsWith(HERO_DEMO_MAP_PREFIX);
     }
 }

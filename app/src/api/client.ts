@@ -212,7 +212,7 @@ export interface Settings {
   // clip's span. Mirrors SettingsStore.Settings.autoClipOnRampage / clipPaddingSeconds.
   readonly autoClipOnRampage: boolean;
   readonly clipPaddingSeconds: number;
-  // When true the recorder also captures Hero Demo sessions (GSI map "hero_demo_main");
+  // When true the recorder also captures Hero Demo sessions (a GSI map named "hero_demo*");
   // off by default so the library only collects real matches.
   readonly recordDemoMatches: boolean;
   // Not a setting, so never sent back. With the encoder on Auto: the hardware encoder token

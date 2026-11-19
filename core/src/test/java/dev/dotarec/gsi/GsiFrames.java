@@ -52,7 +52,12 @@ public final class GsiFrames {
 
     /** Models a Hero Demo frame: map {@code hero_demo_main} with matchid 0, as the demo reports. */
     public GsiFrames heroDemo() {
-        this.mapName = GsiFrame.HERO_DEMO_MAP;
+        return heroDemo(GsiFrame.HERO_DEMO_MAP);
+    }
+
+    /** A Hero Demo frame on one of the demo's seasonal maps, e.g. {@code hero_demo_frostivus}. */
+    public GsiFrames heroDemo(String demoMap) {
+        this.mapName = demoMap;
         this.matchId = 0L;
         return this;
     }

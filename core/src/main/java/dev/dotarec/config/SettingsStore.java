@@ -163,7 +163,7 @@ public class SettingsStore {
          */
         public int clipPaddingSeconds = 8;
         /**
-         * When true the recorder also captures Hero Demo sessions (GSI map {@code hero_demo_main});
+         * When true the recorder also captures Hero Demo sessions (a GSI map named {@code hero_demo*});
          * the FSM otherwise skips them so the library only collects real matches. Defaults to false
          * naturally, so a legacy settings.json predating the field deserializes it off.
          */

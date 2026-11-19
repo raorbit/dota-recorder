@@ -24,6 +24,26 @@ class GsiPayloadTest {
     }
 
     @Test
+    void everyHeroDemoMapReadsAsHeroDemo() throws Exception {
+        // The maps the demo addon ships (dota_addons/hero_demo/maps); Dota picks among them.
+        for (String map : new String[] {
+            "hero_demo_main", "hero_demo_frostivus", "hero_demo_winter", "hero_demo_spring",
+            "hero_demo_desert"
+        }) {
+            String body = "{\"map\":{\"name\":\"" + map + "\",\"matchid\":\"0\","
+                    + "\"game_state\":\"DOTA_GAMERULES_STATE_GAME_IN_PROGRESS\"}}";
+            GsiFrame frame = MAPPER.readValue(body, GsiPayload.class).toFrame(1L, 2L);
+            assertThat(frame.isHeroDemo()).as(map).isTrue();
+        }
+        for (String map : new String[] {"start", "dota", ""}) {
+            String body = "{\"map\":{\"name\":\"" + map + "\",\"matchid\":\"0\","
+                    + "\"game_state\":\"DOTA_GAMERULES_STATE_GAME_IN_PROGRESS\"}}";
+            GsiFrame frame = MAPPER.readValue(body, GsiPayload.class).toFrame(1L, 2L);
+            assertThat(frame.isHeroDemo()).as("map '%s'", map).isFalse();
+        }
+    }
+
+    @Test
     void mapsRealFrameFieldForField() throws Exception {
         GsiFrame frame = parseFixture();
 

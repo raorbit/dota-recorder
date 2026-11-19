@@ -618,11 +618,11 @@ public class MatchFsm {
             // A genuinely different match id while recording -> the previous match ended; roll.
             return true;
         }
-        // A demo<->non-demo flip mid-recording is a session change the other two guards can be blind
-        // to: a Hero Demo has match id 0 (so the id guard can't fire against it), and a session
-        // entered straight at GAME_IN_PROGRESS skips the arm states. Keyed on the demo flag (map
-        // "hero_demo_main"), NOT a generic map-name diff -- the demo map name is the only one a live
-        // capture proves stable, whereas rolling on any name change would shred one real match into
+        // A demo<->non-demo flip mid-recording is a session change the other guards can be blind
+        // to: a demo that follows a real match brings no new id (its id is 0), and a session
+        // entered straight at GAME_IN_PROGRESS skips the arm states. Keyed on the demo flag (a
+        // "hero_demo*" map), NOT a generic map-name diff -- the demo map names are the only ones
+        // known to be stable, whereas rolling on any name change would shred one real match into
         // multiple rows if the client ever churns the name across phases. A null mapName
         // (heartbeat/menu frames) carries no identity and can never flip this.
         if (frame.mapName() != null
