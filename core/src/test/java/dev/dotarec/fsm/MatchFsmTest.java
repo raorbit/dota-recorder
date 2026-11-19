@@ -544,6 +544,60 @@ class MatchFsmTest {
     }
 
     @Test
+    void heroDemoOnASeasonalMap_withDemoRecordingOff_neverStartsRecording() {
+        // The demo addon ships a map per season. A gate that knew hero_demo_main alone recorded a
+        // demo on hero_demo_frostivus with the setting off.
+        fsm.onFrame(frame().heroDemo("hero_demo_frostivus")
+                .state("DOTA_GAMERULES_STATE_HERO_SELECTION").noHero().activity(null).build());
+        for (int i = 0; i < 5; i++) {
+            fsm.onFrame(frame().heroDemo("hero_demo_frostivus")
+                    .state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS").activity("playing").build());
+        }
+
+        assertThat(fsm.getState()).isEqualTo(MatchState.IDLE);
+        assertThat(obs.startCalls).isZero();
+        assertThat(matches.findAll()).isEmpty();
+    }
+
+    @Test
+    void nextMatchLoadingWhileRecordingSeasonalDemo_endsTheDemoWithoutThatMatchsId() {
+        SettingsStore.Settings demoOn = new SettingsStore.Settings();
+        demoOn.recordDemoMatches = true;
+        when(settings.get()).thenReturn(demoOn);
+
+        fsm.onFrame(frame().heroDemo("hero_demo_frostivus")
+                .state("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")
+                .activity("playing")
+                .hero("npc_dota_hero_abaddon")
+                .kills(53)
+                .deaths(1)
+                .build());
+        assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
+
+        // A match is found while the demo runs. Its loading frames come before its HERO_SELECTION,
+        // carry its id already and a player block back at 0/0/0.
+        fsm.onFrame(frame().matchId(222L)
+                .state("DOTA_GAMERULES_STATE_WAIT_FOR_PLAYERS_TO_LOAD").noHero().activity(null).build());
+
+        assertThat(obs.stopCalls).isEqualTo(1);
+        assertThat(fsm.getState()).as("a loading frame arms nothing").isEqualTo(MatchState.IDLE);
+        assertThat(matches.findAll()).singleElement()
+                .satisfies(row -> {
+                    assertThat(row.dotaMatchId()).as("the demo is not that match").isNull();
+                    assertThat(row.hero()).isEqualTo("npc_dota_hero_abaddon");
+                    assertThat(row.kills()).as("the next match's zeros stay out").isEqualTo(53);
+                    assertThat(row.deaths()).isEqualTo(1);
+                });
+
+        fsm.onFrame(frame().matchId(222L)
+                .state("DOTA_GAMERULES_STATE_HERO_SELECTION").noHero().activity(null).build());
+
+        assertThat(fsm.getState()).isEqualTo(MatchState.RECORDING);
+        assertThat(obs.startCalls).isEqualTo(2);
+        assertThat(fsm.currentSession().getMatchId()).isEqualTo(222L);
+    }
+
+    @Test
     void mapNamelessHeartbeatWhileRecordingDemo_doesNotRoll() {
         SettingsStore.Settings demoOn = new SettingsStore.Settings();
         demoOn.recordDemoMatches = true;
